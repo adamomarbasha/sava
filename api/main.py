@@ -3,7 +3,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, HttpUrl
 from sqlalchemy import text
-from db import engine, init_db
+from .db import engine, init_db
 
 app = FastAPI()
 
@@ -42,13 +42,19 @@ def create_bookmark(b: BookmarkIn):
     platform = detect_platform(str(b.url))
     try:
         with engine.begin() as conn:
-            row = conn.execute(
+            # Insert the bookmark
+            result = conn.execute(
                 text("""
                     INSERT INTO bookmarks (url, title, note, platform)
                     VALUES (:url, :title, :note, :platform)
-                    RETURNING id, url, title, note, platform, created_at
                 """),
                 {"url": str(b.url), "title": b.title, "note": b.note, "platform": platform}
+            )
+            # Get the inserted bookmark
+            bookmark_id = result.lastrowid
+            row = conn.execute(
+                text("SELECT id, url, title, note, platform, created_at FROM bookmarks WHERE id = :id"),
+                {"id": bookmark_id}
             ).mappings().one()
             return dict(row)
     except Exception as e:
@@ -59,7 +65,7 @@ def list_bookmarks(query: str | None = None, platform: str | None = None):
     sql = "SELECT id, url, title, note, platform, created_at FROM bookmarks WHERE 1=1"
     params: dict = {}
     if query:
-        sql += " AND (url ILIKE :q OR COALESCE(title,'') ILIKE :q OR COALESCE(note,'') ILIKE :q)"
+        sql += " AND (url LIKE :q OR COALESCE(title,'') LIKE :q OR COALESCE(note,'') LIKE :q)"
         params["q"] = f"%{query}%"
     if platform:
         sql += " AND platform = :p"
@@ -69,7 +75,6 @@ def list_bookmarks(query: str | None = None, platform: str | None = None):
         rows = conn.execute(text(sql), params).mappings().all()
         return [dict(r) for r in rows]
 
-# allow requests from your frontend
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
