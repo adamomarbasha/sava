@@ -1,26 +1,229 @@
 @import "tailwindcss";
 
 :root {
+  
   --background: #ffffff;
-  --foreground: #171717;
+  --surface: #ffffff;
+  --foreground: #111827;
+  --muted: #f9fafb;
+  --muted-foreground: #374151;
+  --border: #e5e7eb;
+
+  
+  --brand: #2e2e2e;
+  --brand-light: #4b4b4b;
+  --brand-dark: #0f0f0f;
+
+  --ring: var(--brand);
 }
 
 @theme inline {
   --color-background: var(--background);
+  --color-surface: var(--surface);
   --color-foreground: var(--foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-border: var(--border);
+  --color-brand: var(--brand);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+
+[data-reveal] { 
+  opacity: 0; 
+  transform: translateY(20px); 
+  transition: opacity 0.8s cubic-bezier(0.4, 0, 0.2, 1), transform 0.8s cubic-bezier(0.4, 0, 0.2, 1); 
 }
+[data-reveal].is-visible { 
+  opacity: 1; 
+  transform: translateY(0); 
+}
+
+html, body { height: 100%; }
 
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-geist-sans), system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
+}
+
+.container-page {
+  max-width: 1120px;
+  margin-inline: auto;
+  padding-inline: 1.5rem;
+}
+
+.card-elevated {
+  border: 1px solid var(--border);
+  background: var(--surface);
+  border-radius: 1rem;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.06);
+}
+
+.link { color: var(--brand); }
+
+.navbar {
+  position: sticky;
+  top: 0;
+  z-index: 50;
+
+  background: linear-gradient(
+    135deg,
+    #5a7bb2,  
+    #6d8fbe,  
+    #82a3cc,  
+    #9cb7d8,  
+    #6d87b3,  
+    #5a7bb2,  
+    #6d8fbe   
+
+
+
+  );
+  color: #ffffff;
+
+  padding: 0.5rem 0;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-weight: 600;
+
+  border-bottom: 1px solid rgba(255,255,255,0.08);
+  box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+}
+
+
+
+
+.search-bar {
+  background: #ffffff;
+  border: 2px solid var(--border);
+  border-radius: 0.75rem;
+  padding: 0.875rem 1rem;
+  color: var(--foreground);
+  outline: none;
+  font-size: 0.95rem;
+  width: 300px;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+  transition: none;
+}
+
+.search-bar::placeholder { 
+  color: #6b7280; 
+}
+
+
+.search-bar:focus {
+  border-color: var(--border);
+  box-shadow: none;
+}
+
+
+.btn-primary-clean {
+  background: #111111;
+  color: #ffffff;
+  border-radius: 0.75rem;
+  border: 1px solid #0f0f0f;
+  font-weight: 600;
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  position: relative;
+  overflow: hidden;
+}
+
+.btn-primary-clean:hover { 
+  background: #1a1a1a; 
+  transform: translateY(-1px);
+  box-shadow: 0 8px 25px rgba(0,0,0,0.2);
+}
+
+.btn-primary-clean:active { 
+  background: #0a0a0a; 
+  transform: translateY(0px);
+}
+
+
+.platform-filter-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.625rem 1rem;
+  border-radius: 9999px;
+  border: 2px solid #e5e7eb;
+  background: #ffffff;
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: #6b7280;
+  cursor: pointer;
+  transition: transform 0.2s ease;
+}
+
+.platform-filter-pill:hover {
+  transform: scale(1.05);
+  box-shadow: none;
+}
+
+
+.bookmark-card {
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  position: relative;
+  overflow: hidden;
+}
+
+.bookmark-card:hover {
+  transform: translateY(-4px) scale(1.02);
+  box-shadow: 0 20px 40px rgba(0,0,0,0.12);
+}
+
+
+.line-clamp-2 {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.line-clamp-3 {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+
+.platform-icon-container {
+  background: rgba(255, 255, 255, 0.95);
+  backdrop-filter: blur(8px);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+}
+
+.logo-font {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  font-weight: 700;
+  letter-spacing: -0.025em;
+  text-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+* {
+  transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+
+button:focus-visible,
+input:focus-visible {
+  outline: none;
+}
+
+
+@media (max-width: 768px) {
+  .search-bar {
+    width: 100%;
+    max-width: 280px;
+  }
+  
+  .platform-filter {
+    font-size: 0.875rem;
+    padding: 0.5rem 0.75rem;
+  }
 }
