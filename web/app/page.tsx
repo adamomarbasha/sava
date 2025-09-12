@@ -25,15 +25,19 @@ function extractYouTubeId(url: string): string | null {
   return null;
 }
 
+function normalizePlatform(platform?: string): string {
+  const value = (platform || "").toLowerCase();
+  if (!value || ["youtube", "tiktok", "instagram", "twitter", "web"].indexOf(value) === -1) {
+    return "web";
+  }
+  return value;
+}
+
 function getThumbnail(url: string, platform?: string): string | null {
   const ytId = extractYouTubeId(url);
   if (platform === "youtube" && ytId) return `https://img.youtube.com/vi/${ytId}/maxresdefault.jpg`;
-  try {
-    const u = new URL(url);
-    return `https://www.google.com/s2/favicons?sz=128&domain=${u.hostname}`;
-  } catch {
-    return null;
-  }
+  
+  return null;
 }
 
 function PlatformIcon({ platform, size = "w-5 h-5" }: { platform: string; size?: string }) {
@@ -132,6 +136,7 @@ function PlatformFilterButton({
 
   return (
     <button
+      type="button"
       onClick={onClick}
       className={`inline-flex items-center gap-2 px-4 py-2.5 rounded-full border-2 text-sm font-medium transition-all duration-200 transform hover:scale-105 ${
         isActive 
@@ -174,7 +179,8 @@ export default function Home() {
         console.log('Current search:', search);
         console.log('Bookmarks by platform:');
         const byPlatform = bookmarks.reduce((acc: any, bookmark) => {
-          acc[bookmark.platform || 'undefined'] = (acc[bookmark.platform || 'undefined'] || 0) + 1;
+          const p = normalizePlatform(bookmark.platform);
+          acc[p] = (acc[p] || 0) + 1;
           return acc;
         }, {});
         console.table(byPlatform);
@@ -189,7 +195,7 @@ export default function Home() {
             bookmark.title?.toLowerCase().includes(search.toLowerCase()) ||
             bookmark.url.toLowerCase().includes(search.toLowerCase()) ||
             bookmark.note?.toLowerCase().includes(search.toLowerCase());
-          const matchesPlatform = !platformFilter || bookmark.platform === platformFilter;
+          const matchesPlatform = !platformFilter || normalizePlatform(bookmark.platform) === platformFilter;
           return matchesSearch && matchesPlatform;
         });
         console.log('Filtered results:', filtered.length);
@@ -239,7 +245,7 @@ export default function Home() {
     }, { threshold: 0.1 });
     nodes.forEach((n) => obs.observe(n));
     return () => obs.disconnect();
-  }, [bookmarks]);
+  }, [bookmarks, platformFilter, search]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -266,11 +272,11 @@ export default function Home() {
   const platformCounts = useMemo(() => {
     return {
       all: bookmarks.length,
-      youtube: bookmarks.filter(b => b.platform === 'youtube').length,
-      tiktok: bookmarks.filter(b => b.platform === 'tiktok').length,
-      instagram: bookmarks.filter(b => b.platform === 'instagram').length,
-      twitter: bookmarks.filter(b => b.platform === 'twitter').length,
-      web: bookmarks.filter(b => b.platform === 'web').length,
+      youtube: bookmarks.filter(b => normalizePlatform(b.platform) === 'youtube').length,
+      tiktok: bookmarks.filter(b => normalizePlatform(b.platform) === 'tiktok').length,
+      instagram: bookmarks.filter(b => normalizePlatform(b.platform) === 'instagram').length,
+      twitter: bookmarks.filter(b => normalizePlatform(b.platform) === 'twitter').length,
+      web: bookmarks.filter(b => normalizePlatform(b.platform) === 'web').length,
     };
   }, [bookmarks]);
 
@@ -287,7 +293,7 @@ export default function Home() {
     }
     
     if (platformFilter) {
-      result = result.filter(bookmark => bookmark.platform === platformFilter);
+      result = result.filter(bookmark => normalizePlatform(bookmark.platform) === platformFilter);
     }
     
     return result;
@@ -441,7 +447,7 @@ export default function Home() {
           
           <div 
             key={`${platformFilter}-${search}-${filtered.length}`} 
-            className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6"
+            className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8"
           >
             {filtered.map((bm) => {
               const thumb = getThumbnail(bm.url, bm.platform);
@@ -449,74 +455,60 @@ export default function Home() {
               return (
                 <Card 
                   key={bm.id} 
-                  className="bookmark-card opacity-0 translate-y-3 will-change-transform rounded-xl shadow-md hover:shadow-xl border border-gray-200 bg-white overflow-hidden transition-all duration-300 hover:scale-[1.02]" 
+                  className="bookmark-card opacity-0 translate-y-3 will-change-transform rounded-xl shadow-md hover:shadow-xl border border-gray-200 bg-white overflow-hidden transition-all duration-300 hover:scale-105 h-[320px] flex flex-col" 
                   data-reveal
                 >
-                  <CardContent className="p-0">
-                    <div className="relative">
-                      
-                      <div className="absolute top-3 right-3 z-10">
-                        <div className="bg-white/95 backdrop-blur-sm rounded-full p-2 shadow-sm border border-gray-100">
-                          <PlatformIcon platform={bm.platform || 'web'} size="w-4 h-4" />
-                        </div>
+                  <CardContent className="p-0 flex flex-col h-full relative">
+                    {/* Platform Icon - Top Right of Card */}
+                    <div className="absolute top-2 right-2 z-10">
+                      <div className="bg-white/90 backdrop-blur-sm rounded-lg p-1.5 shadow-lg border border-white/20">
+                        <PlatformIcon platform={bm.platform || 'web'} size="w-3.5 h-3.5" />
                       </div>
+                    </div>
+                    
+                    <div className="flex flex-col h-full">
 
-                      
-                      <a 
-                        href={bm.url} 
-                        target="_blank" 
-                        rel="noopener noreferrer" 
-                        className="block group"
-                      >
-                        {thumb ? (
-                          <img 
-                            src={thumb} 
-                            alt="thumbnail" 
-                            className="w-full h-40 object-cover group-hover:scale-105 transition-transform duration-300" 
-                          />
-                        ) : (
-                          <div className="w-full h-40 bg-gradient-to-br from-gray-100 to-gray-200 grid place-items-center text-3xl">
-                            🔗
-                          </div>
-                        )}
-                      </a>
-
-                      
-                      <div className="p-4">
-                        
+                      {/* Title - Top */}
+                      <div className="p-4 pb-2">
                         <a 
                           href={bm.url} 
                           target="_blank" 
                           rel="noopener noreferrer" 
-                          className="block text-gray-900 hover:text-blue-600 font-bold text-base mb-2 leading-tight transition-colors duration-200 line-clamp-2"
+                          className="block text-gray-900 hover:text-blue-600 font-semibold text-base leading-tight transition-colors duration-200 line-clamp-2"
                         >
                           {bm.title || bm.note || new URL(bm.url).hostname}
                         </a>
-                        
-                        
-                        {bm.note && bm.title && (
-                          <p className="text-gray-600 text-sm mb-3 leading-relaxed line-clamp-2">
-                            {bm.note}
-                          </p>
-                        )}
-                        
-                        
-                        <div className="flex items-center justify-between text-xs pt-2 border-t border-gray-100">
-                          <span className="text-gray-400">
-                            {new Date(bm.created_at).toLocaleDateString()}
-                          </span>
-                          <a 
-                            href={bm.url}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="text-blue-500 hover:text-blue-600 font-medium transition-colors duration-200 flex items-center gap-1"
-                          >
-                            Visit 
-                            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
-                            </svg>
-                          </a>
-                        </div>
+                      </div>
+
+                      {/* Thumbnail Container - Fixed 16:9 */}
+                      <div className="flex-1 px-4">
+                        <a 
+                          href={bm.url} 
+                          target="_blank" 
+                          rel="noopener noreferrer" 
+                          className="block group h-full"
+                        >
+                          <div className="w-full h-full aspect-video overflow-hidden rounded-md bg-gray-100">
+                            {thumb ? (
+                              <img 
+                                src={thumb} 
+                                alt="thumbnail" 
+                                className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300" 
+                              />
+                            ) : (
+                              <div className="w-full h-full flex items-center justify-center">
+                                <PlatformIcon platform={bm.platform || 'web'} size="w-12 h-12" />
+                              </div>
+                            )}
+                          </div>
+                        </a>
+                      </div>
+
+                      {/* Date - Bottom */}
+                      <div className="p-4 pt-3 mt-auto">
+                        <span className="text-gray-500 text-sm font-medium">
+                          {new Date(bm.created_at).toLocaleDateString()}
+                        </span>
                       </div>
                     </div>
                   </CardContent>
@@ -525,7 +517,7 @@ export default function Home() {
             })}
 
             {filtered.length === 0 && !fetchingBookmarks && (
-              <div className="text-center text-gray-500 py-20 md:col-span-2 lg:col-span-3 xl:col-span-4">
+              <div className="text-center text-gray-500 py-20 md:col-span-2 lg:col-span-3">
                 <h3 className="text-xl font-semibold mb-2">No bookmarks found</h3>
                 <p className="text-gray-400">
                   {search || platformFilter 
@@ -537,7 +529,7 @@ export default function Home() {
             )}
 
             {fetchingBookmarks && (
-              <div className="text-center text-gray-500 py-20 md:col-span-2 lg:col-span-3 xl:col-span-4">
+              <div className="text-center text-gray-500 py-20 md:col-span-2 lg:col-span-3">
                 <Spinner />
                 <h3 className="text-xl font-semibold mb-2 mt-4">Loading your bookmarks...</h3>
                 <p className="text-gray-400">Please wait while we fetch your saved links</p>
