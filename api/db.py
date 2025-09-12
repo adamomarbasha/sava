@@ -7,7 +7,6 @@ from dotenv import load_dotenv
 ENV_PATH = Path(__file__).with_name(".env")
 load_dotenv(dotenv_path=ENV_PATH)
 
-# Use SQLite as default if no DATABASE_URL is provided
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./bookmarks.db")
 
 try:
@@ -21,12 +20,28 @@ except Exception as e:
 def init_db():
     with engine.begin() as conn:
         conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                email TEXT UNIQUE NOT NULL,
+                password_hash TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        """))
+        
+        conn.execute(text("""
             CREATE TABLE IF NOT EXISTS bookmarks (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 url TEXT NOT NULL,
                 title TEXT,
                 note TEXT,
                 platform TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                user_id INTEGER NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users (id)
             );
         """))
+        
+        try:
+            conn.execute(text("ALTER TABLE bookmarks ADD COLUMN user_id INTEGER"))
+        except:
+            pass
