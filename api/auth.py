@@ -6,7 +6,7 @@ from passlib.context import CryptContext
 from fastapi import HTTPException, status, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy import text
-from .db import engine
+from db import engine, SessionLocal
 
 SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key-change-in-production")
 ALGORITHM = "HS256"
@@ -33,12 +33,15 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     return encoded_jwt
 
 def get_user_by_email(email: str):
-    with engine.begin() as conn:
-        result = conn.execute(
+    db = SessionLocal()
+    try:
+        result = db.execute(
             text("SELECT id, email, password_hash, created_at FROM users WHERE LOWER(email) = LOWER(:email)"),
             {"email": email.strip()}
         ).mappings().first()
         return dict(result) if result else None
+    finally:
+        db.close()
 
 def authenticate_user(email: str, password: str):
     user = get_user_by_email(email)
