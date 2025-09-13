@@ -96,7 +96,10 @@ export default function LoginPage() {
                   id="email"
                   type="email"
                   value={email}
-                  onChange={(e) => setEmail(e.target.value)}
+                  onChange={(e) => {
+                    setEmail(e.target.value);
+                    if (error) setError(""); // Clear error when user starts typing
+                  }}
                   placeholder="you@example.com"
                   required
                 />
@@ -108,8 +111,11 @@ export default function LoginPage() {
                   id="password"
                   type="password"
                   value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  placeholder="••••••••"
+                  onChange={(e) => {
+                    setPassword(e.target.value);
+                    if (error) setError(""); // Clear error when user starts typing
+                  }}
+                  placeholder=""
                   required
                 />
               </div>
