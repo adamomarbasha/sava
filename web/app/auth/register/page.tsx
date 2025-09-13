@@ -17,10 +17,38 @@ export default function RegisterPage() {
   const router = useRouter();
   const { login } = useAuth();
 
+  // Basic email validation function
+  const validateEmail = (email: string): string | null => {
+    if (!email.trim()) {
+      return "Email is required";
+    }
+    
+    const emailRegex = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
+    if (!emailRegex.test(email)) {
+      return "Please enter a valid email address";
+    }
+    
+    // Check for obviously fake patterns
+    const localPart = email.split('@')[0];
+    if (/^[a-zA-Z]+\d{8,}$/.test(localPart)) {
+      return "Please use a real email address";
+    }
+    
+    return null;
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
     setError("");
+
+    // Validate email first
+    const emailError = validateEmail(email);
+    if (emailError) {
+      setError(emailError);
+      setLoading(false);
+      return;
+    }
 
     if (password !== confirmPassword) {
       setError("Passwords do not match");
@@ -62,7 +90,17 @@ export default function RegisterPage() {
         }
       } else {
         const errorData = await response.json().catch(() => ({} as any));
-        setError(errorData.detail || "Registration failed");
+        if (response.status === 400 && errorData.detail?.toLowerCase().includes('already')) {
+          setError("This email is already registered. Please use a different email or try logging in.");
+        } else if (response.status === 400 && (
+          errorData.detail?.toLowerCase().includes('email') ||
+          errorData.detail?.toLowerCase().includes('domain') ||
+          errorData.detail?.toLowerCase().includes('valid')
+        )) {
+          setError(errorData.detail || "Please enter a valid email address");
+        } else {
+          setError(errorData.detail || "Registration failed");
+        }
       }
     } catch (err) {
       setError("Network error. Please try again.");
@@ -106,7 +144,10 @@ export default function RegisterPage() {
                   id="email"
                   type="email"
                   value={email}
-                  onChange={(e) => setEmail(e.target.value)}
+                  onChange={(e) => {
+                    setEmail(e.target.value);
+                    if (error) setError(""); // Clear error when user starts typing
+                  }}
                   placeholder="you@example.com"
                   required
                 />
@@ -118,7 +159,10 @@ export default function RegisterPage() {
                   id="password"
                   type="password"
                   value={password}
-                  onChange={(e) => setPassword(e.target.value)}
+                  onChange={(e) => {
+                    setPassword(e.target.value);
+                    if (error) setError(""); // Clear error when user starts typing
+                  }}
                   placeholder="At least 6 characters"
                   required
                 />
@@ -130,7 +174,10 @@ export default function RegisterPage() {
                   id="confirm"
                   type="password"
                   value={confirmPassword}
-                  onChange={(e) => setConfirmPassword(e.target.value)}
+                  onChange={(e) => {
+                    setConfirmPassword(e.target.value);
+                    if (error) setError(""); // Clear error when user starts typing
+                  }}
                   placeholder="Re-enter your password"
                   required
                 />

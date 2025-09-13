@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { useAuth } from "./contexts/AuthContext";
 import { useRouter } from "next/navigation";
-import { Button, Card, CardContent, Input, Label, Spinner, Badge } from "./components/UI";
+import { Button, Card, CardContent, Input, Label, Spinner, Badge, Alert } from "./components/UI";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://127.0.0.1:8000";
 
@@ -13,29 +13,114 @@ interface Bookmark {
   title?: string;
   note?: string;
   platform?: string;
+  author?: string;
+  thumbnail_url?: string;
+  published_at?: string;
   created_at: string;
+  meta?: {
+    video_id?: string;
+    channel_id?: string;
+    duration_seconds?: number;
+    view_count?: number;
+    like_count?: number;
+    tags?: string[];
+  };
 }
 
 function extractYouTubeId(url: string): string | null {
   try {
     const u = new URL(url);
-    if (u.hostname.includes("youtu.be")) return u.pathname.slice(1);
-    if (u.hostname.includes("youtube.com")) return u.searchParams.get("v");
+    
+    if (u.hostname.includes("youtu.be")) {
+      return u.pathname.slice(1).split('?')[0];
+    }
+    
+    if (u.hostname.includes("youtube.com")) {
+      const videoId = u.searchParams.get("v");
+      if (videoId) {
+        return videoId.split('&')[0];
+      }
+    }
   } catch {}
   return null;
 }
 
 function normalizePlatform(platform?: string): string {
   const value = (platform || "").toLowerCase();
-  if (!value || ["youtube", "tiktok", "instagram", "twitter", "web"].indexOf(value) === -1) {
+  if (!value || ["youtube", "tiktok", "instagram", "twitter", "linkedin", "reddit", "pinterest", "snapchat", "facebook", "web"].indexOf(value) === -1) {
     return "web";
   }
   return value;
 }
 
+function getYouTubeThumbnails(videoId: string): string[] {
+  return [
+    `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`,
+    `https://img.youtube.com/vi/${videoId}/hqdefault.jpg`,
+    `https://img.youtube.com/vi/${videoId}/mqdefault.jpg`,
+    `https://img.youtube.com/vi/${videoId}/default.jpg`
+  ];
+}
+
+function SmartYouTubeThumbnail({ 
+  videoId, 
+  alt = "thumbnail", 
+  className = "" 
+}: { 
+  videoId: string; 
+  alt?: string; 
+  className?: string; 
+}) {
+  const [imgSrc, setImgSrc] = useState(() => `https://img.youtube.com/vi/${videoId}/hqdefault.jpg`);
+  const [hasError, setHasError] = useState(false);
+  
+  useEffect(() => {
+    setImgSrc(`https://img.youtube.com/vi/${videoId}/hqdefault.jpg`);
+    setHasError(false);
+  }, [videoId]);
+  
+  const handleImageError = () => {
+    console.log(`Thumbnail failed for ${videoId}: ${imgSrc}`);
+    
+    if (imgSrc.includes('hqdefault.jpg')) {
+      setImgSrc(`https://img.youtube.com/vi/${videoId}/mqdefault.jpg`);
+    } else if (imgSrc.includes('mqdefault.jpg')) {
+      setImgSrc(`https://img.youtube.com/vi/${videoId}/default.jpg`);
+    } else {
+      console.log(`All thumbnails failed for ${videoId}, showing placeholder`);
+      setHasError(true);
+    }
+  };
+  
+  const handleImageLoad = () => {
+    console.log(`Thumbnail loaded successfully for ${videoId}: ${imgSrc}`);
+    setHasError(false);
+  };
+  
+  if (hasError) {
+    return (
+      <div className={`w-full h-full flex items-center justify-center bg-gray-100 ${className}`}>
+        <PlatformIcon platform="youtube" size="w-12 h-12" />
+      </div>
+    );
+  }
+  
+  return (
+    <img 
+      src={imgSrc}
+      alt={alt}
+      className={className}
+      onError={handleImageError}
+      onLoad={handleImageLoad}
+    />
+  );
+}
+
 function getThumbnail(url: string, platform?: string): string | null {
   const ytId = extractYouTubeId(url);
-  if (platform === "youtube" && ytId) return `https://img.youtube.com/vi/${ytId}/maxresdefault.jpg`;
+  if (platform === "youtube" && ytId) {
+    return `https://img.youtube.com/vi/${ytId}/maxresdefault.jpg`;
+  }
   
   return null;
 }
@@ -60,6 +145,31 @@ function PlatformIcon({ platform, size = "w-5 h-5" }: { platform: string; size?:
     twitter: (
       <svg className={`${size} text-black`} fill="currentColor" viewBox="0 0 24 24">
         <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/>
+      </svg>
+    ),
+    linkedin: (
+      <svg className={`${size} text-blue-700`} fill="currentColor" viewBox="0 0 24 24">
+        <path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433c-1.144 0-2.063-.926-2.063-2.065 0-1.138.92-2.063 2.063-2.063 1.14 0 2.064.925 2.064 2.063 0 1.139-.925 2.065-2.064 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z"/>
+      </svg>
+    ),
+    reddit: (
+      <svg className={`${size} text-orange-600`} fill="currentColor" viewBox="0 0 24 24">
+        <path d="M12 0A12 12 0 0 0 0 12a12 12 0 0 0 12 12 12 12 0 0 0 12-12A12 12 0 0 0 12 0zm5.01 4.744c.688 0 1.25.561 1.25 1.249a1.25 1.25 0 0 1-2.498.056l-2.597-.547-.8 3.747c1.824.07 3.48.632 4.674 1.488.308-.309.73-.491 1.207-.491.968 0 1.754.786 1.754 1.754 0 .716-.435 1.333-1.01 1.614a3.111 3.111 0 0 1 .042.52c0 2.694-3.13 4.87-7.004 4.87-3.874 0-7.004-2.176-7.004-4.87 0-.183.015-.366.043-.534A1.748 1.748 0 0 1 4.028 12c0-.968.786-1.754 1.754-1.754.463 0 .898.196 1.207.49 1.207-.883 2.878-1.43 4.744-1.487l.885-4.182a.342.342 0 0 1 .14-.197.35.35 0 0 1 .238-.042l2.906.617a1.214 1.214 0 0 1 1.108-.701zM9.25 12C8.561 12 8 12.562 8 13.25c0 .687.561 1.248 1.25 1.248.687 0 1.248-.561 1.248-1.249 0-.688-.561-1.249-1.249-1.249zm5.5 0c-.687 0-1.248.561-1.248 1.25 0 .687.561 1.248 1.249 1.248.688 0 1.249-.561 1.249-1.249 0-.687-.562-1.249-1.25-1.249zm-5.466 3.99a.327.327 0 0 0-.231.094.33.33 0 0 0 0 .463c.842.842 2.484.913 2.961.913.477 0 2.105-.056 2.961-.913a.361.361 0 0 0 .029-.463.33.33 0 0 0-.464 0c-.547.533-1.684.73-2.512.73-.828 0-1.979-.196-2.512-.73a.326.326 0 0 0-.232-.095z"/>
+      </svg>
+    ),
+    pinterest: (
+      <svg className={`${size} text-red-600`} fill="currentColor" viewBox="0 0 24 24">
+        <path d="M12.017 0C5.396 0 .029 5.367.029 11.987c0 5.079 3.158 9.417 7.618 11.174-.105-.949-.199-2.403.041-3.439.219-.937 1.406-5.957 1.406-5.957s-.359-.72-.359-1.781c0-1.663.967-2.911 2.168-2.911 1.024 0 1.518.769 1.518 1.688 0 1.029-.653 2.567-.992 3.992-.285 1.193.6 2.165 1.775 2.165 2.128 0 3.768-2.245 3.768-5.487 0-2.861-2.063-4.869-5.008-4.869-3.41 0-5.409 2.562-5.409 5.199 0 1.033.394 2.143.889 2.741.097.118.112.221.083.342-.09.377-.293 1.199-.334 1.363-.053.225-.172.271-.402.165-1.495-.69-2.433-2.878-2.433-4.646 0-3.776 2.748-7.252 7.92-7.252 4.158 0 7.392 2.967 7.392 6.923 0 4.135-2.607 7.462-6.233 7.462-1.214 0-2.357-.629-2.748-1.378 0 0-.599 2.282-.744 2.84-.282 1.084-1.064 2.456-1.549 3.235C9.584 23.815 10.77 24.001 12.017 24.001c6.624 0 11.99-5.367 11.99-11.988C24.007 5.367 18.641.001 12.017.001z"/>
+      </svg>
+    ),
+    snapchat: (
+      <svg className={`${size} text-yellow-400`} fill="currentColor" viewBox="0 0 24 24">
+        <path d="M12.017 0C5.396 0 .029 5.367.029 11.987c0 5.079 3.158 9.417 7.618 11.174-.105-.949-.199-2.403.041-3.439.219-.937 1.406-5.957 1.406-5.957s-.359-.72-.359-1.781c0-1.663.967-2.911 2.168-2.911 1.024 0 1.518.769 1.518 1.688 0 1.029-.653 2.567-.992 3.992-.285 1.193.6 2.165 1.775 2.165 2.128 0 3.768-2.245 3.768-5.487 0-2.861-2.063-4.869-5.008-4.869-3.41 0-5.409 2.562-5.409 5.199 0 1.033.394 2.143.889 2.741.097.118.112.221.083.342-.09.377-.293 1.199-.334 1.363-.053.225-.172.271-.402.165-1.495-.69-2.433-2.878-2.433-4.646 0-3.776 2.748-7.252 7.92-7.252 4.158 0 7.392 2.967 7.392 6.923 0 4.135-2.607 7.462-6.233 7.462-1.214 0-2.357-.629-2.748-1.378 0 0-.599 2.282-.744 2.84-.282 1.084-1.064 2.456-1.549 3.235C9.584 23.815 10.77 24.001 12.017 24.001c6.624 0 11.99-5.367 11.99-11.988C24.007 5.367 18.641.001 12.017.001z"/>
+      </svg>
+    ),
+    facebook: (
+      <svg className={`${size} text-blue-600`} fill="currentColor" viewBox="0 0 24 24">
+        <path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z"/>
       </svg>
     ),
     web: (
@@ -120,6 +230,11 @@ function PlatformFilterButton({
       case 'instagram': return 'hover:bg-pink-50 hover:border-pink-200 hover:text-pink-600';
       case 'tiktok': return 'hover:bg-gray-50 hover:border-gray-300 hover:text-black';
       case 'twitter': return 'hover:bg-blue-50 hover:border-blue-200 hover:text-blue-600';
+      case 'linkedin': return 'hover:bg-blue-50 hover:border-blue-200 hover:text-blue-700';
+      case 'reddit': return 'hover:bg-orange-50 hover:border-orange-200 hover:text-orange-600';
+      case 'pinterest': return 'hover:bg-red-50 hover:border-red-200 hover:text-red-600';
+      case 'snapchat': return 'hover:bg-yellow-50 hover:border-yellow-200 hover:text-yellow-600';
+      case 'facebook': return 'hover:bg-blue-50 hover:border-blue-200 hover:text-blue-600';
       default: return 'hover:bg-gray-50 hover:border-gray-300 hover:text-gray-700';
     }
   };
@@ -130,6 +245,11 @@ function PlatformFilterButton({
       case 'instagram': return 'bg-pink-100 border-pink-300 text-pink-700';
       case 'tiktok': return 'bg-gray-100 border-gray-400 text-black';
       case 'twitter': return 'bg-blue-100 border-blue-300 text-blue-700';
+      case 'linkedin': return 'bg-blue-100 border-blue-300 text-blue-800';
+      case 'reddit': return 'bg-orange-100 border-orange-300 text-orange-700';
+      case 'pinterest': return 'bg-red-100 border-red-300 text-red-700';
+      case 'snapchat': return 'bg-yellow-100 border-yellow-300 text-yellow-700';
+      case 'facebook': return 'bg-blue-100 border-blue-300 text-blue-700';
       default: return 'bg-gray-100 border-gray-400 text-gray-700';
     }
   };
@@ -156,6 +276,11 @@ const PLATFORM_META: Record<string, { label: string; color: Parameters<typeof Ba
   instagram: { label: "Instagram", color: "purple" },
   tiktok: { label: "TikTok", color: "amber" },
   twitter: { label: "Twitter / X", color: "blue" },
+  linkedin: { label: "LinkedIn", color: "blue" },
+  reddit: { label: "Reddit", color: "amber" },
+  pinterest: { label: "Pinterest", color: "rose" },
+  snapchat: { label: "Snapchat", color: "amber" },
+  facebook: { label: "Facebook", color: "blue" },
   web: { label: "Other", color: "slate" },
 };
 
@@ -169,6 +294,7 @@ export default function Home() {
   const [fetchingBookmarks, setFetchingBookmarks] = useState(false);
   const [platformFilter, setPlatformFilter] = useState<string>("");
   const [search, setSearch] = useState<string>("");
+  const [bookmarkError, setBookmarkError] = useState<string>("");
 
   useEffect(() => {
     if (typeof window !== 'undefined') {
@@ -211,7 +337,7 @@ export default function Home() {
     
     setFetchingBookmarks(true);
     try {
-      const res = await fetch(`${API_BASE}/bookmarks`, { 
+      const res = await fetch(`${API_BASE}/api/bookmarks`, { 
         headers: { Authorization: `Bearer ${token}` } 
       });
       if (res.ok) {
@@ -247,23 +373,84 @@ export default function Home() {
     return () => obs.disconnect();
   }, [bookmarks, platformFilter, search]);
 
+  const validateUrl = (url: string): string | null => {
+    if (!url.trim()) {
+      return "Please enter a URL";
+    }
+    
+    let normalizedUrl = url.trim();
+    if (!normalizedUrl.match(/^https?:\/\//)) {
+      normalizedUrl = `https://${normalizedUrl}`;
+    }
+    
+    try {
+      new URL(normalizedUrl);
+      return null;
+    } catch {
+      return "Please enter a valid URL";
+    }
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    setBookmarkError("");
+    
+    const urlError = validateUrl(url);
+    if (urlError) {
+      setBookmarkError(urlError);
+      return;
+    }
+    
     setBookmarkLoading(true);
+    
+    let normalizedUrl = url.trim();
+    if (normalizedUrl && !normalizedUrl.match(/^https?:\/\//)) {
+      normalizedUrl = `https://${normalizedUrl}`;
+    }
+    
     try {
-      const res = await fetch(`${API_BASE}/bookmarks`, {
+      const timeoutPromise = new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('Request timed out after 60 seconds')), 60000)
+      );
+      
+      const fetchPromise = fetch(`${API_BASE}/bookmarks`, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ url, note }),
+        body: JSON.stringify({ url: normalizedUrl, note }),
       });
+      
+      const res = await Promise.race([fetchPromise, timeoutPromise]) as Response;
+      
       if (res.ok) {
         const newBookmark = await res.json();
         setBookmarks((prev) => [newBookmark, ...prev]);
         setUrl("");
         setNote("");
+        setBookmarkError("");
+      } else {
+        const errorData = await res.json().catch(() => ({}));
+        const errorMessage = errorData.detail || `Failed to create bookmark (${res.status})`;
+        console.error("Failed to create bookmark:", errorMessage);
+        
+        if (res.status === 409 && errorMessage.toLowerCase().includes('already')) {
+          setBookmarkError(`Duplicate Link: This URL has already been bookmarked.`);
+        } else if (res.status === 400) {
+          setBookmarkError(`Invalid URL: Please check the URL and try again.`);
+        } else if (res.status === 401) {
+          setBookmarkError(`Authentication Error: Please log in again.`);
+        } else if (res.status >= 500) {
+          setBookmarkError(`Server Error: Our servers are having issues. Please try again later.`);
+        } else {
+          setBookmarkError(`Error: ${errorMessage}`);
+        }
       }
     } catch (error) { 
-      console.error("Error creating bookmark:", error); 
+      console.error("Error creating bookmark:", error);
+      if (error instanceof Error && error.message.includes('timed out')) {
+        setBookmarkError("Request timed out after 60 seconds. YouTube extraction can be slow - please try again or use a different video.");
+      } else {
+        setBookmarkError("Network Error: Failed to create bookmark. Please check your connection and try again.");
+      }
     } finally { 
       setBookmarkLoading(false); 
     }
@@ -320,21 +507,7 @@ export default function Home() {
         <div className="max-w-7xl mx-auto px-6 py-4">
           <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
             
-            
             <div className="flex flex-wrap items-center justify-center lg:justify-start gap-3">
-              
-              {(search || platformFilter) && (
-                <button 
-                  onClick={() => {
-                    setSearch("");
-                    setPlatformFilter("");
-                  }}
-                  className="text-sm text-gray-500 hover:text-red-600 transition-colors px-3 py-1 rounded-full hover:bg-red-50"
-                >
-                  Clear Filters ✕
-                </button>
-              )}
-              
               
               {[
                 { key: "", label: "All", platform: "web", countKey: "all" },
@@ -355,7 +528,6 @@ export default function Home() {
               ))}
             </div>
 
-            
             <div className="flex justify-center lg:justify-end">
               <div className="relative">
                 <input
@@ -381,21 +553,28 @@ export default function Home() {
       
       <div className="max-w-7xl mx-auto px-6 py-8">
 
-        
         <div className="mb-12">
           <h2 className="text-2xl font-bold text-gray-900 mb-6 text-center">Add Bookmark</h2>
           <div className="max-w-4xl mx-auto">
             <Card className="shadow-lg border-0 bg-white">
-              <CardContent className="p-8">
+              <CardContent className="p-8 pt-4">
+                {bookmarkError && (
+                  <div className="mb-6">
+                    <Alert variant="error">{bookmarkError}</Alert>
+                  </div>
+                )}
                 <form onSubmit={handleSubmit} className="grid grid-cols-1 gap-6 md:grid-cols-[1fr_1fr_auto] md:items-end">
                   <div>
                     <Label htmlFor="url" className="text-gray-700 font-medium">URL</Label>
                     <Input 
                       id="url" 
-                      type="url" 
+                      type="text" 
                       value={url} 
-                      onChange={(e) => setUrl(e.target.value)} 
-                      placeholder="Paste YouTube, Instagram, TikTok, or any URL" 
+                      onChange={(e) => {
+                        setUrl(e.target.value);
+                        if (bookmarkError) setBookmarkError("");
+                      }} 
+                      placeholder="Add any Link!" 
                       required 
                       className="mt-1 h-12"
                     />
@@ -417,7 +596,7 @@ export default function Home() {
                       disabled={bookmarkLoading} 
                       className="btn-primary-clean px-8 py-3 disabled:opacity-50 w-full md:w-auto text-base hover:shadow-lg h-12"
                     >
-                      {bookmarkLoading ? "Saving..." : "Save Bookmark"}
+                      {bookmarkLoading ? "Extracting metadata..." : "Save Bookmark"}
                     </button>
                   </div>
                 </form>
@@ -446,7 +625,6 @@ export default function Home() {
 
           
           <div 
-            key={`${platformFilter}-${search}-${filtered.length}`} 
             className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8"
           >
             {filtered.map((bm) => {
@@ -454,12 +632,11 @@ export default function Home() {
               
               return (
                 <Card 
-                  key={bm.id} 
+                  key={`bookmark-${bm.id}-${bm.url}`} 
                   className="bookmark-card opacity-0 translate-y-3 will-change-transform rounded-xl shadow-md hover:shadow-xl border border-gray-200 bg-white overflow-hidden transition-all duration-300 hover:scale-105 h-[320px] flex flex-col" 
                   data-reveal
                 >
                   <CardContent className="p-0 flex flex-col h-full relative">
-                    {/* Platform Icon - Top Right of Card */}
                     <div className="absolute top-2 right-2 z-10">
                       <div className="bg-white/90 backdrop-blur-sm rounded-lg p-1.5 shadow-lg border border-white/20">
                         <PlatformIcon platform={bm.platform || 'web'} size="w-3.5 h-3.5" />
@@ -468,7 +645,6 @@ export default function Home() {
                     
                     <div className="flex flex-col h-full">
 
-                      {/* Title - Top */}
                       <div className="p-4 pb-2">
                         <a 
                           href={bm.url} 
@@ -480,7 +656,6 @@ export default function Home() {
                         </a>
                       </div>
 
-                      {/* Thumbnail Container - Fixed 16:9 */}
                       <div className="flex-1 px-4">
                         <a 
                           href={bm.url} 
@@ -489,7 +664,23 @@ export default function Home() {
                           className="block group h-full"
                         >
                           <div className="w-full h-full aspect-video overflow-hidden rounded-md bg-gray-100">
-                            {thumb ? (
+                            {bm.platform === "youtube" ? (
+                              (() => {
+                                const ytId = extractYouTubeId(bm.url);
+                                return ytId ? (
+                                  <SmartYouTubeThumbnail 
+                                    key={ytId}
+                                    videoId={ytId}
+                                    alt="YouTube thumbnail"
+                                    className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                                  />
+                                ) : (
+                                  <div className="w-full h-full flex items-center justify-center">
+                                    <PlatformIcon platform="youtube" size="w-12 h-12" />
+                                  </div>
+                                );
+                              })()
+                            ) : thumb ? (
                               <img 
                                 src={thumb} 
                                 alt="thumbnail" 
@@ -504,8 +695,12 @@ export default function Home() {
                         </a>
                       </div>
 
-                      {/* Date - Bottom */}
                       <div className="p-4 pt-3 mt-auto">
+                        {bm.note && (
+                          <p className="text-gray-600 text-sm mb-2 line-clamp-2 italic">
+                            "{bm.note}"
+                          </p>
+                        )}
                         <span className="text-gray-500 text-sm font-medium">
                           {new Date(bm.created_at).toLocaleDateString()}
                         </span>
