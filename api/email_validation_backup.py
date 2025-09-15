@@ -20,37 +20,33 @@ def validate_email_comprehensive(email: str) -> Tuple[bool, str]:
         if domain in DISPOSABLE_DOMAINS:
             return False, "Temporary or disposable email addresses are not allowed"
         
+        try:
+            mx_records = socket.getaddrinfo(domain, None)
+            if not mx_records:
+                return False, "Email domain does not exist"
+        except socket.gaierror:
+            return False, "Email domain does not exist"
         
         local_part = validated_email.email.split('@')[0]
         
-        if len(local_part) < 2:
-            return False, "Email local part too short"
+        if re.match(r'^[a-zA-Z]+\d{8,}$', local_part):
+            return False, "Please use a valid email address"
         
-        if re.match(r'^[0-9]+$', local_part):
-            return False, "Email local part cannot be only numbers"
+        if len(local_part) > 20 and re.search(r'\d{3,}', local_part):
+            return False, "Please use a valid email address"
         
-        spam_patterns = [
-            r'^test\d*$',
-            r'^admin\d*$',
-            r'^user\d*$',
-            r'^demo\d*$',
-            r'^temp\d*$'
-        ]
-        
-        for pattern in spam_patterns:
-            if re.match(pattern, local_part, re.IGNORECASE):
-                return False, "Email appears to be a test or temporary address"
-        
-        return True, "Email is valid"
+        if len(local_part) > 15 and re.search(r'[a-zA-Z]+\d+[a-zA-Z]+\d+', local_part):
+            return False, "Please use a valid email address"
+            
+        return True, ""
         
     except EmailNotValidError as e:
         return False, f"Invalid email format: {str(e)}"
     except Exception as e:
-        return False, f"Email validation error: {str(e)}"
+        print(f"Email validation error for {email}: {e}")
+        return True, ""
 
-def validate_email_simple(email: str) -> bool:
-    try:
-        validated_email = validate_email(email)
-        return True
-    except EmailNotValidError:
-        return False
+
+def is_email_format_valid(email: str) -> bool:
+    pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    return re.match(pattern, email) is not None 
