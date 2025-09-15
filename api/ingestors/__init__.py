@@ -1,5 +1,6 @@
 from .base import BaseIngestor
 from .youtube import YouTubeIngestor
+from .tiktok_api import TikTokApiIngestor
 from .social import (
     TikTokIngestor, 
     InstagramIngestor, 
@@ -15,7 +16,8 @@ from .registry import get_ingestor, add_bookmark
 __all__ = [
     'BaseIngestor', 
     'YouTubeIngestor', 
-    'TikTokIngestor', 
+    'TikTokApiIngestor',
+    'TikTokIngestor',   
     'InstagramIngestor', 
     'TwitterIngestor',
     'LinkedInIngestor',

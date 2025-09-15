@@ -140,7 +140,7 @@ def list_users(db: Session = Depends(get_db)):
     return [{"id": u.id, "email": u.email, "created_at": u.created_at} for u in users]
 
 @app.post("/api/bookmarks/youtube")
-def create_youtube_bookmark(
+async def create_youtube_bookmark(
     bookmark_data: YouTubeBookmarkIn, 
     current_user: dict = Depends(get_current_user),
     db: Session = Depends(get_db)
@@ -154,7 +154,7 @@ def create_youtube_bookmark(
                 detail="URL must be a valid YouTube URL"
             )
         
-        result = add_bookmark(url, current_user["id"], db)
+        result = await add_bookmark(url, current_user["id"], db)
         
         logger.info(f"Successfully created YouTube bookmark: {result.get('title', 'Unknown')}")
         return result
@@ -171,14 +171,14 @@ def create_youtube_bookmark(
         raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.post("/bookmarks")
-def create_bookmark(
+async def create_bookmark(
     b: BookmarkIn, 
     current_user: dict = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     try:
         url = str(b.url)
-        result = add_bookmark(url, current_user["id"], db)
+        result = await add_bookmark(url, current_user["id"], db)
         
         bookmark = db.query(Bookmark).filter(Bookmark.id == result["id"]).first()
         if bookmark:
