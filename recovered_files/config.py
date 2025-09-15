@@ -1,0 +1,17 @@
+fastapi>=0.104.1
+uvicorn[standard]>=0.24.0
+sqlalchemy>=2.0.23
+python-dotenv>=1.0.0
+pydantic>=2.5.0
+python-jose[cryptography]>=3.3.0
+passlib[bcrypt]>=1.7.4
+python-multipart>=0.0.6
+psycopg2-binary>=2.9.9
+alembic>=1.13.0
+yt-dlp>=2023.12.30
+TikTokApi>=7.1.0
+playwright>=1.40.0
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
+requests>=2.31.0
+email-validator>=2.1.0
