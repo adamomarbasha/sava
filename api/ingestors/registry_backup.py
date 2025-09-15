@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 from .base import BaseIngestor
 from .youtube import YouTubeIngestor
-from .tiktok_api import TikTokApiIngestor 
+from .tiktok_api import TikTokApiIngestor
 from .tiktok import TikTokIngestor 
 from .social import (
     InstagramIngestor, 
@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 INGESTORS = [
     YouTubeIngestor(),
     TikTokApiIngestor(), 
-    TikTokIngestor(),   
+    TikTokIngestor(),    
     InstagramIngestor(), 
     TwitterIngestor(),
     LinkedInIngestor(),
