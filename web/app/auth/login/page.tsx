@@ -98,7 +98,7 @@ export default function LoginPage() {
                   value={email}
                   onChange={(e) => {
                     setEmail(e.target.value);
-                    if (error) setError(""); // Clear error when user starts typing
+                    if (error) setError(""); 
                   }}
                   placeholder="you@example.com"
                   required
@@ -113,7 +113,7 @@ export default function LoginPage() {
                   value={password}
                   onChange={(e) => {
                     setPassword(e.target.value);
-                    if (error) setError(""); // Clear error when user starts typing
+                    if (error) setError("");
                   }}
                   placeholder=""
                   required
