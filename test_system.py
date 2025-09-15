@@ -1,8 +1,4 @@
 #!/usr/bin/env python3
-"""
-Quick system test for Sava bookmark API.
-Tests the main functionality without running the full test suite.
-"""
 
 import requests
 import sys
@@ -11,7 +7,6 @@ import json
 API_BASE = "http://localhost:8000"
 
 def test_health():
-    """Test API health endpoint"""
     try:
         response = requests.get(f"{API_BASE}/")
         assert response.status_code == 200
@@ -24,9 +19,7 @@ def test_health():
         return False
 
 def test_auth():
-    """Test user registration and login"""
     try:
-        # Register test user
         user_data = {
             "email": "test@example.com",
             "password": "testpass123"
@@ -41,7 +34,6 @@ def test_auth():
             print(f"❌ Registration failed: {response.status_code} {response.text}")
             return False, None
         
-        # Login
         response = requests.post(f"{API_BASE}/auth/login", json=user_data)
         assert response.status_code == 200
         token_data = response.json()
@@ -54,7 +46,6 @@ def test_auth():
         return False, None
 
 def test_youtube_bookmark(token):
-    """Test YouTube bookmark creation"""
     try:
         headers = {"Authorization": f"Bearer {token}"}
         bookmark_data = {
@@ -84,23 +75,19 @@ def test_youtube_bookmark(token):
         return False, None
 
 def test_bookmark_listing(token):
-    """Test bookmark listing with filters"""
     try:
         headers = {"Authorization": f"Bearer {token}"}
         
-        # List all bookmarks
         response = requests.get(f"{API_BASE}/api/bookmarks", headers=headers)
         assert response.status_code == 200
         all_bookmarks = response.json()
         print(f"✅ Listed {len(all_bookmarks)} total bookmarks")
         
-        # Filter by YouTube platform
         response = requests.get(f"{API_BASE}/api/bookmarks?platform=youtube", headers=headers)
         assert response.status_code == 200
         youtube_bookmarks = response.json()
         print(f"✅ Listed {len(youtube_bookmarks)} YouTube bookmarks")
         
-        # Search test
         response = requests.get(f"{API_BASE}/api/bookmarks?q=rick", headers=headers)
         assert response.status_code == 200
         search_results = response.json()
@@ -112,27 +99,22 @@ def test_bookmark_listing(token):
         return False
 
 def main():
-    """Run all tests"""
     print("🧪 Starting Sava system tests...\n")
     
-    # Test 1: Health check
     if not test_health():
         print("\n❌ System tests failed - API not responding")
         sys.exit(1)
     
-    # Test 2: Authentication
     auth_success, token = test_auth()
     if not auth_success:
         print("\n❌ System tests failed - Authentication not working")
         sys.exit(1)
     
-    # Test 3: YouTube bookmark creation
     youtube_success, bookmark_id = test_youtube_bookmark(token)
     if not youtube_success:
         print("\n❌ System tests failed - YouTube ingestion not working")
         sys.exit(1)
     
-    # Test 4: Bookmark listing and filtering
     if not test_bookmark_listing(token):
         print("\n❌ System tests failed - Bookmark listing not working")
         sys.exit(1)
