@@ -1,0 +1,180 @@
+import asyncio
+import logging
+from typing import Dict, Any, Optional
+from urllib.parse import urlparse
+import re
+
+from TikTokApi import TikTokApi
+from .base import BaseIngestor
+
+logger = logging.getLogger(__name__)
+
+class TikTokIngestor(BaseIngestor):
+    def __init__(self):
+        super().__init__()
+        self.api = None
+
+    @property
+    def platform(self) -> str:
+        return "tiktok"
+    
+    def can_handle(self, url: str) -> bool:
+        url_lower = url.lower()
+        return "tiktok.com" in url_lower
+    
+    def normalize_metadata(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "title": raw_data.get("title") or "TikTok video",
+            "author": raw_data.get("author"),
+            "description": raw_data.get("description"),
+            "thumbnail_url": raw_data.get("thumbnail_url"),
+            "published_at": raw_data.get("published_at"),
+            "platform_specific": {
+                "content_id": raw_data.get("raw", {}).get("id"),
+                "content_type": "video",
+                "username": raw_data.get("author"),
+                "domain": "tiktok.com",
+                "scraping_available": True,
+            }
+        }
+    
+    def extract_metadata(self, url: str) -> Dict[str, Any]:
+        try:
+            return asyncio.run(self._extract_metadata_async(url))
+        except Exception as e:
+            logger.error(f"Error in TikTok metadata extraction: {e}")
+            return self._fallback_extraction(url)
+        
+    async def _init_api(self):
+        if self.api is None:
+            try:
+                self.api = TikTokApi()
+                await self.api.create_sessions(num_sessions=1, sleep_after=3)
+                logger.info("TikTokApi initialized successfully")
+            except Exception as e:
+                logger.error(f"Failed to initialize TikTokApi: {e}")
+                self.api = None
+
+    async def _extract_metadata_async(self, url: str) -> Dict[str, Any]:
+        logger.info(f"Extracting TikTok metadata from: {url}")
+        
+        try:
+            await self._init_api()
+            
+            if not self.api:
+                logger.warning("TikTokApi not available, using fallback")
+                return self._fallback_extraction(url)
+            
+            video_id = self._extract_video_id(url)
+            if not video_id:
+                logger.error(f"Could not extract video ID from URL: {url}")
+                return self._fallback_extraction(url)
+            
+            try:
+                video = self.api.video(id=video_id)
+                data = await video.info()
+                
+                metadata = {
+                    "platform": "tiktok",
+                    "url": url,
+                    "title": data.desc or f"TikTok video by @{data.author.username}",
+                    "author": data.author.username,
+                    "thumbnail_url": data.cover_url,
+                    "description": data.desc,
+                    "published_at": self._parse_timestamp(data.create_time),
+                    "raw": {
+                        "id": data.id,
+                        "stats": {
+                            "likes": data.stats.digg_count,
+                            "comments": data.stats.comment_count,
+                            "shares": data.stats.share_count,
+                            "plays": data.stats.play_count,
+                        },
+                        "author": {
+                            "username": data.author.username,
+                            "nickname": data.author.nickname,
+                        },
+                    }
+                }
+                
+                logger.info(f"Successfully extracted TikTok metadata for: {metadata.get('title', 'Unknown')[:50]}...")
+                return metadata
+                    
+            except Exception as e:
+                logger.error(f"TikTokApi error: {e}, using fallback")
+                return self._fallback_extraction(url)
+                
+        except Exception as e:
+            logger.error(f"Error extracting TikTok metadata: {e}")
+            return self._fallback_extraction(url)
+
+    def _extract_video_id(self, url: str) -> Optional[str]:
+        try:
+            
+            if "vm.tiktok.com" in url:
+                match = re.search(r'vm\.tiktok\.com/([A-Za-z0-9]+)', url)
+                if match:
+                    return match.group(1)
+            
+            match = re.search(r'/video/(\d+)', url)
+            if match:
+                return match.group(1)
+                
+        except Exception as e:
+            logger.error(f"Error extracting video ID: {e}")
+            
+        return None
+
+    def _parse_timestamp(self, timestamp: int) -> str:
+        if timestamp:
+            from datetime import datetime
+            return datetime.fromtimestamp(timestamp).isoformat()
+        return None
+
+
+
+    def _fallback_extraction(self, url: str) -> Dict[str, Any]:
+        try:
+            username_match = re.search(r'@([^/]+)', url)
+            username = username_match.group(1) if username_match else 'unknown'
+            
+            video_id = self._extract_video_id(url)
+            thumbnail_url = ''
+            if video_id:
+                thumbnail_url = f'https://p16-sign-va.tiktokcdn-us.com/obj/tos-useast2a-p-0068-tx/{video_id}'
+                logger.info(f'Generated fallback thumbnail URL: {thumbnail_url}')
+            
+            return {
+                'platform': 'tiktok',
+                'url': url,
+                'title': f"TikTok video by @{username}",
+                'author': username,
+                'thumbnail_url': thumbnail_url,
+                'description': '',
+                'published_at': None,
+                'raw': {
+                    'video_id': video_id,
+                    'fallback': True
+                }
+            }
+        except Exception as e:
+            logger.error(f"Error in fallback extraction: {e}")
+            
+        return {
+            'platform': 'tiktok',
+            'url': url,
+            'title': 'TikTok video',
+            'author': 'unknown',
+            'thumbnail_url': '',
+            'description': '',
+            'published_at': None,
+            'raw': {}
+        }
+
+    async def cleanup(self):
+        if self.api:
+            try:
+                await self.api.close()
+            except:
+                pass
+            self.api = None
