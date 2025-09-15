@@ -17,7 +17,6 @@ export default function RegisterPage() {
   const router = useRouter();
   const { login } = useAuth();
 
-  // Basic email validation function
   const validateEmail = (email: string): string | null => {
     if (!email.trim()) {
       return "Email is required";
@@ -28,7 +27,6 @@ export default function RegisterPage() {
       return "Please enter a valid email address";
     }
     
-    // Check for obviously fake patterns
     const localPart = email.split('@')[0];
     if (/^[a-zA-Z]+\d{8,}$/.test(localPart)) {
       return "Please use a real email address";
@@ -42,7 +40,6 @@ export default function RegisterPage() {
     setLoading(true);
     setError("");
 
-    // Validate email first
     const emailError = validateEmail(email);
     if (emailError) {
       setError(emailError);
@@ -146,7 +143,7 @@ export default function RegisterPage() {
                   value={email}
                   onChange={(e) => {
                     setEmail(e.target.value);
-                    if (error) setError(""); // Clear error when user starts typing
+                    if (error) setError("");
                   }}
                   placeholder="you@example.com"
                   required
@@ -161,7 +158,7 @@ export default function RegisterPage() {
                   value={password}
                   onChange={(e) => {
                     setPassword(e.target.value);
-                    if (error) setError(""); // Clear error when user starts typing
+                    if (error) setError(""); 
                   }}
                   placeholder="At least 6 characters"
                   required
@@ -176,7 +173,7 @@ export default function RegisterPage() {
                   value={confirmPassword}
                   onChange={(e) => {
                     setConfirmPassword(e.target.value);
-                    if (error) setError(""); // Clear error when user starts typing
+                    if (error) setError(""); 
                   }}
                   placeholder="Re-enter your password"
                   required
