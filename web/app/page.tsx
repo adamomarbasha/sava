@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { useAuth } from "./contexts/AuthContext";
 import { useRouter } from "next/navigation";
 import { Button, Card, CardContent, Input, Label, Spinner, Badge, Alert } from "./components/UI";
+import { platform } from "os";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://127.0.0.1:8000";
 
@@ -116,13 +117,33 @@ function SmartYouTubeThumbnail({
   );
 }
 
-function getThumbnail(url: string, platform?: string): string | null {
+function getThumbnail(url: string, platform?: string, bookmark?: any): string | null {
   const ytId = extractYouTubeId(url);
   if (platform === "youtube" && ytId) {
     return `https://img.youtube.com/vi/${ytId}/maxresdefault.jpg`;
   }
   
+  // Debug logging
+  console.log(`getThumbnail called for ${platform}:`, {
+    url: url.substring(0, 50) + '...',
+    platform,
+    hasBookmark: !!bookmark,
+    thumbnail_url: bookmark?.thumbnail_url
+  });
+  
+  if (bookmark?.thumbnail_url) {
+    return bookmark.thumbnail_url;
+  }
+  
   return null;
+}
+
+function getVideoAspectRatio(platform: string, bookmark?: any): string {
+  if (platform === "tiktok") {
+    return "aspect-[3/4] max-w-[150px] mx-auto";
+
+  }
+  return "aspect-video";
 }
 
 function PlatformIcon({ platform, size = "w-5 h-5" }: { platform: string; size?: string }) {
@@ -314,7 +335,8 @@ export default function Home() {
           id: b.id,
           url: b.url.substring(0, 50) + '...',
           platform: b.platform,
-          title: b.title
+          title: b.title,
+          thumbnail_url: b.thumbnail_url
         })));
         const filtered = bookmarks.filter(bookmark => {
           const matchesSearch = !search || 
@@ -628,12 +650,12 @@ export default function Home() {
             className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8"
           >
             {filtered.map((bm) => {
-              const thumb = getThumbnail(bm.url, bm.platform);
+              const thumb = getThumbnail(bm.url, bm.platform, bm);
               
               return (
                 <Card 
                   key={`bookmark-${bm.id}-${bm.url}`} 
-                  className="bookmark-card opacity-0 translate-y-3 will-change-transform rounded-xl shadow-md hover:shadow-xl border border-gray-200 bg-white overflow-hidden transition-all duration-300 hover:scale-105 h-[320px] flex flex-col" 
+                  className="bookmark-card opacity-0 translate-y-3 will-change-transform rounded-xl shadow-md hover:shadow-xl border border-gray-200 bg-white overflow-hidden transition-all duration-300 hover:scale-105 h-[330px] flex flex-col"
                   data-reveal
                 >
                   <CardContent className="p-0 flex flex-col h-full relative">
@@ -656,14 +678,14 @@ export default function Home() {
                         </a>
                       </div>
 
-                      <div className="flex-1 px-4">
+                      <div className="flex-1 px-4 flex items-center justify-center">
                         <a 
                           href={bm.url} 
                           target="_blank" 
                           rel="noopener noreferrer" 
-                          className="block group h-full"
+                          className="block group"
                         >
-                          <div className="w-full h-full aspect-video overflow-hidden rounded-md bg-gray-100">
+                          <div className={`${getVideoAspectRatio(bm.platform || 'web', bm)} overflow-hidden rounded-md bg-gray-100`}>
                             {bm.platform === "youtube" ? (
                               (() => {
                                 const ytId = extractYouTubeId(bm.url);
