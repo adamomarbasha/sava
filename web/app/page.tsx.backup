@@ -124,7 +124,7 @@ function getThumbnail(url: string, platform?: string, bookmark?: any): string | 
   }
   
   // Debug logging
-  console.log({
+  console.log(`getThumbnail called for ${platform}:`, {
     url: url.substring(0, 50) + '...',
     platform,
     hasBookmark: !!bookmark,
@@ -141,6 +141,7 @@ function getThumbnail(url: string, platform?: string, bookmark?: any): string | 
 function getVideoAspectRatio(platform: string, bookmark?: any): string {
   if (platform === "tiktok") {
     return "aspect-[3/4] max-w-[150px] mx-auto";
+
   }
   return "aspect-video";
 }
@@ -702,20 +703,11 @@ export default function Home() {
                                 );
                               })()
                             ) : thumb ? (
-                              <>
-                                <img 
-                                  src={thumb} 
-                                  alt="thumbnail" 
-                                  className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300" 
-                                  onError={(e) => { 
-                                    e.currentTarget.style.display = "none"; 
-                                    const fallback = e.currentTarget.nextElementSibling as HTMLElement; 
-                                    if (fallback) fallback.style.display = "flex"; 
-                                  }}                                />
-                                <div className="w-full h-full items-center justify-center bg-gray-100" style={{display: "none"}}>
-                                  <PlatformIcon platform={bm.platform || "web"} size="w-12 h-12" />
-                                </div>
-                              </>
+                              <img 
+                                src={thumb} 
+                                alt="thumbnail" 
+                                className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300" 
+                              />
                             ) : (
                               <div className="w-full h-full flex items-center justify-center">
                                 <PlatformIcon platform={bm.platform || 'web'} size="w-12 h-12" />
