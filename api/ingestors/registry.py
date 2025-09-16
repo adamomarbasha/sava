@@ -1,3 +1,6 @@
+import os
+from dotenv import load_dotenv
+load_dotenv()
 import logging
 import json
 from typing import Dict, Any, Optional
@@ -7,6 +10,7 @@ from .base import BaseIngestor
 from .youtube import YouTubeIngestor
 from .tiktok_api import TikTokApiIngestor 
 from .tiktok import TikTokIngestor 
+from .instagram_api import InstagramApiIngestor
 from .social import (
     InstagramIngestor, 
     TwitterIngestor,
@@ -26,6 +30,7 @@ INGESTORS = [
     YouTubeIngestor(),
     TikTokApiIngestor(), 
     TikTokIngestor(),   
+    InstagramApiIngestor(username=os.getenv("IG_USERNAME"), password=os.getenv("IG_PASSWORD"), session_id=os.getenv("INSTAGRAM_SESSIONID")),
     InstagramIngestor(), 
     TwitterIngestor(),
     LinkedInIngestor(),
@@ -133,7 +138,7 @@ async def _create_new_bookmark(ingestor: BaseIngestor, url: str, user_id: int, d
             description=normalized.get("description"),
             published_at=normalized.get("published_at"),
             user_id=user_id,
-            raw=json.dumps(raw_data)
+            raw=json.dumps(raw_data, default=str)
         )
         
         db.add(bookmark)
@@ -164,7 +169,7 @@ async def _update_existing_bookmark(bookmark: Bookmark, ingestor: BaseIngestor, 
         bookmark.thumbnail_url = normalized.get("thumbnail_url") or bookmark.thumbnail_url
         bookmark.description = normalized.get("description") or bookmark.description
         bookmark.published_at = normalized.get("published_at") or bookmark.published_at
-        bookmark.raw = json.dumps(raw_data)
+        bookmark.raw = json.dumps(raw_data, default=str)
         
         if ingestor.platform == "youtube" and bookmark.youtube_details:
             _update_youtube_details(bookmark.youtube_details[0], normalized["platform_specific"])
