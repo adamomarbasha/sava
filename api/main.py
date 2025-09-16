@@ -29,7 +29,7 @@ app = FastAPI(title="Sava Bookmark API", version="2.0.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000", "http://localhost:3002", "http://127.0.0.1:3002"],
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000", "http://localhost:3001", "http://127.0.0.1:3001", "http://localhost:3002", "http://127.0.0.1:3002"],
     allow_origin_regex=r"http://(localhost|127\.0\.0\.1):\d+",
     allow_credentials=True,
     allow_methods=["*"],
@@ -303,3 +303,12 @@ def delete_bookmark(
     except Exception as e:
         logger.error(f"Error deleting bookmark: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
+
+@app.get("/test/instagram-thumbnail")
+async def test_instagram_thumbnail(url: str):
+    return {
+        "url": url,
+        "message": "Instagram URL received",
+        "success": True,
+        "note": "Use POST /bookmarks to actually extract metadata"
+    }
