@@ -1,0 +1,358 @@
+import logging
+import re
+import json
+import hashlib
+import tempfile
+import os
+from typing import Dict, Any, Optional, List
+from datetime import datetime
+from urllib.parse import urlparse
+import asyncio
+
+try:
+    import instaloader
+except ImportError:
+    instaloader = None
+
+from .base import BaseIngestor
+
+logger = logging.getLogger(__name__)
+
+_metadata_cache = {}
+
+class InstagramApiIngestor(BaseIngestor):
+    
+    def __init__(self, username: Optional[str] = None, password: Optional[str] = None, session_id: Optional[str] = None):
+        self._platform = "instagram"
+        self.username = username or os.getenv("IG_USERNAME")
+        self.password = password or os.getenv("IG_PASSWORD")
+        self.loader = None
+        self._is_logged_in = False
+        self._login_attempted = False
+        self._api_available = instaloader is not None
+        
+        if not self._api_available:
+            logger.warning("Instaloader not available. Please install: pip install instaloader")
+
+    @property
+    def platform(self) -> str:
+        return self._platform
+
+    def can_handle(self, url: str) -> bool:
+        if not self.validate_url(url):
+            return False
+        parsed = urlparse(url.lower())
+        return 'instagram.com' in parsed.netloc
+
+    def _get_cache_key(self, url: str) -> str:
+        return hashlib.md5(url.encode()).hexdigest()
+
+    async def _ensure_initialized(self):
+        if not self._api_available:
+            raise ValueError("Instaloader is not available")
+            
+        if not self.loader:
+            temp_dir = tempfile.mkdtemp()
+            self.loader = instaloader.Instaloader(
+                download_videos=False,
+                download_video_thumbnails=False,
+                download_geotags=False,
+                download_comments=True,
+                save_metadata=False,
+                dirname_pattern=temp_dir,
+                filename_pattern="{shortcode}"
+            )
+            
+            if not self._login_attempted and self.username and self.password:
+                try:
+                    await asyncio.to_thread(self.loader.login, self.username, self.password)
+                    self._is_logged_in = True
+                    logger.info(f"Successfully logged into Instagram as {self.username}")
+                except Exception as e:
+                    logger.warning(f"Instagram login failed for {self.username}: {e}")
+                    self._is_logged_in = False
+                finally:
+                    self._login_attempted = True
+
+    def _extract_shortcode(self, url: str) -> Optional[str]:
+        patterns = [
+            r'/p/([^/?]+)',
+            r'/reel/([^/?]+)',
+            r'/tv/([^/?]+)',
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, url)
+            if match:
+                return match.group(1)
+        return None
+
+    def _detect_content_type(self, url: str) -> str:
+        if "/p/" in url:
+            return "post"
+        elif "/reel/" in url:
+            return "reel"
+        elif "/tv/" in url:
+            return "igtv"
+        elif "/stories/" in url:
+            return "story"
+        else:
+            return "unknown"
+
+    async def extract_metadata(self, url: str) -> Dict[str, Any]:
+        cache_key = self._get_cache_key(url)
+        if cache_key in _metadata_cache:
+            logger.info(f"Cache hit for Instagram URL: {url}")
+            return _metadata_cache[cache_key]
+        
+        if not self._api_available:
+            return self._create_fallback_metadata(url, "Instaloader not available")
+        
+        try:
+            await self._ensure_initialized()
+            
+            shortcode = self._extract_shortcode(url)
+            if not shortcode:
+                return self._create_fallback_metadata(url, "Could not extract shortcode from URL")
+            
+            logger.info(f"Extracting Instagram metadata using Instaloader from: {url}")
+            
+            post = await asyncio.to_thread(
+                instaloader.Post.from_shortcode, 
+                self.loader.context, 
+                shortcode
+            )
+            
+            metadata = await self._parse_post_data(post, url)
+            
+            _metadata_cache[cache_key] = metadata
+            logger.info(f"Successfully extracted and cached Instagram metadata for: {shortcode}")
+            return metadata
+            
+        except Exception as e:
+            logger.error(f"Instaloader failed for {url}: {e}")
+            return self._create_fallback_metadata(url, str(e))
+
+    async def _parse_post_data(self, post: Any, url: str) -> Dict[str, Any]:
+        try:
+            caption = post.caption or ""
+            hashtags = re.findall(r'#(\w+)', caption)
+            clean_caption = re.sub(r'#\w+', '', caption).strip()
+            
+            owner = post.owner_profile
+            author_metadata = {
+                "username": owner.username,
+                "display_name": owner.full_name or owner.username,
+                "bio": getattr(owner, 'biography', '') or '',
+                "follower_count": getattr(owner, 'followers', 0),
+                "verified": getattr(owner, 'is_verified', False),
+                "profile_pic_url": owner.profile_pic_url
+            }
+            
+            media_urls = []
+            thumbnail_url = None  
+            
+            if post.typename == "GraphSidecar":  m
+                for node in post.get_sidecar_nodes():
+                    if node.is_video:
+                        media_urls.append(None)  
+                    else:
+                        media_urls.append(None) 
+            elif post.is_video:
+                media_urls.append(None)  
+                thumbnail_url = None  
+            else:
+                media_urls.append(None) 
+            
+            comments_sample = []
+            try:
+                comment_count = 0
+                for comment in post.get_comments():
+                    if comment_count >= 20:
+                        break
+                    comments_sample.append({
+                        'text': comment.text,
+                        'author': comment.owner.username,
+                        'likes': comment.likes_count,
+                        'created_at': comment.created_at_utc.isoformat() if comment.created_at_utc else None
+                    })
+                    comment_count += 1
+            except Exception as e:
+                logger.warning(f"Could not fetch comments: {e}")
+            
+            engagement_metrics = {
+                "likes": post.likes,
+                "comments": post.comments,
+                "timestamp": post.date_utc.isoformat() if post.date_utc else None
+            }
+            
+            metadata = {
+                "url": url,
+                "platform": self.platform,
+                "shortcode": post.shortcode,
+                "extracted_at": datetime.now().isoformat(),
+                "rich_metadata_available": True,
+                "title": clean_caption[:100] + "..." if len(clean_caption) > 100 else clean_caption or f"Instagram {post.typename}",
+                "author": owner.username,
+                "thumbnail_url": thumbnail_url,
+                "description": caption,
+                "published_at": post.date_utc if post.date_utc else None,
+                "platform_specific": {
+                    "media_id": str(post.mediaid),
+                    "shortcode": post.shortcode,
+                    "media_type": post.typename,
+                    "is_video": post.is_video,
+                    "like_count": post.likes,
+                    "comment_count": post.comments,
+                    "hashtags": hashtags,
+                    "media_urls": media_urls,
+                    "location": post.location.name if post.location else None,
+                    "engagement_metrics": engagement_metrics,
+                    "ai_data": {
+                        "clean_caption": clean_caption,
+                        "hashtags_for_tagging": hashtags,
+                        "comments_sample": comments_sample,
+                        "engagement_metrics": engagement_metrics,
+                        "author_metadata": author_metadata,
+                        "media_preview": {
+                            "urls": [],  
+                            "thumbnail": None  
+                        }
+                    }
+                }
+            }
+            
+            return metadata
+            
+        except Exception as e:
+            logger.error(f"Error parsing Instagram post data: {e}")
+            raise
+
+    def _create_fallback_metadata(self, url: str, error_reason: str) -> Dict[str, Any]:
+        parsed = urlparse(url)
+        content_type = self._detect_content_type(url)
+        shortcode = self._extract_shortcode(url)
+        
+        return {
+            "url": url,
+            "platform": self.platform,
+            "domain": parsed.netloc,
+            "path": parsed.path,
+            "extracted_at": datetime.now().isoformat(),
+            "shortcode": shortcode,
+            "content_type": content_type,
+            "rich_metadata_available": False,
+            "title": f"Instagram {content_type.title()}",
+            "author": "Instagram User",
+            "thumbnail_url": None,
+            "description": f"Instagram {content_type} - Full metadata extraction failed",
+            "published_at": None,
+            "platform_specific": {
+                "content_id": shortcode,
+                "content_type": content_type,
+                "error_reason": error_reason,
+                "fallback_extraction": True,
+                "ai_data": {
+                    "clean_caption": "",
+                    "hashtags_for_tagging": [],
+                    "comments_sample": [],
+                    "engagement_metrics": {
+                        "likes": 0,
+                        "comments": 0,
+                        "timestamp": None
+                    },
+                    "author_metadata": {
+                        "username": "unknown",
+                        "display_name": "Instagram User",
+                        "bio": "",
+                        "follower_count": 0,
+                        "verified": False,
+                        "profile_pic_url": None
+                    },
+                    "media_preview": {
+                        "urls": [],
+                        "thumbnail": None
+                    }
+                }
+            }
+        }
+
+    def normalize_metadata(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
+        try:
+            if raw_data.get("rich_metadata_available"):
+                return {
+                    "title": raw_data.get("title") or "Instagram Content",
+                    "author": raw_data.get("author") or "Instagram User",
+                    "thumbnail_url": raw_data.get("thumbnail_url"),
+                    "description": raw_data.get("description") or "",
+                    "published_at": raw_data.get("published_at"),
+                    "platform_specific": raw_data.get("platform_specific", {})
+                }
+            else:
+                author = (
+                    raw_data.get("author") or 
+                    raw_data.get("username") or 
+                    "Instagram User"
+                )
+                
+                title = (
+                    raw_data.get("title") or 
+                    f"Instagram {raw_data.get('content_type', 'Content').title()}"
+                )
+                
+                content_type = raw_data.get('content_type', 'content')
+                shortcode = raw_data.get('shortcode') or raw_data.get('content_id', 'unknown')
+                description = f"Instagram {content_type} (ID: {shortcode})"
+                
+                return {
+                    "title": title,
+                    "author": author,
+                    "thumbnail_url": None,
+                    "description": description,
+                    "published_at": None,
+                    "platform_specific": {
+                        "content_id": raw_data.get("shortcode") or raw_data.get("content_id"),
+                        "content_type": raw_data.get("content_type"),
+                        "username": raw_data.get("username"),
+                        "domain": raw_data.get("domain"),
+                        "rich_metadata_available": False,
+                        "fallback_reason": "Instagram API access failed or media not found",
+                        "ai_data": raw_data.get("platform_specific", {}).get("ai_data", {})
+                    }
+                }
+                
+        except Exception as e:
+            logger.error(f"Error normalizing Instagram metadata: {e}")
+            return {
+                "title": "Instagram Content",
+                "author": "Instagram User", 
+                "thumbnail_url": None,
+                "description": "Error processing Instagram content",
+                "published_at": None,
+                "platform_specific": {
+                    "error": str(e),
+                    "fallback_extraction": True,
+                    "ai_data": {
+                        "clean_caption": "",
+                        "hashtags_for_tagging": [],
+                        "comments_sample": [],
+                        "engagement_metrics": {
+                            "likes": 0,
+                            "comments": 0,
+                            "timestamp": None
+                        },
+                        "author_metadata": {
+                            "username": "unknown",
+                            "display_name": "Instagram User",
+                            "bio": "",
+                            "follower_count": 0,
+                            "verified": False,
+                            "profile_pic_url": None
+                        },
+                        "media_preview": {
+                            "urls": [],
+                            "thumbnail": None
+                        }
+                    }
+                }
+            }
