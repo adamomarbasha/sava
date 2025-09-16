@@ -1,0 +1,15 @@
+                            ) : bm.platform === "instagram" && thumb ? (
+                              <SmartInstagramThumbnail 
+                                key={bm.id}
+                                thumbnailUrl={thumb}
+                                alt="Instagram thumbnail"
+                                className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                                platform={bm.platform}
+                              />
+                            ) : thumb ? (
+                              <img 
+                                src={thumb} 
+                                alt="thumbnail" 
+                                className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300" 
+                              />
+                            ) : (
