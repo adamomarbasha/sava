@@ -166,7 +166,6 @@ function getThumbnail(url: string, platform?: string, bookmark?: any): string | 
     if (thumbUrl.startsWith('/static/')) {
       return `${API_BASE}${thumbUrl}`;
     }
-    // If it's an external Instagram URL, proxy it through our backend
     if (thumbUrl.includes('fbcdn.net')) {
       return `${API_BASE}/api/thumbnail?url=${encodeURIComponent(thumbUrl)}`;
     }
@@ -198,11 +197,6 @@ function PlatformIcon({ platform, size = "w-5 h-5" }: { platform: string; size?:
     tiktok: (
       <svg className={`${size} text-black`} fill="currentColor" viewBox="0 0 24 24">
         <path d="M19.59 6.69a4.83 4.83 0 0 1-3.77-4.25V2h-3.45v13.67a2.89 2.89 0 0 1-5.2 1.74 2.89 2.89 0 0 1 2.31-4.64 2.93 2.93 0 0 1 .88.13V9.4a6.84 6.84 0 0 0-1-.05A6.33 6.33 0 0 0 5 20.1a6.34 6.34 0 0 0 10.86-4.43v-7a8.16 8.16 0 0 0 4.77 1.52v-3.4a4.85 4.85 0 0 1-1-.1z"/>
-      </svg>
-    ),
-    twitter: (
-      <svg className={`${size} text-black`} fill="currentColor" viewBox="0 0 24 24">
-        <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/>
       </svg>
     ),
     linkedin: (
@@ -287,7 +281,6 @@ function PlatformFilterButton({
       case 'youtube': return 'hover:bg-red-50 hover:border-red-200 hover:text-red-600';
       case 'instagram': return 'hover:bg-pink-50 hover:border-pink-200 hover:text-pink-600';
       case 'tiktok': return 'hover:bg-gray-50 hover:border-gray-300 hover:text-black';
-      case 'twitter': return 'hover:bg-blue-50 hover:border-blue-200 hover:text-blue-600';
       case 'linkedin': return 'hover:bg-blue-50 hover:border-blue-200 hover:text-blue-700';
       case 'reddit': return 'hover:bg-orange-50 hover:border-orange-200 hover:text-orange-600';
       case 'pinterest': return 'hover:bg-red-50 hover:border-red-200 hover:text-red-600';
@@ -302,7 +295,6 @@ function PlatformFilterButton({
       case 'youtube': return 'bg-red-100 border-red-300 text-red-700';
       case 'instagram': return 'bg-pink-100 border-pink-300 text-pink-700';
       case 'tiktok': return 'bg-gray-100 border-gray-400 text-black';
-      case 'twitter': return 'bg-blue-100 border-blue-300 text-blue-700';
       case 'linkedin': return 'bg-blue-100 border-blue-300 text-blue-800';
       case 'reddit': return 'bg-orange-100 border-orange-300 text-orange-700';
       case 'pinterest': return 'bg-red-100 border-red-300 text-red-700';
@@ -333,7 +325,6 @@ const PLATFORM_META: Record<string, { label: string; color: Parameters<typeof Ba
   youtube: { label: "YouTube", color: "rose" },
   instagram: { label: "Instagram", color: "purple" },
   tiktok: { label: "TikTok", color: "amber" },
-  twitter: { label: "Twitter / X", color: "blue" },
   linkedin: { label: "LinkedIn", color: "blue" },
   reddit: { label: "Reddit", color: "amber" },
   pinterest: { label: "Pinterest", color: "rose" },
@@ -557,7 +548,6 @@ export default function Home() {
         setEditingBookmark(null);
         setEditNote("");
       } else if (res.status === 405) {
-        // Method not allowed - backend doesn't support PUT
         console.error("Edit functionality not available: Backend doesn't support updating bookmarks");
         alert("Edit functionality is not available. The backend doesn't support updating bookmarks yet.");
         setEditingBookmark(null);
@@ -586,7 +576,6 @@ export default function Home() {
     setOpenDropdown(openDropdown === bookmarkId ? null : bookmarkId);
   };
 
-  // Close dropdown when clicking outside
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
       if (openDropdown !== null) {
@@ -609,7 +598,6 @@ export default function Home() {
       youtube: bookmarks.filter(b => normalizePlatform(b.platform) === 'youtube').length,
       tiktok: bookmarks.filter(b => normalizePlatform(b.platform) === 'tiktok').length,
       instagram: bookmarks.filter(b => normalizePlatform(b.platform) === 'instagram').length,
-      twitter: bookmarks.filter(b => normalizePlatform(b.platform) === 'twitter').length,
       web: bookmarks.filter(b => normalizePlatform(b.platform) === 'web').length,
     };
   }, [bookmarks]);
@@ -661,7 +649,6 @@ export default function Home() {
                 { key: "youtube", label: "YouTube", platform: "youtube", countKey: "youtube" },
                 { key: "tiktok", label: "TikTok", platform: "tiktok", countKey: "tiktok" },
                 { key: "instagram", label: "Instagram", platform: "instagram", countKey: "instagram" },
-                { key: "twitter", label: "Twitter/X", platform: "twitter", countKey: "twitter" },
                 { key: "web", label: "Other", platform: "web", countKey: "web" },
               ].map((p) => (
                 <PlatformFilterButton
@@ -905,7 +892,6 @@ export default function Home() {
 
                       <div className="p-4 pt-3 mt-auto">
                         {editingBookmark === bm.id ? (
-                          // Edit overlay that appears on top of the entire card
                           <div className="absolute inset-0 bg-white/95 backdrop-blur-sm z-40 flex items-center justify-center p-4">
                             <div className="bg-white p-6 rounded-xl border border-gray-300 shadow-lg w-full max-w-sm">
                               <h3 className="text-lg font-medium text-gray-800 mb-4">Edit Note</h3>
@@ -936,13 +922,16 @@ export default function Home() {
                         ) : (
                           <>
                             {bm.note && (
-                              <p className="text-gray-600 text-sm mb-2 line-clamp-2 italic">
-                                "{bm.note}"
+                              <p className="text-gray-600 text-sm mb-2 line-clamp-2 font-inter">
+                                {bm.note}
                               </p>
                             )}
-                            <div className="flex items-center justify-center">
-                              <span className="text-gray-500 text-sm font-medium">
-                                {new Date(bm.created_at).toLocaleDateString()}
+                            <div className="flex items-center justify-between">
+                              <span className="text-gray-400 text-xs truncate pr-2">
+                                {bm.author || new URL(bm.url).hostname}
+                              </span>
+                              <span className="text-gray-400 text-xs flex-shrink-0">
+                                {new Date(bm.created_at).toLocaleDateString('en-US', { month: 'numeric', day: 'numeric', year: 'numeric' })}
                               </span>
                             </div>
                           </>

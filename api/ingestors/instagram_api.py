@@ -34,11 +34,8 @@ class InstagramApiIngestor:
         )
         self.platform = "instagram"
         
-        # The most reliable way to login is to load a session from a file.
-        # This avoids repeated logins and 2FA issues.
         if username:
             try:
-                # Attempt to load session. If it fails, it will raise an exception.
                 logger.info(f"Attempting to load Instagram session for {username}")
                 self.loader.load_session_from_file(username)
                 logger.info(f"Successfully loaded session for {username}.")
@@ -94,13 +91,9 @@ class InstagramApiIngestor:
         return None
     
     def _get_best_thumbnail(self, post):
-        """Extract the best available thumbnail URL from an Instagram post."""
         if post.is_video:
-            # For videos, the video_url itself is often a direct link to the video file,
-            # and the thumbnail is usually available via post.url
             return post.url
         
-        # For single image posts or carousels, post.url is usually the best quality.
         return post.url
 
     async def extract_metadata(self, url):
@@ -113,22 +106,17 @@ class InstagramApiIngestor:
             
             post = instaloader.Post.from_shortcode(self.loader.context, shortcode)
             
-            # Get the media URL
             media_url = self._get_best_thumbnail(post)
             thumbnail_url = None
 
             if media_url:
                 try:
-                    # Define a path to save the thumbnail, relative to the `api` directory
                     thumbnail_dir = "static/thumbnails"
                     os.makedirs(thumbnail_dir, exist_ok=True)
                     
-                    # Create a unique filename
-                    # Use a simple, predictable extension.
                     thumbnail_filename = f"instagram_{shortcode}.jpg"
                     thumbnail_filepath = os.path.join(thumbnail_dir, thumbnail_filename)
 
-                    # Download and save the thumbnail
                     if not os.path.exists(thumbnail_filepath):
                         logger.info(f"Downloading Instagram thumbnail from {media_url} to {thumbnail_filepath}")
                         response = self.loader.context._session.get(media_url, stream=True)
@@ -140,19 +128,16 @@ class InstagramApiIngestor:
                     else:
                         logger.info(f"Instagram thumbnail already exists at {thumbnail_filepath}")
 
-                    # The URL that will be served by our API
                     thumbnail_url = f"/static/thumbnails/{thumbnail_filename}"
 
                 except Exception as e:
                     logger.error(f"Failed to download Instagram thumbnail for {shortcode} from {media_url}: {e}")
-                    thumbnail_url = post.url # Fallback to remote URL if download fails
+                    thumbnail_url = post.url 
             else:
                 logger.warning(f"Could not find a media URL for Instagram post {shortcode}")
             
-            # Create a meaningful title from caption
             title = "Instagram Post"
             if post.caption:
-                # Clean up the caption for title
                 clean_caption = re.sub(r'#\w+', '', post.caption).strip()
                 if (clean_caption):
                     title = clean_caption[:100] + ("..." if len(clean_caption) > 100 else "")
