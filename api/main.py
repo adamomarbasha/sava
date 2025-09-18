@@ -41,6 +41,10 @@ class BookmarkIn(BaseModel):
     title: str | None = None
     note: str | None = None
 
+class BookmarkUpdate(BaseModel):
+    note: str | None = None
+    title: str | None = None
+
 class YouTubeBookmarkIn(BaseModel):
     url: HttpUrl
 
@@ -302,6 +306,65 @@ def delete_bookmark(
         raise
     except Exception as e:
         logger.error(f"Error deleting bookmark: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+@app.patch("/api/bookmarks/{bookmark_id}")
+def update_bookmark(
+    bookmark_id: int,
+    update_data: BookmarkUpdate,
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    try:
+        bookmark = db.query(Bookmark).filter(
+            Bookmark.id == bookmark_id,
+            Bookmark.user_id == current_user["id"]
+        ).first()
+        
+        if not bookmark:
+            raise HTTPException(status_code=404, detail="Bookmark not found")
+        
+        # Update the fields that were provided
+        if update_data.note is not None:
+            bookmark.note = update_data.note
+        if update_data.title is not None:
+            bookmark.title = update_data.title
+        
+        db.commit()
+        db.refresh(bookmark)
+        
+        # Return the updated bookmark in the same format as list_bookmarks
+        response = {
+            "id": bookmark.id,
+            "platform": bookmark.platform,
+            "url": bookmark.url,
+            "title": bookmark.title,
+            "author": bookmark.author,
+            "thumbnail_url": bookmark.thumbnail_url,
+            "note": bookmark.note,
+            "published_at": bookmark.published_at.isoformat() if bookmark.published_at else None,
+            "created_at": bookmark.created_at.isoformat(),
+            "meta": {}
+        }
+        
+        if bookmark.platform == "youtube" and bookmark.youtube_details:
+            yt = bookmark.youtube_details[0]
+            response["meta"] = {
+                "video_id": yt.video_id,
+                "channel_id": yt.channel_id,
+                "duration_seconds": yt.duration_seconds,
+                "view_count": yt.view_count,
+                "like_count": yt.like_count,
+                "tags": json.loads(yt.tags) if yt.tags else []
+            }
+        
+        logger.info(f"Updated bookmark {bookmark_id}")
+        return response
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating bookmark: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.get("/test/instagram-thumbnail")

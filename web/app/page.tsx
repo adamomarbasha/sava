@@ -304,6 +304,74 @@ const PLATFORM_META: Record<string, { label: string; color: Parameters<typeof Ba
   web: { label: "Other", color: "slate" },
 };
 
+// Add dropdown component
+function DropdownMenu({ 
+  onEdit, 
+  onDelete 
+}: { 
+  onEdit: () => void; 
+  onDelete: () => void; 
+}) {
+  const [isOpen, setIsOpen] = useState(false);
+  const dropdownRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
+        setIsOpen(false);
+      }
+    }
+
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, []);
+
+  return (
+    <div className="relative" ref={dropdownRef}>
+      <button
+        onClick={() => setIsOpen(!isOpen)}
+        className="p-1 rounded-full hover:bg-gray-100 transition-all duration-200 flex items-center justify-center"
+        aria-label="More options"
+      >
+        <svg className="w-4 h-4 text-gray-500 hover:text-gray-700" fill="currentColor" viewBox="0 0 24 24">
+          <path d="M12 8c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm0 2c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0 6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z" />
+        </svg>
+      </button>
+
+      {isOpen && (
+        <div className="absolute top-full left-0 mt-1 w-36 bg-white rounded-lg shadow-lg border border-gray-200 py-1 z-30">
+          <button
+            onClick={() => {
+              onEdit();
+              setIsOpen(false);
+            }}
+            className="w-full px-3 py-2 text-left text-sm text-gray-700 hover:bg-gray-100 flex items-center gap-2"
+          >
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.5L15.232 5.232z" />
+            </svg>
+            Edit Note
+          </button>
+          <button
+            onClick={() => {
+              onDelete();
+              setIsOpen(false);
+            }}
+            className="w-full px-3 py-2 text-left text-sm text-red-600 hover:bg-red-50 flex items-center gap-2"
+          >
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+            </svg>
+            Delete
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function Home() {
   const { user, token, loading } = useAuth();
   const router = useRouter();
@@ -315,6 +383,8 @@ export default function Home() {
   const [platformFilter, setPlatformFilter] = useState<string>("");
   const [search, setSearch] = useState<string>("");
   const [bookmarkError, setBookmarkError] = useState<string>("");
+  const [editingBookmark, setEditingBookmark] = useState<Bookmark | null>(null);
+  const [editedNote, setEditedNote] = useState("");
 
   useEffect(() => {
     if (typeof window !== 'undefined') {
@@ -474,6 +544,56 @@ export default function Home() {
       }
     } finally { 
       setBookmarkLoading(false); 
+    }
+  };
+
+  const handleDelete = async (id: number) => {
+    try {
+      const res = await fetch(`${API_BASE}/api/bookmarks/${id}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+
+      if (res.ok) {
+        setBookmarks(bookmarks.filter(b => b.id !== id));
+      } else {
+        console.error("Failed to delete bookmark");
+        setBookmarkError("Failed to delete bookmark. Please try again.");
+      }
+    } catch (error) {
+      console.error("Failed to delete bookmark:", error);
+      setBookmarkError("Network error while deleting. Please try again.");
+    }
+  };
+
+  const handleEdit = (bookmark: Bookmark) => {
+    setEditingBookmark(bookmark);
+    setEditedNote(bookmark.note || "");
+  };
+
+  const handleUpdateNote = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingBookmark) return;
+
+    try {
+      const res = await fetch(`${API_BASE}/api/bookmarks/${editingBookmark.id}`, {
+        method: 'PATCH',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ note: editedNote }),
+      });
+
+      if (res.ok) {
+        const updatedBookmark = await res.json();
+        setBookmarks(bookmarks.map(b => b.id === updatedBookmark.id ? updatedBookmark : b));
+        setEditingBookmark(null);
+      } else {
+        console.error("Failed to update note");
+      }
+    } catch (error) {
+      console.error("Failed to update note:", error);
     }
   };
 
@@ -658,6 +778,12 @@ export default function Home() {
                   data-reveal
                 >
                   <CardContent className="p-0 flex flex-col h-full relative">
+                    <div className="absolute top-2 left-2 z-20 flex gap-2">
+                      <DropdownMenu 
+                        onEdit={() => handleEdit(bm)} 
+                        onDelete={() => handleDelete(bm.id)} 
+                      />
+                    </div>
                     <div className="absolute top-2 right-2 z-10">
                       <div className="bg-white/90 backdrop-blur-sm rounded-lg p-1.5 shadow-lg border border-white/20">
                         <PlatformIcon platform={bm.platform || 'web'} size="w-3.5 h-3.5" />
@@ -763,6 +889,30 @@ export default function Home() {
           </div>
         </div>
       </div>
+
+      {editingBookmark && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+          <Card className="w-full max-w-lg">
+            <CardContent className="p-6">
+              <h3 className="text-lg font-semibold mb-4">Edit Note</h3>
+              <form onSubmit={handleUpdateNote}>
+                <textarea
+                  value={editedNote}
+                  onChange={(e) => setEditedNote(e.target.value)}
+                  className="w-full h-32 p-2 border rounded-md"
+                  placeholder="Your note..."
+                />
+                <div className="flex justify-end gap-2 mt-4">
+                  <Button type="button" variant="secondary" onClick={() => setEditingBookmark(null)}>
+                    Cancel
+                  </Button>
+                  <Button type="submit">Save</Button>
+                </div>
+              </form>
+            </CardContent>
+          </Card>
+        </div>
+      )}
     </div>
   );
 }
