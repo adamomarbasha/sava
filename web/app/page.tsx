@@ -894,7 +894,7 @@ export default function Home() {
         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
           <Card className="w-full max-w-lg">
             <CardContent className="p-6">
-              <h3 className="text-lg font-semibold mb-4">Edit Note</h3>
+              <h3 className="text-lg font-semibold mb-1 pt-2">Edit Note</h3>
               <form onSubmit={handleUpdateNote}>
                 <textarea
                   value={editedNote}
