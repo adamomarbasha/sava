@@ -117,29 +117,67 @@ function SmartYouTubeThumbnail({
   );
 }
 
+function SmartInstagramThumbnail({ 
+  thumbnailUrl, 
+  alt = "Instagram thumbnail", 
+  className = "",
+}: { 
+  thumbnailUrl: string; 
+  alt?: string; 
+  className?: string;
+}) {
+  const [hasError, setHasError] = useState(!thumbnailUrl);
+  
+  useEffect(() => {
+    setHasError(!thumbnailUrl);
+  }, [thumbnailUrl]);
+  
+  const handleImageError = () => {
+    console.log(`Instagram thumbnail failed: ${thumbnailUrl}`);
+    setHasError(true);
+  };
+  
+  if (hasError) {
+    return (
+      <div className={`w-full h-full flex items-center justify-center bg-gray-100 ${className}`}>
+        <PlatformIcon platform="instagram" size="w-12 h-12" />
+      </div>
+    );
+  }
+  
+  return (
+    <img 
+      src={thumbnailUrl}
+      alt={alt}
+      className={className}
+      onError={handleImageError}
+    />
+  );
+}
+
 function getThumbnail(url: string, platform?: string, bookmark?: any): string | null {
   const ytId = extractYouTubeId(url);
   if (platform === "youtube" && ytId) {
     return `https://img.youtube.com/vi/${ytId}/maxresdefault.jpg`;
   }
   
-  // Debug logging
-  console.log({
-    url: url.substring(0, 50) + '...',
-    platform,
-    hasBookmark: !!bookmark,
-    thumbnail_url: bookmark?.thumbnail_url
-  });
-  
   if (bookmark?.thumbnail_url) {
-    return bookmark.thumbnail_url;
+    const thumbUrl = bookmark.thumbnail_url;
+    if (thumbUrl.startsWith('/static/')) {
+      return `${API_BASE}${thumbUrl}`;
+    }
+    // If it's an external Instagram URL, proxy it through our backend
+    if (thumbUrl.includes('fbcdn.net')) {
+      return `${API_BASE}/api/thumbnail?url=${encodeURIComponent(thumbUrl)}`;
+    }
+    return thumbUrl;
   }
   
   return null;
 }
 
 function getVideoAspectRatio(platform: string, bookmark?: any): string {
-  if (platform === "tiktok") {
+  if (platform === "tiktok" || platform === "instagram") {
     return "aspect-[3/4] max-w-[150px] mx-auto";
   }
   return "aspect-video";
@@ -304,74 +342,6 @@ const PLATFORM_META: Record<string, { label: string; color: Parameters<typeof Ba
   web: { label: "Other", color: "slate" },
 };
 
-// Add dropdown component
-function DropdownMenu({ 
-  onEdit, 
-  onDelete 
-}: { 
-  onEdit: () => void; 
-  onDelete: () => void; 
-}) {
-  const [isOpen, setIsOpen] = useState(false);
-  const dropdownRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    function handleClickOutside(event: MouseEvent) {
-      if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
-        setIsOpen(false);
-      }
-    }
-
-    document.addEventListener('mousedown', handleClickOutside);
-    return () => {
-      document.removeEventListener('mousedown', handleClickOutside);
-    };
-  }, []);
-
-  return (
-    <div className="relative" ref={dropdownRef}>
-      <button
-        onClick={() => setIsOpen(!isOpen)}
-        className="p-1 rounded-full hover:bg-gray-100 transition-all duration-200 flex items-center justify-center"
-        aria-label="More options"
-      >
-        <svg className="w-4 h-4 text-gray-500 hover:text-gray-700" fill="currentColor" viewBox="0 0 24 24">
-          <path d="M12 8c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm0 2c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0 6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z" />
-        </svg>
-      </button>
-
-      {isOpen && (
-        <div className="absolute top-full left-0 mt-1 w-36 bg-white rounded-lg shadow-lg border border-gray-200 py-1 z-30">
-          <button
-            onClick={() => {
-              onEdit();
-              setIsOpen(false);
-            }}
-            className="w-full px-3 py-2 text-left text-sm text-gray-700 hover:bg-gray-100 flex items-center gap-2"
-          >
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.5L15.232 5.232z" />
-            </svg>
-            Edit Note
-          </button>
-          <button
-            onClick={() => {
-              onDelete();
-              setIsOpen(false);
-            }}
-            className="w-full px-3 py-2 text-left text-sm text-red-600 hover:bg-red-50 flex items-center gap-2"
-          >
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-            </svg>
-            Delete
-          </button>
-        </div>
-      )}
-    </div>
-  );
-}
-
 export default function Home() {
   const { user, token, loading } = useAuth();
   const router = useRouter();
@@ -383,8 +353,9 @@ export default function Home() {
   const [platformFilter, setPlatformFilter] = useState<string>("");
   const [search, setSearch] = useState<string>("");
   const [bookmarkError, setBookmarkError] = useState<string>("");
-  const [editingBookmark, setEditingBookmark] = useState<Bookmark | null>(null);
-  const [editedNote, setEditedNote] = useState("");
+  const [editingBookmark, setEditingBookmark] = useState<number | null>(null);
+  const [editNote, setEditNote] = useState<string>("");
+  const [openDropdown, setOpenDropdown] = useState<number | null>(null);
 
   useEffect(() => {
     if (typeof window !== 'undefined') {
@@ -547,55 +518,90 @@ export default function Home() {
     }
   };
 
-  const handleDelete = async (id: number) => {
+  const handleDeleteBookmark = async (bookmarkId: number) => {
+    if (!token) return;
+    
     try {
-      const res = await fetch(`${API_BASE}/api/bookmarks/${id}`, {
-        method: 'DELETE',
-        headers: { Authorization: `Bearer ${token}` },
+      const res = await fetch(`${API_BASE}/api/bookmarks/${bookmarkId}`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${token}` }
       });
-
+      
       if (res.ok) {
-        setBookmarks(bookmarks.filter(b => b.id !== id));
+        setBookmarks(prev => prev.filter(b => b.id !== bookmarkId));
       } else {
-        console.error("Failed to delete bookmark");
-        setBookmarkError("Failed to delete bookmark. Please try again.");
+        console.error("Failed to delete bookmark:", res.status, res.statusText);
       }
     } catch (error) {
-      console.error("Failed to delete bookmark:", error);
-      setBookmarkError("Network error while deleting. Please try again.");
+      console.error("Error deleting bookmark:", error);
     }
   };
 
-  const handleEdit = (bookmark: Bookmark) => {
-    setEditingBookmark(bookmark);
-    setEditedNote(bookmark.note || "");
-  };
-
-  const handleUpdateNote = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!editingBookmark) return;
-
+  const handleEditNote = async (bookmarkId: number, newNote: string) => {
+    if (!token) return;
+    
     try {
-      const res = await fetch(`${API_BASE}/api/bookmarks/${editingBookmark.id}`, {
-        method: 'PATCH',
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
+      const res = await fetch(`${API_BASE}/api/bookmarks/${bookmarkId}`, {
+        method: "PUT",
+        headers: { 
+          "Content-Type": "application/json", 
+          Authorization: `Bearer ${token}` 
         },
-        body: JSON.stringify({ note: editedNote }),
+        body: JSON.stringify({ note: newNote })
       });
-
+      
       if (res.ok) {
-        const updatedBookmark = await res.json();
-        setBookmarks(bookmarks.map(b => b.id === updatedBookmark.id ? updatedBookmark : b));
+        setBookmarks(prev => prev.map(b => 
+          b.id === bookmarkId ? { ...b, note: newNote } : b
+        ));
         setEditingBookmark(null);
+        setEditNote("");
+      } else if (res.status === 405) {
+        // Method not allowed - backend doesn't support PUT
+        console.error("Edit functionality not available: Backend doesn't support updating bookmarks");
+        alert("Edit functionality is not available. The backend doesn't support updating bookmarks yet.");
+        setEditingBookmark(null);
+        setEditNote("");
       } else {
-        console.error("Failed to update note");
+        console.error("Failed to update bookmark:", res.status, res.statusText);
+        alert("Failed to update bookmark. Please try again.");
       }
     } catch (error) {
-      console.error("Failed to update note:", error);
+      console.error("Error updating bookmark:", error);
+      alert("Error updating bookmark. Please try again.");
     }
   };
+
+  const startEditing = (bookmarkId: number, currentNote: string) => {
+    setEditingBookmark(bookmarkId);
+    setEditNote(currentNote || "");
+  };
+
+  const cancelEditing = () => {
+    setEditingBookmark(null);
+    setEditNote("");
+  };
+
+  const toggleDropdown = (bookmarkId: number) => {
+    setOpenDropdown(openDropdown === bookmarkId ? null : bookmarkId);
+  };
+
+  // Close dropdown when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (openDropdown !== null) {
+        const dropdown = document.querySelector(`[data-dropdown="${openDropdown}"]`);
+        if (dropdown && !dropdown.contains(event.target as Node)) {
+          setOpenDropdown(null);
+        }
+      }
+    };
+
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, [openDropdown]);
 
   const platformCounts = useMemo(() => {
     return {
@@ -778,12 +784,50 @@ export default function Home() {
                   data-reveal
                 >
                   <CardContent className="p-0 flex flex-col h-full relative">
-                    <div className="absolute top-2 left-2 z-20 flex gap-2">
-                      <DropdownMenu 
-                        onEdit={() => handleEdit(bm)} 
-                        onDelete={() => handleDelete(bm.id)} 
-                      />
+                    {/* Three-dot dropdown menu in top-left corner */}
+                    <div className="absolute top-2 left-2 z-20" data-dropdown={bm.id}>
+                      <button
+                        onClick={() => toggleDropdown(bm.id)}
+                        className="p-1 hover:bg-black/10 rounded transition-colors duration-200"
+                        title="More options"
+                      >
+                        <svg className="w-4 h-4 text-gray-700" fill="currentColor" viewBox="0 0 24 24">
+                          <path d="M12 8c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm0 2c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0 6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z"/>
+                        </svg>
+                      </button>
+                      
+                      {/* Dropdown menu */}
+                      {openDropdown === bm.id && (
+                        <div className="absolute top-full left-0 mt-1 bg-white rounded-lg shadow-lg border border-gray-200 py-1 min-w-[120px] z-30">
+                          <button
+                            onClick={() => {
+                              startEditing(bm.id, bm.note || "");
+                              setOpenDropdown(null);
+                            }}
+                            className="w-full text-left px-3 py-2 text-sm text-gray-700 hover:bg-gray-100 transition-colors duration-200 flex items-center gap-2"
+                          >
+                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                            </svg>
+                            Edit
+                          </button>
+                          <button
+                            onClick={() => {
+                              handleDeleteBookmark(bm.id);
+                              setOpenDropdown(null);
+                            }}
+                            className="w-full text-left px-3 py-2 text-sm text-red-600 hover:bg-red-50 transition-colors duration-200 flex items-center gap-2"
+                          >
+                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                            </svg>
+                            Delete
+                          </button>
+                        </div>
+                      )}
                     </div>
+
+                    {/* Platform icon in top-right corner */}
                     <div className="absolute top-2 right-2 z-10">
                       <div className="bg-white/90 backdrop-blur-sm rounded-lg p-1.5 shadow-lg border border-white/20">
                         <PlatformIcon platform={bm.platform || 'web'} size="w-3.5 h-3.5" />
@@ -827,6 +871,13 @@ export default function Home() {
                                   </div>
                                 );
                               })()
+                            ) : bm.platform === "instagram" && thumb ? (
+                              <SmartInstagramThumbnail 
+                                key={bm.id}
+                                thumbnailUrl={thumb}
+                                alt="Instagram thumbnail"
+                                className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                              />
                             ) : thumb ? (
                               <>
                                 <img 
@@ -837,7 +888,8 @@ export default function Home() {
                                     e.currentTarget.style.display = "none"; 
                                     const fallback = e.currentTarget.nextElementSibling as HTMLElement; 
                                     if (fallback) fallback.style.display = "flex"; 
-                                  }}                                />
+                                  }} 
+                                />
                                 <div className="w-full h-full items-center justify-center bg-gray-100" style={{display: "none"}}>
                                   <PlatformIcon platform={bm.platform || "web"} size="w-12 h-12" />
                                 </div>
@@ -852,14 +904,49 @@ export default function Home() {
                       </div>
 
                       <div className="p-4 pt-3 mt-auto">
-                        {bm.note && (
-                          <p className="text-gray-600 text-sm mb-2 line-clamp-2 italic">
-                            "{bm.note}"
-                          </p>
+                        {editingBookmark === bm.id ? (
+                          // Edit overlay that appears on top of the entire card
+                          <div className="absolute inset-0 bg-white/95 backdrop-blur-sm z-40 flex items-center justify-center p-4">
+                            <div className="bg-white p-6 rounded-xl border border-gray-300 shadow-lg w-full max-w-sm">
+                              <h3 className="text-lg font-medium text-gray-800 mb-4">Edit Note</h3>
+                              <textarea
+                                value={editNote}
+                                onChange={(e) => setEditNote(e.target.value)}
+                                className="w-full p-3 text-sm border border-gray-300 rounded-lg resize-none focus:outline-none focus:border-gray-400 bg-white"
+                                rows={4}
+                                placeholder="Add a note..."
+                                autoFocus
+                              />
+                              <div className="flex gap-3 mt-4">
+                                <button
+                                  onClick={cancelEditing}
+                                  className="flex-1 bg-gray-200 hover:bg-gray-300 text-gray-800 text-sm font-medium px-4 py-3 rounded-lg transition-colors duration-200"
+                                >
+                                  Cancel
+                                </button>
+                                <button
+                                  onClick={() => handleEditNote(bm.id, editNote)}
+                                  className="flex-1 bg-blue-500 hover:bg-blue-600 text-white text-sm font-medium px-4 py-3 rounded-lg transition-colors duration-200"
+                                >
+                                  Save
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+                        ) : (
+                          <>
+                            {bm.note && (
+                              <p className="text-gray-600 text-sm mb-2 line-clamp-2 italic">
+                                "{bm.note}"
+                              </p>
+                            )}
+                            <div className="flex items-center justify-center">
+                              <span className="text-gray-500 text-sm font-medium">
+                                {new Date(bm.created_at).toLocaleDateString()}
+                              </span>
+                            </div>
+                          </>
                         )}
-                        <span className="text-gray-500 text-sm font-medium">
-                          {new Date(bm.created_at).toLocaleDateString()}
-                        </span>
                       </div>
                     </div>
                   </CardContent>
@@ -889,30 +976,6 @@ export default function Home() {
           </div>
         </div>
       </div>
-
-      {editingBookmark && (
-        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
-          <Card className="w-full max-w-lg">
-            <CardContent className="p-6">
-              <h3 className="text-lg font-semibold mb-1 pt-2">Edit Note</h3>
-              <form onSubmit={handleUpdateNote}>
-                <textarea
-                  value={editedNote}
-                  onChange={(e) => setEditedNote(e.target.value)}
-                  className="w-full h-32 p-2 border rounded-md"
-                  placeholder="Your note..."
-                />
-                <div className="flex justify-end gap-2 mt-4">
-                  <Button type="button" variant="secondary" onClick={() => setEditingBookmark(null)}>
-                    Cancel
-                  </Button>
-                  <Button type="submit">Save</Button>
-                </div>
-              </form>
-            </CardContent>
-          </Card>
-        </div>
-      )}
     </div>
   );
 }

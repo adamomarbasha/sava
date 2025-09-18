@@ -1,5 +1,6 @@
-from fastapi import FastAPI, HTTPException, Depends, status, Query
+from fastapi import FastAPI, HTTPException, Depends, status, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, HttpUrl
 from sqlalchemy.orm import Session
 from sqlalchemy import text
@@ -7,6 +8,9 @@ from datetime import timedelta
 from typing import Optional, List
 import logging
 import json
+import os
+import requests
+from starlette.responses import StreamingResponse
 
 from db import get_db, init_db
 from models import User, Bookmark
@@ -25,11 +29,31 @@ from auth import (
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Sava Bookmark API", version="2.0.0")
+app = FastAPI(
+    title="Sava Bookmark API", 
+    version="2.0.0",
+    description="A powerful bookmark management API for saving and organizing links from various social media platforms",
+    docs_url="/docs",  
+    redoc_url="/redoc",  
+    openapi_url="/openapi.json"  
+)
+
+os.makedirs("static", exist_ok=True)
+
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000", "http://localhost:3001", "http://127.0.0.1:3001", "http://localhost:3002", "http://127.0.0.1:3002"],
+    allow_origins=[
+        "http://localhost:3000", 
+        "http://127.0.0.1:3000", 
+        "http://localhost:3001", 
+        "http://127.0.0.1:3001", 
+        "http://localhost:3002", 
+        "http://127.0.0.1:3002",
+        "http://localhost:3003", 
+        "http://127.0.0.1:3003"
+    ],
     allow_origin_regex=r"http://(localhost|127\.0\.0\.1):\d+",
     allow_credentials=True,
     allow_methods=["*"],
@@ -40,10 +64,6 @@ class BookmarkIn(BaseModel):
     url: HttpUrl
     title: str | None = None
     note: str | None = None
-
-class BookmarkUpdate(BaseModel):
-    note: str | None = None
-    title: str | None = None
 
 class YouTubeBookmarkIn(BaseModel):
     url: HttpUrl
@@ -59,6 +79,9 @@ class UserLogin(BaseModel):
 class Token(BaseModel):
     access_token: str
     token_type: str
+
+class BookmarkUpdate(BaseModel):
+    note: str
 
 @app.on_event("startup")
 def on_startup():
@@ -110,25 +133,37 @@ def register(user: UserRegister, db: Session = Depends(get_db)):
     return {"id": new_user.id, "email": new_user.email, "message": "User created successfully"}
 
 @app.post("/auth/login", response_model=Token)
-def login(user: UserLogin):
-    existing_user = get_user_by_email(user.email)
-    if not existing_user:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Email not found"
-        )
-    if not verify_password(user.password, existing_user["password_hash"]):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Incorrect password",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+async def login(user: UserLogin):
+    try:
+        existing_user = get_user_by_email(user.email)
+        if not existing_user:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Email not found"
+            )
+        
+        if not verify_password(user.password, existing_user["password_hash"]):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Incorrect password",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
 
-    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    access_token = create_access_token(
-        data={"sub": existing_user["email"]}, expires_delta=access_token_expires
-    )
-    return {"access_token": access_token, "token_type": "bearer"}
+        access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+        access_token = create_access_token(
+            data={"sub": existing_user["email"]}, 
+            expires_delta=access_token_expires
+        )
+        return {"access_token": access_token, "token_type": "bearer"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Login error: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal server error during login"
+        )
 
 @app.get("/auth/me")
 def get_me(current_user: dict = Depends(get_current_user)):
@@ -308,10 +343,10 @@ def delete_bookmark(
         logger.error(f"Error deleting bookmark: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
-@app.patch("/api/bookmarks/{bookmark_id}")
-def update_bookmark(
+@app.put("/api/bookmarks/{bookmark_id}")
+async def update_bookmark(
     bookmark_id: int,
-    update_data: BookmarkUpdate,
+    bookmark_update: BookmarkUpdate,
     current_user: dict = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
@@ -324,17 +359,12 @@ def update_bookmark(
         if not bookmark:
             raise HTTPException(status_code=404, detail="Bookmark not found")
         
-        # Update the fields that were provided
-        if update_data.note is not None:
-            bookmark.note = update_data.note
-        if update_data.title is not None:
-            bookmark.title = update_data.title
+        bookmark.note = bookmark_update.note
         
         db.commit()
         db.refresh(bookmark)
         
-        # Return the updated bookmark in the same format as list_bookmarks
-        response = {
+        return {
             "id": bookmark.id,
             "platform": bookmark.platform,
             "url": bookmark.url,
@@ -346,24 +376,10 @@ def update_bookmark(
             "created_at": bookmark.created_at.isoformat(),
             "meta": {}
         }
-        
-        if bookmark.platform == "youtube" and bookmark.youtube_details:
-            yt = bookmark.youtube_details[0]
-            response["meta"] = {
-                "video_id": yt.video_id,
-                "channel_id": yt.channel_id,
-                "duration_seconds": yt.duration_seconds,
-                "view_count": yt.view_count,
-                "like_count": yt.like_count,
-                "tags": json.loads(yt.tags) if yt.tags else []
-            }
-        
-        logger.info(f"Updated bookmark {bookmark_id}")
-        return response
-        
     except HTTPException:
         raise
     except Exception as e:
+        db.rollback()
         logger.error(f"Error updating bookmark: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
@@ -375,3 +391,18 @@ async def test_instagram_thumbnail(url: str):
         "success": True,
         "note": "Use POST /bookmarks to actually extract metadata"
     }
+
+@app.get("/api/thumbnail")
+async def proxy_thumbnail(url: str):
+    if not url:
+        raise HTTPException(status_code=400, detail="URL parameter is required")
+    
+    try:
+        response = requests.get(url, stream=True)
+        response.raise_for_status()
+        
+        content_type = response.headers.get('Content-Type', 'application/octet-stream')
+        
+        return StreamingResponse(response.iter_content(chunk_size=8192), media_type=content_type)
+    except requests.exceptions.RequestException as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch image: {e}")
