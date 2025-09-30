@@ -4,7 +4,6 @@ import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { useAuth } from "./contexts/AuthContext";
 import { useRouter } from "next/navigation";
 import { Button, Card, CardContent, Input, Label, Spinner, Badge, Alert } from "./components/UI";
-import { platform } from "os";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://127.0.0.1:8000";
 
@@ -166,7 +165,7 @@ function getThumbnail(url: string, platform?: string, bookmark?: any): string | 
     if (thumbUrl.startsWith('/static/')) {
       return `${API_BASE}${thumbUrl}`;
     }
-    if (thumbUrl.includes('fbcdn.net')) {
+    if (thumbUrl.includes('fbcdn.net') || thumbUrl.includes('instagram')) {
       return `${API_BASE}/api/thumbnail?url=${encodeURIComponent(thumbUrl)}`;
     }
     return thumbUrl;
@@ -332,6 +331,19 @@ const PLATFORM_META: Record<string, { label: string; color: Parameters<typeof Ba
   facebook: { label: "Facebook", color: "blue" },
   web: { label: "Other", color: "slate" },
 };
+
+function AiBadge() {
+  return (
+    <div className="ai-badge">
+      <img 
+        src="/AILogo.png"
+        alt="AI"
+        className="ai-icon"
+      />
+      <span className="ai-text">AI Summary</span>
+    </div>
+  );
+}
 
 export default function Home() {
   const { user, token, loading } = useAuth();
@@ -771,7 +783,7 @@ export default function Home() {
                   data-reveal
                 >
                   <CardContent className="p-0 flex flex-col h-full relative">
-                    {/* Three-dot dropdown menu in top-left corner */}
+                    {}
                     <div className="absolute top-2 left-2 z-20" data-dropdown={bm.id}>
                       <button
                         onClick={() => toggleDropdown(bm.id)}
@@ -783,7 +795,7 @@ export default function Home() {
                         </svg>
                       </button>
                       
-                      {/* Dropdown menu */}
+                      {}
                       {openDropdown === bm.id && (
                         <div className="absolute top-full left-0 mt-1 bg-white rounded-lg shadow-lg border border-gray-200 py-1 min-w-[120px] z-30">
                           <button
@@ -814,32 +826,20 @@ export default function Home() {
                       )}
                     </div>
 
-                    {/* Platform icon in top-right corner */}
+                    {}
                     <div className="absolute top-2 right-2 z-10">
                       <div className="bg-white/90 backdrop-blur-sm rounded-lg p-1.5 shadow-lg border border-white/20">
                         <PlatformIcon platform={bm.platform || 'web'} size="w-3.5 h-3.5" />
                       </div>
                     </div>
                     
-                    <div className="flex flex-col h-full">
-
-                      <div className="p-4 pb-2">
+                    <div className="flex-1 px-4 flex items-center justify-center">
+                      <div className="block group relative">
                         <a 
                           href={bm.url} 
                           target="_blank" 
                           rel="noopener noreferrer" 
-                          className="block text-gray-900 hover:text-blue-600 font-semibold text-base leading-tight transition-colors duration-200 line-clamp-2"
-                        >
-                          {bm.title || bm.note || new URL(bm.url).hostname}
-                        </a>
-                      </div>
-
-                      <div className="flex-1 px-4 flex items-center justify-center">
-                        <a 
-                          href={bm.url} 
-                          target="_blank" 
-                          rel="noopener noreferrer" 
-                          className="block group"
+                          className="block"
                         >
                           <div className={`${getVideoAspectRatio(bm.platform || 'web', bm)} overflow-hidden rounded-md bg-gray-100`}>
                             {bm.platform === "youtube" ? (
@@ -888,7 +888,11 @@ export default function Home() {
                             )}
                           </div>
                         </a>
+                        {(bm.platform === "youtube" || bm.platform === "instagram" || bm.platform === "tiktok") && (
+                          <AiBadge />
+                        )}
                       </div>
+                    </div>
 
                       <div className="p-4 pt-3 mt-auto">
                         {editingBookmark === bm.id ? (
@@ -937,7 +941,6 @@ export default function Home() {
                           </>
                         )}
                       </div>
-                    </div>
                   </CardContent>
                 </Card>
               );
