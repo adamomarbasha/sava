@@ -359,6 +359,8 @@ export default function Home() {
   const [editingBookmark, setEditingBookmark] = useState<number | null>(null);
   const [editNote, setEditNote] = useState<string>("");
   const [openDropdown, setOpenDropdown] = useState<number | null>(null);
+  const [aiOpen, setAiOpen] = useState(false);
+  const [aiBookmark, setAiBookmark] = useState<Bookmark | null>(null);
 
   useEffect(() => {
     if (typeof window !== 'undefined') {
@@ -901,7 +903,21 @@ export default function Home() {
                           </div>
                         </a>
                         {(bm.platform === "youtube" || bm.platform === "instagram" || bm.platform === "tiktok") && (
-                          <AiBadge />
+                          <div
+                            onClick={() => { setAiBookmark(bm); setAiOpen(true); }}
+                            role="button"
+                            tabIndex={0}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter' || e.key === ' ') {
+                                e.preventDefault();
+                                setAiBookmark(bm);
+                                setAiOpen(true);
+                              }
+                            }}
+                            aria-label="Open AI Summary"
+                          >
+                            <AiBadge />
+                          </div>
                         )}
                       </div>
                     </div>
@@ -980,6 +996,73 @@ export default function Home() {
           </div>
         </div>
       </div>
+
+      {aiOpen && aiBookmark && (
+        <div className="fixed inset-0 z-50">
+          <div
+            className="absolute inset-0 bg-black/50 backdrop-blur-sm transition-opacity duration-200"
+            onClick={() => { setAiOpen(false); setAiBookmark(null); }}
+          />
+          <div className="absolute inset-x-0 bottom-0 md:inset-0 md:flex md:items-center md:justify-center px-4 pb-4 md:pb-0">
+            <button
+              type="button"
+              onClick={() => { setAiOpen(false); setAiBookmark(null); }}
+              className="absolute top-4 right-4 z-10 w-10 h-10 bg-black/50 hover:bg-black/70 backdrop-blur-sm rounded-full flex items-center justify-center text-white hover:text-white transition-all duration-200"
+              aria-label="Close"
+            >
+              ✕
+            </button>
+
+            <div className="w-full md:max-w-2xl">
+              <div className="mb-6">
+                <div className="text-2xl font-bold text-white mb-4 text-center drop-shadow-lg">
+                  {aiBookmark.title || aiBookmark.note || new URL(aiBookmark.url).hostname}
+                </div>
+                
+                <div className={`relative mx-auto ${
+                  aiBookmark.platform === "tiktok" || aiBookmark.platform === "instagram" 
+                    ? "aspect-[3/4] max-w-[200px] mx-auto" 
+                    : "aspect-video max-w-[350px] mx-auto"
+                } rounded-xl overflow-hidden shadow-2xl`}>
+                  {(() => {
+                    const t = getThumbnail(aiBookmark.url, aiBookmark.platform, aiBookmark);
+                    return t ? (
+                      <img src={t} alt="thumbnail" className="w-full h-full object-cover" />
+                    ) : (
+                      <div className="w-full h-full flex items-center justify-center bg-gray-100">
+                        <PlatformIcon platform={aiBookmark.platform || 'web'} size="w-16 h-16" />
+                      </div>
+                    );
+                  })()}
+                  
+                  <div className="absolute bottom-3 left-3 bg-black/70 backdrop-blur-sm rounded-lg px-3 py-1.5">
+                    <span className="text-white text-sm font-medium">
+                      {aiBookmark.author || new URL(aiBookmark.url).hostname}
+                    </span>
+                  </div>
+                  
+                  <div className="absolute bottom-3 right-3 bg-black/70 backdrop-blur-sm rounded-lg p-2">
+                    <PlatformIcon platform={aiBookmark.platform || 'web'} size="w-5 h-5" />
+                  </div>
+                </div>
+              </div>
+
+              <div className="text-center mb-4">
+                <h2 className="text-2xl font-bold text-white drop-shadow-lg">AI Summary</h2>
+              </div>
+
+              <div
+                className="w-full rounded-t-2xl md:rounded-2xl bg-white/20 backdrop-blur-md border border-white/30 shadow-2xl p-6 transition-transform duration-200"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div className="text-base text-white leading-relaxed text-left" style={{ fontFamily: 'Minecraft, monospace' }}>
+                  AI summary will appear here once generated…
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
