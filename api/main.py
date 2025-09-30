@@ -5,7 +5,7 @@ from pydantic import BaseModel, HttpUrl
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from datetime import timedelta
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 import logging
 import json
 import os
@@ -16,6 +16,8 @@ from db import get_db, init_db
 from models import User, Bookmark
 from ingestors import add_bookmark, refresh_bookmark
 from email_validation import validate_email_comprehensive
+from transcript_service import get_youtube_transcript, get_available_transcript_languages
+from rate_limiter import rate_limiter
 from auth import (
     authenticate_user, 
     create_access_token, 
@@ -428,3 +430,111 @@ async def proxy_thumbnail(url: str):
         return StreamingResponse(response.iter_content(chunk_size=8192), media_type=content_type)
     except requests.exceptions.RequestException as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch image: {e}")
+
+
+class TranscriptRequest(BaseModel):
+    video_url_or_id: str
+    languages: Optional[List[str]] = None
+    preserve_formatting: Optional[bool] = False
+
+class TranscriptResponse(BaseModel):
+    success: bool
+    transcript: Optional[List[Dict[str, Any]]] = None
+    error: Optional[str] = None
+    video_id: Optional[str] = None
+    language: Optional[str] = None
+
+@app.post("/api/transcript", response_model=TranscriptResponse)
+async def get_transcript(request: TranscriptRequest):
+    try:
+        logger.info(f"Fetching transcript for: {request.video_url_or_id}")
+        
+        result = get_youtube_transcript(
+            video_input=request.video_url_or_id,
+            languages=request.languages,
+            preserve_formatting=request.preserve_formatting
+        )
+        
+        if result["success"]:
+            logger.info(f"Successfully fetched transcript with {len(result['transcript'])} entries")
+        else:
+            logger.warning(f"Failed to fetch transcript: {result['error']}")
+        
+        return TranscriptResponse(**result)
+        
+    except Exception as e:
+        logger.error(f"Unexpected error in transcript endpoint: {e}")
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Internal server error: {str(e)}"
+        )
+
+@app.get("/api/transcript/languages")
+async def get_transcript_languages(video_url_or_id: str):
+    try:
+        logger.info(f"Getting available languages for: {video_url_or_id}")
+        
+        result = get_available_transcript_languages(video_url_or_id)
+        
+        if result["success"]:
+            logger.info(f"Found {len(result['languages'])} available languages")
+        else:
+            logger.warning(f"Failed to get languages: {result['error']}")
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"Unexpected error in languages endpoint: {e}")
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Internal server error: {str(e)}"
+        )
+
+@app.get("/api/transcript/status")
+async def get_transcript_status():
+    try:
+        status = rate_limiter.get_status()
+        return {
+            "rate_limiting": status,
+            "message": "Rate limiting status for YouTube transcript API"
+        }
+    except Exception as e:
+        logger.error(f"Error getting transcript status: {e}")
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Internal server error: {str(e)}"
+        )
+
+@app.get("/api/transcript/{video_id}")
+async def get_transcript_by_id(
+    video_id: str,
+    languages: Optional[str] = Query(None, description="Comma-separated list of language codes (e.g., 'en,es,fr')"),
+    preserve_formatting: bool = Query(False, description="Whether to preserve original formatting")
+):
+    try:
+        lang_list = None
+        if languages:
+            lang_list = [lang.strip() for lang in languages.split(',')]
+        
+        logger.info(f"Fetching transcript for video ID: {video_id}")
+        
+        result = get_youtube_transcript(
+            video_input=video_id,
+            languages=lang_list,
+            preserve_formatting=preserve_formatting
+        )
+        
+        if result["success"]:
+            logger.info(f"Successfully fetched transcript with {len(result['transcript'])} entries")
+        else:
+            logger.warning(f"Failed to fetch transcript: {result['error']}")
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"Unexpected error in transcript GET endpoint: {e}")
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Internal server error: {str(e)}"
+        )
+
