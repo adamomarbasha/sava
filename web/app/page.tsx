@@ -795,7 +795,6 @@ export default function Home() {
                         </svg>
                       </button>
                       
-                      {}
                       {openDropdown === bm.id && (
                         <div className="absolute top-full left-0 mt-1 bg-white rounded-lg shadow-lg border border-gray-200 py-1 min-w-[120px] z-30">
                           <button
@@ -826,12 +825,25 @@ export default function Home() {
                       )}
                     </div>
 
-                    {}
+                
                     <div className="absolute top-2 right-2 z-10">
                       <div className="bg-white/90 backdrop-blur-sm rounded-lg p-1.5 shadow-lg border border-white/20">
                         <PlatformIcon platform={bm.platform || 'web'} size="w-3.5 h-3.5" />
                       </div>
                     </div>
+                    
+                    
+                    <div className="p-4 pb-2">
+                      <a 
+                        href={bm.url} 
+                        target="_blank" 
+                        rel="noopener noreferrer" 
+                        className="block text-gray-900 hover:text-blue-600 font-semibold text-sm leading-tight transition-colors duration-200 line-clamp-2"
+                      >
+                        {bm.title || bm.note || new URL(bm.url).hostname}
+                      </a>
+                    </div>
+
                     
                     <div className="flex-1 px-4 flex items-center justify-center">
                       <div className="block group relative">
@@ -894,53 +906,53 @@ export default function Home() {
                       </div>
                     </div>
 
-                      <div className="p-4 pt-3 mt-auto">
-                        {editingBookmark === bm.id ? (
-                          <div className="absolute inset-0 bg-white/95 backdrop-blur-sm z-40 flex items-center justify-center p-4">
-                            <div className="bg-white p-6 rounded-xl border border-gray-300 shadow-lg w-full max-w-sm">
-                              <h3 className="text-lg font-medium text-gray-800 mb-4">Edit Note</h3>
-                              <textarea
-                                value={editNote}
-                                onChange={(e) => setEditNote(e.target.value)}
-                                className="w-full p-3 text-sm border border-gray-300 rounded-lg resize-none focus:outline-none focus:border-gray-400 bg-white"
-                                rows={4}
-                                placeholder="Add a note..."
-                                autoFocus
-                              />
-                              <div className="flex gap-3 mt-4">
-                                <button
-                                  onClick={cancelEditing}
-                                  className="flex-1 bg-gray-200 hover:bg-gray-300 text-gray-800 text-sm font-medium px-4 py-3 rounded-lg transition-colors duration-200"
-                                >
-                                  Cancel
-                                </button>
-                                <button
-                                  onClick={() => handleEditNote(bm.id, editNote)}
-                                  className="flex-1 bg-blue-500 hover:bg-blue-600 text-white text-sm font-medium px-4 py-3 rounded-lg transition-colors duration-200"
-                                >
-                                  Save
-                                </button>
-                              </div>
+                    <div className="p-4 pt-3 mt-auto">
+                      {editingBookmark === bm.id ? (
+                        <div className="absolute inset-0 bg-white/95 backdrop-blur-sm z-40 flex items-center justify-center p-4">
+                          <div className="bg-white p-6 rounded-xl border border-gray-300 shadow-lg w-full max-w-sm">
+                            <h3 className="text-lg font-medium text-gray-800 mb-4">Edit Note</h3>
+                            <textarea
+                              value={editNote}
+                              onChange={(e) => setEditNote(e.target.value)}
+                              className="w-full p-3 text-sm border border-gray-300 rounded-lg resize-none focus:outline-none focus:border-gray-400 bg-white"
+                              rows={4}
+                              placeholder="Add a note..."
+                              autoFocus
+                            />
+                            <div className="flex gap-3 mt-4">
+                              <button
+                                onClick={cancelEditing}
+                                className="flex-1 bg-gray-200 hover:bg-gray-300 text-gray-800 text-sm font-medium px-4 py-3 rounded-lg transition-colors duration-200"
+                              >
+                                Cancel
+                              </button>
+                              <button
+                                onClick={() => handleEditNote(bm.id, editNote)}
+                                className="flex-1 bg-blue-500 hover:bg-blue-600 text-white text-sm font-medium px-4 py-3 rounded-lg transition-colors duration-200"
+                              >
+                                Save
+                              </button>
                             </div>
                           </div>
-                        ) : (
-                          <>
-                            {bm.note && (
-                              <p className="text-gray-600 text-sm mb-2 line-clamp-2 font-inter">
-                                {bm.note}
-                              </p>
-                            )}
-                            <div className="flex items-center justify-between">
-                              <span className="text-gray-400 text-xs truncate pr-2">
-                                {bm.author || new URL(bm.url).hostname}
-                              </span>
-                              <span className="text-gray-400 text-xs flex-shrink-0">
-                                {new Date(bm.created_at).toLocaleDateString('en-US', { month: 'numeric', day: 'numeric', year: 'numeric' })}
-                              </span>
-                            </div>
-                          </>
-                        )}
-                      </div>
+                        </div>
+                      ) : (
+                        <>
+                          {bm.note && bm.title && (
+                            <p className="text-gray-600 text-sm mb-2 line-clamp-2 font-inter">
+                              {bm.note}
+                            </p>
+                          )}
+                          <div className="flex items-center justify-between">
+                            <span className="text-gray-400 text-xs truncate pr-2">
+                              {bm.author || new URL(bm.url).hostname}
+                            </span>
+                            <span className="text-gray-400 text-xs flex-shrink-0">
+                              {new Date(bm.created_at).toLocaleDateString('en-US', { month: 'numeric', day: 'numeric', year: 'numeric' })}
+                            </span>
+                          </div>
+                        </>
+                      )}
+                    </div>
                   </CardContent>
                 </Card>
               );

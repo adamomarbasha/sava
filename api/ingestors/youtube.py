@@ -80,7 +80,6 @@ class YouTubeIngestor(BaseIngestor):
         }
         
         def normalize_info_object(info: Dict[str, Any]) -> Dict[str, Any]:
-            # When extract_flat returns a playlist-like result, pull first entry
             if isinstance(info, dict) and 'entries' in info and isinstance(info['entries'], list) and info['entries']:
                 return info['entries'][0]
             return info
@@ -120,7 +119,6 @@ class YouTubeIngestor(BaseIngestor):
                 except Exception as inner_e:
                     logger.warning(f"Safe retry failed for {url}: {inner_e}")
                 
-                # Try oEmbed for title/author/thumbnail
                 try:
                     vid = self.extract_video_id(url)
                     oembed_url = f"https://www.youtube.com/oembed?url={url}&format=json"
@@ -144,7 +142,6 @@ class YouTubeIngestor(BaseIngestor):
                 except Exception as oembed_e:
                     logger.warning(f"oEmbed fallback failed for {url}: {oembed_e}")
                 
-                # Final minimal fallback
                 vid = self.extract_video_id(url)
                 if not vid:
                     raise ValueError(f"Could not extract video ID from URL: {url}")
@@ -196,18 +193,15 @@ class YouTubeIngestor(BaseIngestor):
                 except (ValueError, TypeError):
                     pass
             
-            # Determine thumbnail URL robustly
             thumbnail_url = None
             thumbs = raw_data.get('thumbnails') or []
             if isinstance(thumbs, list) and thumbs:
-                # pick the last (highest quality) that has a url
                 for t in reversed(thumbs):
                     url = t.get('url') if isinstance(t, dict) else None
                     if url:
                         thumbnail_url = to_str(url)
                         break
             if not thumbnail_url:
-                # some yt-dlp extractions include 'thumbnail' as a single URL
                 thumb_single = raw_data.get('thumbnail')
                 if thumb_single:
                     thumbnail_url = clean(thumb_single)

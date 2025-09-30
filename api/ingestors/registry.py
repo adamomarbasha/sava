@@ -99,7 +99,6 @@ async def add_bookmark(url: str, user_id: int, db: Session = None) -> Dict[str, 
             db.close()
 
 async def refresh_bookmark(bookmark_id: int, user_id: int, db: Session) -> Dict[str, Any]:
-    """Re-extract metadata for an existing bookmark and update it in place."""
     try:
         bookmark = db.query(Bookmark).filter(Bookmark.id == bookmark_id, Bookmark.user_id == user_id).first()
         if not bookmark:
