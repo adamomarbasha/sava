@@ -12,7 +12,7 @@ from .social import (
     SnapchatIngestor,
     FacebookIngestor
 )
-from .registry import get_ingestor, add_bookmark
+from .registry import get_ingestor, add_bookmark, refresh_bookmark
 
 __all__ = [
     'BaseIngestor', 
@@ -28,5 +28,6 @@ __all__ = [
     'SnapchatIngestor',
     'FacebookIngestor',
     'get_ingestor', 
-    'add_bookmark'
-] 
+    'add_bookmark',
+    'refresh_bookmark'
+]

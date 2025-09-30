@@ -98,6 +98,24 @@ async def add_bookmark(url: str, user_id: int, db: Session = None) -> Dict[str, 
         if should_close_db:
             db.close()
 
+async def refresh_bookmark(bookmark_id: int, user_id: int, db: Session) -> Dict[str, Any]:
+    """Re-extract metadata for an existing bookmark and update it in place."""
+    try:
+        bookmark = db.query(Bookmark).filter(Bookmark.id == bookmark_id, Bookmark.user_id == user_id).first()
+        if not bookmark:
+            raise ValueError("Bookmark not found")
+        
+        ingestor = get_ingestor(bookmark.url)
+        if not ingestor:
+            logger.info("No ingestor available for this URL; returning existing bookmark unchanged")
+            return _format_bookmark_response(bookmark)
+        
+        logger.info(f"Refreshing bookmark {bookmark_id} using {ingestor.platform} ingestor")
+        return await _update_existing_bookmark(bookmark, ingestor, bookmark.url, db)
+    except Exception as e:
+        logger.error(f"Failed to refresh bookmark {bookmark_id}: {e}")
+        raise RuntimeError(f"Failed to refresh bookmark: {str(e)}")
+
 def _create_basic_bookmark(url: str, user_id: int, db: Session) -> Dict[str, Any]:
     try:
         platform = _detect_platform(url)
@@ -253,4 +271,4 @@ def _detect_platform(url: str) -> str:
     elif "facebook.com" in url_lower or "fb.com" in url_lower:
         return "facebook"
     else:
-        return "other" 
+        return "other"

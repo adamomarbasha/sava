@@ -14,7 +14,7 @@ from starlette.responses import StreamingResponse
 
 from db import get_db, init_db
 from models import User, Bookmark
-from ingestors import add_bookmark
+from ingestors import add_bookmark, refresh_bookmark
 from email_validation import validate_email_comprehensive
 from auth import (
     authenticate_user, 
@@ -221,13 +221,20 @@ async def create_bookmark(
         
         bookmark = db.query(Bookmark).filter(Bookmark.id == result["id"]).first()
         if bookmark:
-            if b.title:
-                bookmark.title = b.title
-                result["title"] = b.title
-            if b.note:
+            if b.note and b.note.strip():
                 bookmark.note = b.note
                 result["note"] = b.note
-            if b.title or b.note:
+            
+            placeholder_titles = {"", "untitled", "title", "new bookmark", "bookmark", "n/a"}
+            provided_title = (b.title or "").strip()
+            if provided_title and len(provided_title) >= 3 and provided_title.lower() not in placeholder_titles:
+                bookmark.title = provided_title
+                result["title"] = provided_title
+                logging.info("Title overridden by client input")
+            else:
+                logging.info("Keeping extracted title; client title omitted or placeholder")
+            
+            if b.note or (provided_title and len(provided_title) >= 3 and provided_title.lower() not in placeholder_titles):
                 db.commit()
         
         return result
@@ -382,6 +389,21 @@ async def update_bookmark(
         db.rollback()
         logger.error(f"Error updating bookmark: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
+
+@app.post("/api/bookmarks/{bookmark_id}/refresh")
+async def refresh_bookmark_endpoint(
+    bookmark_id: int,
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    try:
+        updated = await refresh_bookmark(bookmark_id, current_user["id"], db)
+        return updated
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error refreshing bookmark {bookmark_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to refresh bookmark")
 
 @app.get("/test/instagram-thumbnail")
 async def test_instagram_thumbnail(url: str):
