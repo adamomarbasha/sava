@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { useAuth } from "./contexts/AuthContext";
 import { useRouter } from "next/navigation";
 import { Button, Card, CardContent, Input, Label, Spinner, Badge, Alert } from "./components/UI";
+import TranscriptViewer from "./components/TranscriptViewer";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://127.0.0.1:8000";
 
@@ -361,6 +362,8 @@ export default function Home() {
   const [openDropdown, setOpenDropdown] = useState<number | null>(null);
   const [aiOpen, setAiOpen] = useState(false);
   const [aiBookmark, setAiBookmark] = useState<Bookmark | null>(null);
+  const [subtitlesOpen, setSubtitlesOpen] = useState(false);
+  const [subtitlesBookmark, setSubtitlesBookmark] = useState<Bookmark | null>(null);
 
   useEffect(() => {
     if (typeof window !== 'undefined') {
@@ -811,6 +814,21 @@ export default function Home() {
                             </svg>
                             Edit
                           </button>
+                          {(bm.platform === "youtube") && (
+                            <button
+                              onClick={() => {
+                                setSubtitlesBookmark(bm);
+                                setSubtitlesOpen(true);
+                                setOpenDropdown(null);
+                              }}
+                              className="w-full text-left px-3 py-2 text-sm text-gray-700 hover:bg-gray-100 transition-colors duration-200 flex items-center gap-2"
+                            >
+                              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+                              </svg>
+                              Subtitles
+                            </button>
+                          )}
                           <button
                             onClick={() => {
                               handleDeleteBookmark(bm.id);
@@ -1057,6 +1075,63 @@ export default function Home() {
               >
                 <div className="text-base text-white leading-relaxed text-left" style={{ fontFamily: 'Minecraft, monospace' }}>
                   AI summary will appear here once generated…
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {subtitlesOpen && subtitlesBookmark && (
+        <div className="fixed inset-0 z-50">
+          <div
+            className="absolute inset-0 bg-black/60 backdrop-blur-md transition-opacity duration-300"
+            onClick={() => { setSubtitlesOpen(false); setSubtitlesBookmark(null); }}
+          />
+          <div className="absolute inset-x-0 bottom-0 md:inset-0 md:flex md:items-center md:justify-center px-4 pb-4 md:pb-0">
+            <button
+              type="button"
+              onClick={() => { setSubtitlesOpen(false); setSubtitlesBookmark(null); }}
+              className="absolute top-4 right-4 z-10 w-10 h-10 bg-gray-100 hover:bg-gray-200 rounded-full flex items-center justify-center text-gray-600 hover:text-gray-800 transition-all duration-200"
+              aria-label="Close"
+            >
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+            <div className="w-full max-w-5xl mx-auto">
+              <div
+                className="w-full rounded-2xl bg-white border border-gray-200 shadow-2xl transition-transform duration-300 max-h-[85vh] overflow-hidden flex flex-col"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div className="bg-white border-b border-gray-200 px-8 py-6">
+                  <div className="flex items-center gap-3 mb-2">
+                    <div className="w-8 h-8 bg-blue-100 rounded-full flex items-center justify-center">
+                      <svg className="w-5 h-5 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+                      </svg>
+                    </div>
+                    <h2 className="text-2xl font-bold text-gray-900">Video Subtitles</h2>
+                  </div>
+                  <p className="text-gray-600 text-sm">
+                    {subtitlesBookmark.title || 'YouTube Video'}
+                  </p>
+                </div>
+                
+                <div className="flex-1 overflow-y-auto bg-gray-50">
+                  <div className="p-6">
+                    <TranscriptViewer 
+                      videoUrlOrId={subtitlesBookmark.url}
+                      onError={(error) => console.error('Transcript error:', error)}
+                      onSeekTo={(timestamp) => {
+                        const videoId = extractYouTubeId(subtitlesBookmark.url);
+                        if (videoId) {
+                          const seekUrl = `https://www.youtube.com/watch?v=${videoId}&t=${Math.floor(timestamp)}s`;
+                          window.open(seekUrl, '_blank');
+                        }
+                      }}
+                    />
+                  </div>
                 </div>
               </div>
             </div>

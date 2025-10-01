@@ -41,4 +41,4 @@ class RateLimiter:
             "wait_time": self.get_wait_time()
         }
 
-rate_limiter = RateLimiter(max_requests=5, time_window=3600)
+rate_limiter = RateLimiter(max_requests=50, time_window=3600)

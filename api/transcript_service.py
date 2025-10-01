@@ -110,7 +110,7 @@ class YouTubeTranscriptService:
                 return {
                     "success": False,
                     "transcript": None,
-                    "error": f"Rate limit exceeded. Please wait {wait_time:.0f} seconds before trying again.",
+                    "error": f"Rate limit exceeded (50 requests per hour). Please wait {wait_time:.0f} seconds before trying again.",
                     "video_id": video_id,
                     "language": None
                 }
@@ -136,7 +136,14 @@ class YouTubeTranscriptService:
                     
                 except (NoTranscriptFound, TranscriptsDisabled) as e:
                     logger.warning(f"No transcript found in preferred languages: {e}")
-                    fallback_languages = ['en', 'es', 'fr', 'de', 'it', 'pt', 'ru', 'ja', 'ko', 'zh']
+                    try:
+                        available_transcripts = ytt_api.list(video_id)
+                        if not available_transcripts:
+                            raise NoTranscriptFound(f"No subtitles are available for this video. This is common for music videos, instrumentals, or content without speech.")
+                    except:
+                        raise NoTranscriptFound(f"No subtitles are available for this video. This is common for music videos, instrumentals, or content without speech.")
+                    
+                    fallback_languages = ['en', 'es', 'fr']
                     transcript_list = None
                     
                     for lang in fallback_languages:
@@ -152,7 +159,7 @@ class YouTubeTranscriptService:
                             continue
                     
                     if transcript_list is None:
-                        raise NoTranscriptFound(f"No transcript found in any available language")
+                        raise NoTranscriptFound(f"No subtitles are available for this video. This is common for music videos, instrumentals, or content without speech.")
                         
             except TooManyRequests as e:
                 logger.warning(f"Rate limited by YouTube: {e}")
@@ -204,8 +211,8 @@ class YouTubeTranscriptService:
             return result
             
         except TranscriptsDisabled:
-            error_msg = f"Transcripts are disabled for video: {video_id}"
-            logger.warning(error_msg)
+            error_msg = "This video has subtitles disabled by the creator. This is common for music videos, instrumentals, or content without speech."
+            logger.warning(f"Transcripts disabled for video: {video_id}")
             return {
                 "success": False,
                 "transcript": None,
@@ -215,8 +222,8 @@ class YouTubeTranscriptService:
             }
             
         except NoTranscriptFound:
-            error_msg = f"No transcript found for video: {video_id}"
-            logger.warning(error_msg)
+            error_msg = "No subtitles are available for this video. This is common for music videos, instrumentals, or content without speech."
+            logger.warning(f"No transcript found for video: {video_id}")
             return {
                 "success": False,
                 "transcript": None,
@@ -237,7 +244,7 @@ class YouTubeTranscriptService:
             }
             
         except TooManyRequests:
-            error_msg = "Too many requests to YouTube API. Please try again later."
+            error_msg = "Rate limit reached. Please wait a few minutes before trying again."
             logger.warning(error_msg)
             return {
                 "success": False,
