@@ -17,6 +17,7 @@ from models import User, Bookmark
 from ingestors import add_bookmark, refresh_bookmark
 from email_validation import validate_email_comprehensive
 from transcript_service import get_youtube_transcript, get_available_transcript_languages
+from comment_service import youtube_comment_service
 from rate_limiter import rate_limiter
 from auth import (
     authenticate_user, 
@@ -533,6 +534,115 @@ async def get_transcript_by_id(
         
     except Exception as e:
         logger.error(f"Unexpected error in transcript GET endpoint: {e}")
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Internal server error: {str(e)}"
+        )
+
+
+class CommentRequest(BaseModel):
+    video_url_or_id: str
+    limit: Optional[int] = 50
+    sort_by: Optional[str] = 'popular' 
+
+class CommentResponse(BaseModel):
+    success: bool
+    comments: Optional[List[Dict[str, Any]]] = None
+    error: Optional[str] = None
+    video_id: Optional[str] = None
+    total_fetched: Optional[int] = None
+
+@app.post("/api/comments", response_model=CommentResponse)
+async def get_youtube_comments(request: CommentRequest):
+    try:
+        logger.info(f"Fetching comments for: {request.video_url_or_id}")
+        
+        result = youtube_comment_service.get_comments(
+            video_input=request.video_url_or_id,
+            limit=request.limit,
+            sort_by=request.sort_by
+        )
+        
+        if result["success"]:
+            logger.info(f"Successfully fetched {result['total_fetched']} comments")
+        else:
+            logger.warning(f"Failed to fetch comments: {result['error']}")
+        
+        return CommentResponse(**result)
+        
+    except Exception as e:
+        logger.error(f"Unexpected error in comments endpoint: {e}")
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Internal server error: {str(e)}"
+        )
+
+@app.get("/api/comments/{bookmark_id}")
+async def get_bookmark_comments(
+    bookmark_id: int,
+    limit: Optional[int] = Query(50, description="Maximum number of comments to return")
+):
+    try:
+        logger.info(f"Fetching comments for bookmark: {bookmark_id}")
+        
+        result = youtube_comment_service.get_comments_from_db(
+            bookmark_id=bookmark_id,
+            db=db_session,
+            limit=limit
+        )
+        
+        if result["success"]:
+            logger.info(f"Successfully retrieved {result['total_count']} comments from database")
+        else:
+            logger.warning(f"Failed to retrieve comments: {result['error']}")
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"Unexpected error in bookmark comments endpoint: {e}")
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Internal server error: {str(e)}"
+        )
+
+@app.post("/api/comments/save/{bookmark_id}")
+async def save_comments_to_bookmark(
+    bookmark_id: int,
+    video_url_or_id: str,
+    limit: Optional[int] = Query(50, description="Maximum number of comments to fetch"),
+    sort_by: Optional[str] = Query('popular', description="Sort order: 'popular' or 'recent'")
+):
+    try:
+        logger.info(f"Saving comments for bookmark {bookmark_id}")
+        
+        fetch_result = youtube_comment_service.get_comments(
+            video_input=video_url_or_id,
+            limit=limit,
+            sort_by=sort_by
+        )
+        
+        if not fetch_result["success"]:
+            return {
+                "success": False,
+                "saved_count": 0,
+                "error": f"Failed to fetch comments: {fetch_result['error']}"
+            }
+        
+        save_result = youtube_comment_service.save_comments_to_db(
+            bookmark_id=bookmark_id,
+            comments=fetch_result["comments"],
+            db=db_session
+        )
+        
+        if save_result["success"]:
+            logger.info(f"Successfully saved {save_result['saved_count']} comments for bookmark {bookmark_id}")
+        else:
+            logger.warning(f"Failed to save comments: {save_result['error']}")
+        
+        return save_result
+        
+    except Exception as e:
+        logger.error(f"Unexpected error in save comments endpoint: {e}")
         raise HTTPException(
             status_code=500, 
             detail=f"Internal server error: {str(e)}"

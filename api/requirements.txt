@@ -17,3 +17,4 @@ requests>=2.31.0
 email-validator>=2.1.0
 instaloader>=4.10.0
 youtube-transcript-api>=0.6.1
+youtube-comment-downloader>=0.1.78
