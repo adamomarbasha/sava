@@ -92,24 +92,14 @@ body {
 .link { color: var(--brand); }
 
 .navbar {
-  position: sticky;
-  top: 0;
+  position: relative;
   z-index: 50;
 
-  background: linear-gradient(
-    135deg,
-    #5a7bb2,  
-    #6d8fbe,  
-    #82a3cc,  
-    #9cb7d8,  
-    #6d87b3,  
-    #5a7bb2,  
-    #6d8fbe   
-
-
-
-  );
-  color: #ffffff;
+  background: rgba(255, 255, 255, 0.85);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  
+  color: #1a1a1a;
 
   padding: 0.2rem 0;
   display: flex;
@@ -117,8 +107,9 @@ body {
   align-items: center;
   font-weight: 600;
 
-  border-bottom: 1px solid rgba(255,255,255,0.08);
-  box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+  border-bottom: 1px solid rgba(0, 0, 0, 0.08);
+  
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05), 0 1px 2px rgba(0, 0, 0, 0.05);
 }
 
 
