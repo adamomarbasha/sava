@@ -11,6 +11,9 @@ import json
 import os
 import requests
 from starlette.responses import StreamingResponse
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from .db import get_db, init_db
 from .models import User, Bookmark
@@ -18,6 +21,7 @@ from .ingestors import add_bookmark, refresh_bookmark
 from .email_validation import validate_email_comprehensive
 from .transcript_service import get_youtube_transcript, get_available_transcript_languages, get_transcript
 from .comment_service import youtube_comment_service
+from .tiktok_comment_service import tiktok_service
 from .rate_limiter import rate_limiter
 from .auth import (
     authenticate_user, 
@@ -682,4 +686,74 @@ async def save_comments_to_bookmark(
             status_code=500, 
             detail=f"Internal server error: {str(e)}"
         )
+
+@app.post("/api/tiktok/comments")
+async def get_tiktok_comments(
+    request: dict,
+    current_user: User = Depends(get_current_user)
+):
+    try:
+        tiktok_url = request.get('url')
+        max_comments = request.get('max_comments', 100)
+        
+        if not tiktok_url:
+            raise HTTPException(status_code=400, detail="TikTok URL is required")
+        
+        if 'tiktok.com' not in tiktok_url:
+            raise HTTPException(status_code=400, detail="Invalid TikTok URL")
+        
+        try:
+            video_id = tiktok_service.extract_video_id(tiktok_url)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        
+        result = tiktok_service.fetch_comments(video_id, max_comments)
+        
+        logger.info(f"TikTok comments fetch for {video_id}: {result['message']}")
+        
+        if result.get('needs_refresh'):
+            result['refresh_instructions'] = {
+                'message': 'TikTok authentication needs refresh',
+                'steps': [
+                    '1. Go to any TikTok video with comments in your browser',
+                    '2. Open DevTools → Network → filter "comment"',
+                    '3. Scroll to load comments',
+                    '4. Find comment/list request with JSON response',
+                    '5. Copy request headers and update server configuration'
+                ]
+            }
+        
+        return result
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching TikTok comments: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to fetch TikTok comments: {str(e)}"
+        )
+
+@app.get("/api/tiktok/status")
+async def get_tiktok_status():
+    try:
+        test_result = tiktok_service.test_connection()
+        
+        return {
+            'service': 'TikTok Comment Service',
+            'status': 'healthy' if test_result['success'] else 'degraded',
+            'authentication': 'valid' if test_result['success'] else 'invalid',
+            'message': test_result['message'],
+            'last_success': tiktok_service.last_success.isoformat() if tiktok_service.last_success else None,
+            'consecutive_failures': tiktok_service.consecutive_failures,
+            'cookies_configured': bool(tiktok_service.cookies and 'PASTE_YOUR_FULL_COOKIE_STRING_HERE' not in tiktok_service.cookies)
+        }
+        
+    except Exception as e:
+        logger.error(f"Error checking TikTok status: {e}")
+        return {
+            'service': 'TikTok Comment Service',
+            'status': 'error',
+            'message': f"Status check failed: {str(e)}"
+        }
 
