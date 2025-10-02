@@ -1111,11 +1111,16 @@ export default function Home() {
                   {aiBookmark.title || aiBookmark.note || new URL(aiBookmark.url).hostname}
                 </div>
                 
-                <div className={`relative mx-auto ${
-                  aiBookmark.platform === "tiktok" || aiBookmark.platform === "instagram" 
-                    ? "aspect-[3/4] max-w-[200px] mx-auto" 
-                    : "aspect-video max-w-[350px] mx-auto"
-                } rounded-xl overflow-hidden shadow-2xl`}>
+                <a 
+                  href={aiBookmark.url} 
+                  target="_blank" 
+                  rel="noopener noreferrer"
+                  className={`relative mx-auto block ${
+                    aiBookmark.platform === "tiktok" || aiBookmark.platform === "instagram" 
+                      ? "aspect-[3/4] max-w-[200px] mx-auto" 
+                      : "aspect-video max-w-[350px] mx-auto"
+                  } rounded-xl overflow-hidden shadow-2xl cursor-pointer hover:shadow-3xl hover:scale-105 transition-all duration-200`}
+                >
                   {(() => {
                     const t = getThumbnail(aiBookmark.url, aiBookmark.platform, aiBookmark);
                     return t ? (
@@ -1136,7 +1141,7 @@ export default function Home() {
                   <div className="absolute bottom-3 right-3 bg-black/70 backdrop-blur-sm rounded-lg p-2">
                     <PlatformIcon platform={aiBookmark.platform || 'web'} size="w-5 h-5" />
                   </div>
-                </div>
+                </a>
               </div>
 
               <div className="text-center mb-4">

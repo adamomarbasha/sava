@@ -143,7 +143,7 @@ class YouTubeTranscriptService:
                     except:
                         raise NoTranscriptFound(f"No subtitles are available for this video. This is common for music videos, instrumentals, or content without speech.")
                     
-                    fallback_languages = ['en', 'es', 'fr']
+                    fallback_languages = ['en-US', 'en-GB', 'en', 'es', 'fr', 'de', 'pt', 'it']
                     transcript_list = None
                     
                     for lang in fallback_languages:
