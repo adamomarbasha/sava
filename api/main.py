@@ -16,7 +16,7 @@ from .db import get_db, init_db
 from .models import User, Bookmark
 from .ingestors import add_bookmark, refresh_bookmark
 from .email_validation import validate_email_comprehensive
-from .transcript_service import get_youtube_transcript, get_available_transcript_languages
+from .transcript_service import get_youtube_transcript, get_available_transcript_languages, get_transcript
 from .comment_service import youtube_comment_service
 from .rate_limiter import rate_limiter
 from .auth import (
@@ -445,13 +445,46 @@ class TranscriptResponse(BaseModel):
     video_id: Optional[str] = None
     language: Optional[str] = None
 
-@app.post("/api/transcript", response_model=TranscriptResponse)
-async def get_transcript(request: TranscriptRequest):
+@app.get("/api/transcript", response_model=TranscriptResponse)
+async def get_transcript_get(
+    video_url_or_id: str,
+    languages: Optional[str] = None,
+    preserve_formatting: bool = False
+):
     try:
-        logger.info(f"Fetching transcript for: {request.video_url_or_id}")
+        logger.info(f"[GET] Fetching transcript for: {video_url_or_id}")
         
-        result = get_youtube_transcript(
-            video_input=request.video_url_or_id,
+        lang_list = None
+        if languages:
+            lang_list = [lang.strip() for lang in languages.split(',')]
+        
+        result = get_transcript(
+            video_url=video_url_or_id,
+            languages=lang_list,
+            preserve_formatting=preserve_formatting
+        )
+        
+        if result["success"]:
+            logger.info(f"Successfully fetched transcript with {len(result['transcript'])} entries")
+        else:
+            logger.warning(f"Failed to fetch transcript: {result['error']}")
+        
+        return TranscriptResponse(**result)
+        
+    except Exception as e:
+        logger.error(f"Unexpected error in transcript GET endpoint: {e}")
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Internal server error: {str(e)}"
+        )
+
+@app.post("/api/transcript", response_model=TranscriptResponse)
+async def get_transcript_post(request: TranscriptRequest):
+    try:
+        logger.info(f"[POST] Fetching transcript for: {request.video_url_or_id}")
+        
+        result = get_transcript(
+            video_url=request.video_url_or_id,
             languages=request.languages,
             preserve_formatting=request.preserve_formatting
         )
@@ -464,7 +497,7 @@ async def get_transcript(request: TranscriptRequest):
         return TranscriptResponse(**result)
         
     except Exception as e:
-        logger.error(f"Unexpected error in transcript endpoint: {e}")
+        logger.error(f"Unexpected error in transcript POST endpoint: {e}")
         raise HTTPException(
             status_code=500, 
             detail=f"Internal server error: {str(e)}"

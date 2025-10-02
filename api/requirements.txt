@@ -18,3 +18,5 @@ email-validator>=2.1.0
 instaloader>=4.10.0
 youtube-transcript-api>=0.6.1
 youtube-comment-downloader>=0.1.78
+openai-whisper>=20231117
+faster-whisper>=1.0.0

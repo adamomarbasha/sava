@@ -31,6 +31,13 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+try:
+    from .whisper_transcript_service import get_tiktok_transcript
+    WHISPER_AVAILABLE = True
+except ImportError:
+    WHISPER_AVAILABLE = False
+    logger.warning("Whisper transcript service not available")
+
 _transcript_cache = {}
 _cache_ttl = 3600 
 
@@ -334,3 +341,100 @@ def get_youtube_transcript(
 def get_available_transcript_languages(video_input: str) -> Dict[str, Union[bool, List[Dict], str]]:
     service = YouTubeTranscriptService()
     return service.get_available_languages(video_input)
+
+
+def _is_tiktok_url(url: str) -> bool:
+    try:
+        parsed = urlparse(url.lower())
+        return (
+            'tiktok.com' in parsed.netloc or 
+            'vm.tiktok.com' in parsed.netloc or
+            't.tiktok.com' in parsed.netloc
+        )
+    except:
+        return False
+
+
+def _is_youtube_url(url: str) -> bool:
+    try:
+        parsed = urlparse(url.lower())
+        return (
+            'youtube.com' in parsed.netloc or 
+            'youtu.be' in parsed.netloc or
+            'm.youtube.com' in parsed.netloc
+        )
+    except:
+        return False
+
+
+def get_transcript(
+    video_url: str,
+    languages: List[str] = None,
+    preserve_formatting: bool = False
+) -> Dict[str, Union[str, List[Dict], bool]]:
+    
+    try:
+        if _is_youtube_url(video_url):
+            logger.info(f"Detected YouTube URL: {video_url}")
+            return get_youtube_transcript(video_url, languages, preserve_formatting)
+        
+        elif _is_tiktok_url(video_url):
+            logger.info(f"Detected TikTok URL: {video_url}")
+            
+            if not WHISPER_AVAILABLE:
+                return {
+                    "success": False,
+                    "transcript": None,
+                    "error": "TikTok transcription requires Whisper. Please install: pip install openai-whisper faster-whisper",
+                    "video_id": None,
+                    "language": None
+                }
+            
+            try:
+                transcript_entries = get_tiktok_transcript(video_url)
+                
+                if not transcript_entries:
+                    return {
+                        "success": False,
+                        "transcript": None,
+                        "error": "No speech detected in video or transcription failed",
+                        "video_id": None,
+                        "language": None
+                    }
+                
+                return {
+                    "success": True,
+                    "transcript": transcript_entries,
+                    "error": None,
+                    "video_id": None,
+                    "language": "auto-detected"
+                }
+                
+            except Exception as e:
+                logger.error(f"TikTok transcription error: {e}")
+                return {
+                    "success": False,
+                    "transcript": None,
+                    "error": f"TikTok transcription failed: {str(e)}",
+                    "video_id": None,
+                    "language": None
+                }
+        
+        else:
+            return {
+                "success": False,
+                "transcript": None,
+                "error": "Unsupported platform. Only YouTube and TikTok URLs are supported.",
+                "video_id": None,
+                "language": None
+            }
+            
+    except Exception as e:
+        logger.error(f"Transcript error: {e}")
+        return {
+            "success": False,
+            "transcript": None,
+            "error": f"Unexpected error: {str(e)}",
+            "video_id": None,
+            "language": None
+        }

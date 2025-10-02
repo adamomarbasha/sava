@@ -3,6 +3,7 @@ import json
 import logging
 import asyncio
 import hashlib
+import os
 from typing import Dict, Any, Optional, List
 from datetime import datetime
 from urllib.parse import urlparse
@@ -10,6 +11,14 @@ from TikTokApi import TikTokApi
 from .base import BaseIngestor
 
 logger = logging.getLogger(__name__)
+
+try:
+    from ..whisper_transcript_service import get_tiktok_transcript
+    WHISPER_AVAILABLE = True
+    logger.info("Whisper transcript service available for TikTok ingestor")
+except ImportError:
+    WHISPER_AVAILABLE = False
+    logger.info("Whisper transcript service not available")
 
 _metadata_cache = {}
 
@@ -115,7 +124,8 @@ class TikTokApiIngestor(BaseIngestor):
                 if isinstance(video_data, dict):
                     result = {
                         'video_data': video_data,
-                        'comments': [] 
+                        'comments': [],
+                        'original_url': url 
                     }
                     
                     _metadata_cache[cache_key] = result
@@ -130,7 +140,7 @@ class TikTokApiIngestor(BaseIngestor):
             self._api_available = False
             raise ValueError(f"TikTokApi metadata extraction failed: {str(e)}")
     
-    def normalize_metadata(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
+    def normalize_metadata(self, raw_data: Dict[str, Any], fetch_transcript: bool = None) -> Dict[str, Any]:
         try:
             video_data = raw_data.get('video_data', {})
             comments_data = raw_data.get('comments', [])
@@ -149,10 +159,11 @@ class TikTokApiIngestor(BaseIngestor):
             if clean_desc:
                 title = clean_desc[:500]
             elif hashtags:
-                title = ' '.join([f'#{tag}' for tag in hashtags[:5]])  # Limit to first 5 hashtags
+                title = ' '.join([f'#{tag}' for tag in hashtags[:5]])  
             
             video_url = None
             thumbnail_url = None
+            original_url = raw_data.get('original_url')
             if video_info:
                 video_url = video_info.get('playAddr') or video_info.get('downloadAddr')
                 thumbnail_url = video_info.get('cover') or video_info.get('originCover')
@@ -176,12 +187,29 @@ class TikTokApiIngestor(BaseIngestor):
                 except:
                     published_at = None
             
+            transcript = None
+            if fetch_transcript is None:
+                fetch_transcript = os.getenv("TIKTOK_AUTO_TRANSCRIPT", "false").lower() == "true"
+            
+            if fetch_transcript and WHISPER_AVAILABLE and original_url:
+                try:
+                    logger.info(f"Fetching transcript for TikTok video: {original_url}")
+                    transcript = get_tiktok_transcript(original_url)
+                    if transcript:
+                        logger.info(f"Successfully fetched transcript with {len(transcript)} segments")
+                    else:
+                        logger.info("No transcript generated (no speech detected or error)")
+                except Exception as e:
+                    logger.warning(f"Failed to fetch transcript: {e}")
+                    transcript = None
+            
             normalized = {
                 "title": title,
                 "author": author_info.get('uniqueId', '').strip()[:255] or None,
                 "thumbnail_url": thumbnail_url,
                 "description": desc[:2000] if desc else None,
                 "published_at": published_at,
+                "transcript": transcript, 
                 "platform_specific": {
                     "video_id": video_data.get('id', '').strip(),
                     "author_id": author_info.get('id', '').strip() or None,
@@ -204,6 +232,7 @@ class TikTokApiIngestor(BaseIngestor):
                         "clean_caption": clean_desc,
                         "hashtags_for_tagging": hashtags,
                         "comments_sample": processed_comments,
+                        "transcript_available": transcript is not None,
                         "engagement_metrics": {
                             "views": stats.get('playCount', 0),
                             "likes": stats.get('diggCount', 0),
