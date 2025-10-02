@@ -12,14 +12,14 @@ import os
 import requests
 from starlette.responses import StreamingResponse
 
-from db import get_db, init_db
-from models import User, Bookmark
-from ingestors import add_bookmark, refresh_bookmark
-from email_validation import validate_email_comprehensive
-from transcript_service import get_youtube_transcript, get_available_transcript_languages
-from comment_service import youtube_comment_service
-from rate_limiter import rate_limiter
-from auth import (
+from .db import get_db, init_db
+from .models import User, Bookmark
+from .ingestors import add_bookmark, refresh_bookmark
+from .email_validation import validate_email_comprehensive
+from .transcript_service import get_youtube_transcript, get_available_transcript_languages
+from .comment_service import youtube_comment_service
+from .rate_limiter import rate_limiter
+from .auth import (
     authenticate_user, 
     create_access_token, 
     get_current_user, 

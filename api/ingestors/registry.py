@@ -20,8 +20,8 @@ from .social import (
     SnapchatIngestor,
     FacebookIngestor
 )
-from models import Bookmark, YouTubeDetails, User
-from db import SessionLocal
+from ..models import Bookmark, YouTubeDetails, User
+from ..db import SessionLocal
 import asyncio
 
 logger = logging.getLogger(__name__)

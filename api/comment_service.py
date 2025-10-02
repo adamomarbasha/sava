@@ -4,7 +4,7 @@ from typing import Dict, List, Optional, Union
 from urllib.parse import urlparse, parse_qs
 from youtube_comment_downloader import YoutubeCommentDownloader, SORT_BY_POPULAR, SORT_BY_RECENT
 from sqlalchemy.orm import Session
-from models import Comment, Bookmark
+from .models import Comment, Bookmark
 
 logger = logging.getLogger(__name__)
 

@@ -5,7 +5,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.exc import OperationalError
 from dotenv import load_dotenv
-from models import Base
+from .models import Base
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 ENV_PATH = Path(__file__).with_name(".env")
 load_dotenv(dotenv_path=ENV_PATH)
 
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./bookmarks.db")
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./api/bookmarks.db")
 
 if DATABASE_URL.startswith("postgresql"):
     engine = create_engine(
