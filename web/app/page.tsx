@@ -883,7 +883,7 @@ export default function Home() {
                             </svg>
                             Edit
                           </button>
-                          {(bm.platform === "youtube") && (
+                          {(bm.platform === "youtube" || bm.platform === "tiktok") && (
                             <button
                               onClick={() => {
                                 setSubtitlesBookmark(bm);
@@ -1200,7 +1200,7 @@ export default function Home() {
                     <h2 className="text-2xl font-bold text-gray-900">Video Subtitles</h2>
                   </div>
                   <p className="text-gray-600 text-sm">
-                    {subtitlesBookmark.title || 'YouTube Video'}
+                    {subtitlesBookmark.title || `${subtitlesBookmark.platform === 'tiktok' ? 'TikTok' : 'YouTube'} Video`}
                   </p>
                 </div>
                 
@@ -1210,10 +1210,14 @@ export default function Home() {
                       videoUrlOrId={subtitlesBookmark.url}
                       onError={(error) => console.error('Transcript error:', error)}
                       onSeekTo={(timestamp) => {
-                        const videoId = extractYouTubeId(subtitlesBookmark.url);
-                        if (videoId) {
-                          const seekUrl = `https://www.youtube.com/watch?v=${videoId}&t=${Math.floor(timestamp)}s`;
-                          window.open(seekUrl, '_blank');
+                        if (subtitlesBookmark.platform === 'youtube') {
+                          const videoId = extractYouTubeId(subtitlesBookmark.url);
+                          if (videoId) {
+                            const seekUrl = `https://www.youtube.com/watch?v=${videoId}&t=${Math.floor(timestamp)}s`;
+                            window.open(seekUrl, '_blank');
+                          }
+                        } else if (subtitlesBookmark.platform === 'tiktok') {
+                          window.open(subtitlesBookmark.url, '_blank');
                         }
                       }}
                     />
