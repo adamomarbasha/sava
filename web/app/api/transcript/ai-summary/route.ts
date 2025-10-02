@@ -15,10 +15,8 @@ interface RequestBody {
 
 export async function POST(req: NextRequest) {
   try {
-    // Parse request body
     const body: RequestBody = await req.json();
 
-    // Validate required fields
     if (!body.title || !body.author) {
       return NextResponse.json(
         {
@@ -29,7 +27,6 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Check if GEMINI_API_KEY is set
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) {
       return NextResponse.json(
@@ -41,7 +38,6 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Build metadata object
     const metadata: VideoMetadata = {
       title: body.title,
       description: body.description,
@@ -51,10 +47,8 @@ export async function POST(req: NextRequest) {
       thumbnail_url: body.thumbnail_url,
     };
 
-    // Check if transcript is available
     const hasTranscript = metadata.transcript && metadata.transcript.length > 0;
 
-    // If no transcript, check if we have at least description or comments
     if (!hasTranscript && !metadata.description && (!metadata.comments || metadata.comments.length === 0)) {
       return NextResponse.json(
         {
@@ -65,7 +59,6 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Generate AI summary
     const result = await generateAISummary(metadata, apiKey);
 
     if (!result.success) {
@@ -78,7 +71,6 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Return summary
     return NextResponse.json(
       {
         success: true,

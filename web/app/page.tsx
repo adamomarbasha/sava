@@ -597,7 +597,6 @@ export default function Home() {
 
   const fetchAIMetadata = async (bookmark: Bookmark) => {
     try {
-      // Fetch transcript
       let transcript = null;
       if (bookmark.platform === "youtube") {
         try {
@@ -619,7 +618,6 @@ export default function Home() {
         }
       }
 
-      // Fetch comments (YouTube only for now)
       let comments = null;
       if (bookmark.platform === "youtube") {
         try {
@@ -644,7 +642,6 @@ export default function Home() {
         }
       }
 
-      // Set metadata
       setAiMetadata({
         title: bookmark.title || bookmark.note || new URL(bookmark.url).hostname,
         description: bookmark.meta?.tags?.join(", ") || "",
@@ -997,7 +994,6 @@ export default function Home() {
                             onClick={async () => { 
                               setAiBookmark(bm); 
                               setAiOpen(true);
-                              // Fetch transcript and comments for AI summary
                               await fetchAIMetadata(bm);
                             }}
                             role="button"

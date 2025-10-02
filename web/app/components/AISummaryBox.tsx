@@ -31,8 +31,10 @@ interface AISummaryBoxProps {
 
 export default function AISummaryBox({ metadata }: AISummaryBoxProps) {
   const [summary, setSummary] = useState<string | null>(null);
+  const [displayedText, setDisplayedText] = useState<string>("");
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
+  const [isTyping, setIsTyping] = useState<boolean>(false);
 
   useEffect(() => {
     const fetchSummary = async () => {
@@ -59,6 +61,7 @@ export default function AISummaryBox({ metadata }: AISummaryBoxProps) {
 
         if (data.success) {
           setSummary(data.summary);
+          setIsTyping(true);
         } else {
           setError(data.error || "Failed to generate AI summary.");
         }
@@ -72,6 +75,25 @@ export default function AISummaryBox({ metadata }: AISummaryBoxProps) {
 
     fetchSummary();
   }, [metadata]);
+
+  useEffect(() => {
+    if (!summary || !isTyping) return;
+
+    let currentIndex = 0;
+    setDisplayedText("");
+
+    const typewriterInterval = setInterval(() => {
+      if (currentIndex < summary.length) {
+        setDisplayedText(summary.slice(0, currentIndex + 1));
+        currentIndex++;
+      } else {
+        setIsTyping(false);
+        clearInterval(typewriterInterval);
+      }
+    }, 10);
+
+    return () => clearInterval(typewriterInterval);
+  }, [summary, isTyping]);
 
   if (loading) {
     return (
@@ -128,7 +150,8 @@ export default function AISummaryBox({ metadata }: AISummaryBoxProps) {
 
   return (
     <div className="text-base text-white leading-relaxed text-left" style={{ fontFamily: "Minecraft, monospace" }}>
-      {summary}
+      {displayedText}
+      {isTyping && <span className="animate-pulse">▊</span>}
     </div>
   );
 }
