@@ -5,6 +5,7 @@ import { useAuth } from "./contexts/AuthContext";
 import { useRouter } from "next/navigation";
 import { Button, Card, CardContent, Input, Label, Spinner, Badge, Alert } from "./components/UI";
 import TranscriptViewer from "./components/TranscriptViewer";
+import AISummaryBox from "./components/AISummaryBox";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://127.0.0.1:8000";
 
@@ -362,6 +363,7 @@ export default function Home() {
   const [openDropdown, setOpenDropdown] = useState<number | null>(null);
   const [aiOpen, setAiOpen] = useState(false);
   const [aiBookmark, setAiBookmark] = useState<Bookmark | null>(null);
+  const [aiMetadata, setAiMetadata] = useState<any | null>(null);
   const [subtitlesOpen, setSubtitlesOpen] = useState(false);
   const [subtitlesBookmark, setSubtitlesBookmark] = useState<Bookmark | null>(null);
 
@@ -591,6 +593,76 @@ export default function Home() {
 
   const toggleDropdown = (bookmarkId: number) => {
     setOpenDropdown(openDropdown === bookmarkId ? null : bookmarkId);
+  };
+
+  const fetchAIMetadata = async (bookmark: Bookmark) => {
+    try {
+      // Fetch transcript
+      let transcript = null;
+      if (bookmark.platform === "youtube") {
+        try {
+          const transcriptRes = await fetch("/api/transcript", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              video_url_or_id: bookmark.url,
+              languages: ["en"],
+              preserve_formatting: false,
+            }),
+          });
+          const transcriptData = await transcriptRes.json();
+          if (transcriptData.success && transcriptData.transcript) {
+            transcript = transcriptData.transcript;
+          }
+        } catch (err) {
+          console.error("Error fetching transcript:", err);
+        }
+      }
+
+      // Fetch comments (YouTube only for now)
+      let comments = null;
+      if (bookmark.platform === "youtube") {
+        try {
+          const commentsRes = await fetch(`${API_BASE}/api/comments`, {
+            method: "POST",
+            headers: { 
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${token}`
+            },
+            body: JSON.stringify({
+              video_url_or_id: bookmark.url,
+              limit: 50,
+              sort_by: "popular",
+            }),
+          });
+          const commentsData = await commentsRes.json();
+          if (commentsData.success && commentsData.comments) {
+            comments = commentsData.comments;
+          }
+        } catch (err) {
+          console.error("Error fetching comments:", err);
+        }
+      }
+
+      // Set metadata
+      setAiMetadata({
+        title: bookmark.title || bookmark.note || new URL(bookmark.url).hostname,
+        description: bookmark.meta?.tags?.join(", ") || "",
+        author: bookmark.author || new URL(bookmark.url).hostname,
+        transcript: transcript,
+        comments: comments,
+        thumbnail_url: bookmark.thumbnail_url,
+        url: bookmark.url,
+      });
+    } catch (error) {
+      console.error("Error fetching AI metadata:", error);
+      setAiMetadata({
+        title: bookmark.title || bookmark.note || new URL(bookmark.url).hostname,
+        description: "",
+        author: bookmark.author || new URL(bookmark.url).hostname,
+        url: bookmark.url,
+      });
+    }
   };
 
   useEffect(() => {
@@ -922,14 +994,20 @@ export default function Home() {
                         </a>
                         {(bm.platform === "youtube" || bm.platform === "instagram" || bm.platform === "tiktok") && (
                           <div
-                            onClick={() => { setAiBookmark(bm); setAiOpen(true); }}
+                            onClick={async () => { 
+                              setAiBookmark(bm); 
+                              setAiOpen(true);
+                              // Fetch transcript and comments for AI summary
+                              await fetchAIMetadata(bm);
+                            }}
                             role="button"
                             tabIndex={0}
-                            onKeyDown={(e) => {
+                            onKeyDown={async (e) => {
                               if (e.key === 'Enter' || e.key === ' ') {
                                 e.preventDefault();
                                 setAiBookmark(bm);
                                 setAiOpen(true);
+                                await fetchAIMetadata(bm);
                               }
                             }}
                             aria-label="Open AI Summary"
@@ -1019,12 +1097,12 @@ export default function Home() {
         <div className="fixed inset-0 z-50">
           <div
             className="absolute inset-0 bg-black/50 backdrop-blur-sm transition-opacity duration-200"
-            onClick={() => { setAiOpen(false); setAiBookmark(null); }}
+            onClick={() => { setAiOpen(false); setAiBookmark(null); setAiMetadata(null); }}
           />
           <div className="absolute inset-x-0 bottom-0 md:inset-0 md:flex md:items-center md:justify-center px-4 pb-4 md:pb-0">
             <button
               type="button"
-              onClick={() => { setAiOpen(false); setAiBookmark(null); }}
+              onClick={() => { setAiOpen(false); setAiBookmark(null); setAiMetadata(null); }}
               className="absolute top-4 right-4 z-10 w-10 h-10 bg-black/50 hover:bg-black/70 backdrop-blur-sm rounded-full flex items-center justify-center text-white hover:text-white transition-all duration-200"
               aria-label="Close"
             >
@@ -1073,9 +1151,16 @@ export default function Home() {
                 className="w-full rounded-t-2xl md:rounded-2xl bg-white/20 backdrop-blur-md border border-white/30 shadow-2xl p-6 transition-transform duration-200"
                 onClick={(e) => e.stopPropagation()}
               >
-                <div className="text-base text-white leading-relaxed text-left" style={{ fontFamily: 'Minecraft, monospace' }}>
-                  AI summary will appear here once generated…
-                </div>
+                {aiMetadata ? (
+                  <AISummaryBox metadata={aiMetadata} />
+                ) : (
+                  <div className="text-center py-8">
+                    <Spinner className="w-8 h-8 text-white mx-auto mb-4" />
+                    <p className="text-white/80 text-sm" style={{ fontFamily: "Minecraft, monospace" }}>
+                      Loading metadata...
+                    </p>
+                  </div>
+                )}
               </div>
             </div>
           </div>

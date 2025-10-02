@@ -580,14 +580,15 @@ async def get_youtube_comments(request: CommentRequest):
 @app.get("/api/comments/{bookmark_id}")
 async def get_bookmark_comments(
     bookmark_id: int,
-    limit: Optional[int] = Query(50, description="Maximum number of comments to return")
+    limit: Optional[int] = Query(50, description="Maximum number of comments to return"),
+    db: Session = Depends(get_db)
 ):
     try:
         logger.info(f"Fetching comments for bookmark: {bookmark_id}")
         
         result = youtube_comment_service.get_comments_from_db(
             bookmark_id=bookmark_id,
-            db=db_session,
+            db=db,
             limit=limit
         )
         
@@ -610,7 +611,8 @@ async def save_comments_to_bookmark(
     bookmark_id: int,
     video_url_or_id: str,
     limit: Optional[int] = Query(50, description="Maximum number of comments to fetch"),
-    sort_by: Optional[str] = Query('popular', description="Sort order: 'popular' or 'recent'")
+    sort_by: Optional[str] = Query('popular', description="Sort order: 'popular' or 'recent'"),
+    db: Session = Depends(get_db)
 ):
     try:
         logger.info(f"Saving comments for bookmark {bookmark_id}")
@@ -631,7 +633,7 @@ async def save_comments_to_bookmark(
         save_result = youtube_comment_service.save_comments_to_db(
             bookmark_id=bookmark_id,
             comments=fetch_result["comments"],
-            db=db_session
+            db=db
         )
         
         if save_result["success"]:
