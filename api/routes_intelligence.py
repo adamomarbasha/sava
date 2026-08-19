@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -375,6 +375,79 @@ def rebuild_collections(background: bool = Query(True),
                       force=True, priority=200)
         return {"queued": True, "job_id": job.id if job else None}
     return coll_svc.rebuild_auto_collections(db, current_user["id"])
+
+
+# ─── Screenshot resolution (Action Button capture) ───────────────────────────
+
+@router.post("/api/resolve")
+async def resolve_screenshot(
+    image: UploadFile = File(..., description="Screenshot of the content on screen"),
+    platform: Optional[str] = Query(None, description="Platform hint from the client"),
+    save: bool = Query(False, description="Create the save immediately on a confident match"),
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Identify what a screenshot shows and optionally save it.
+
+    Used by the Action Button when no direct URL is available. Screenshot bytes
+    are read in memory, used for identification, and never written to disk.
+    """
+    from .services.resolver import resolve_screenshot as _resolve
+
+    data = await image.read()
+    if not data:
+        raise HTTPException(status_code=422, detail="Empty image")
+    if len(data) > 12 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Screenshot too large")
+
+    # The resolver is synchronous (gRPC vision call + yt-dlp search). Running
+    # it inline on the event loop stalls every other request — three concurrent
+    # Action Button presses hung the whole server for 60s. Off to a worker
+    # thread it goes.
+    from starlette.concurrency import run_in_threadpool
+
+    with telemetry.timed() as t:
+        result = await run_in_threadpool(
+            _resolve, data, platform_hint=platform, db=db,
+            user_id=current_user["id"])
+    telemetry.record(db, operation="resolve.screenshot", user_id=current_user["id"],
+                     platform=result.platform, wall_ms=t.ms, success=result.ok,
+                     error=(None if result.ok else result.reason))
+
+    payload = result.to_dict()
+    payload["took_ms"] = t.ms
+
+    # Partial capture: the screen was read clearly but the platform offers no
+    # way to recover an exact post id. Save what was genuinely observed rather
+    # than dropping the user's capture on the floor.
+    if (not result.ok) and save and result.reason == "partial_capture":
+        from .services.save import DuplicateSave, create_partial_capture
+        try:
+            payload["saved"] = create_partial_capture(
+                db, user_id=current_user["id"], platform=result.platform,
+                read=result.read, screenshot=data)
+            payload["partial"] = True
+        except DuplicateSave as e:
+            payload["already_saved"] = True
+            payload["message"] = str(e)
+        except Exception as e:
+            logger.warning("partial capture failed: %s", e)
+            payload["save_error"] = str(e)[:200]
+        return payload
+
+    if result.ok and save and result.url:
+        from .services.save import DuplicateSave, create_save
+        try:
+            payload["saved"] = create_save(db, url=result.url,
+                                           user_id=current_user["id"])
+        except DuplicateSave as e:
+            payload["already_saved"] = True
+            payload["message"] = str(e)
+        except Exception as e:
+            logger.warning("resolve->save failed: %s", e)
+            payload["save_error"] = str(e)[:200]
+
+    return payload
 
 
 # ─── Ops / cost telemetry ────────────────────────────────────────────────────

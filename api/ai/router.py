@@ -80,7 +80,11 @@ _register(TaskType.CLASSIFICATION,          CHEAP,    CHEAP,    CHEAP)
 _register(TaskType.SUMMARY_SHORT,           CHEAP,    CHEAP,    BALANCED)
 _register(TaskType.SUMMARY_LONG,            BALANCED, CHEAP,    BALANCED)
 _register(TaskType.STRUCTURED_EXTRACTION,   CHEAP,    CHEAP,    BALANCED)
-_register(TaskType.VISION_ANALYSIS,         BALANCED, CHEAP,    BALANCED)
+# Vision reads text off a screenshot — an OCR-shaped task, not a reasoning one.
+# Measured on a real iPhone screenshot: flash-lite 1.3s vs 3.7-flash 11.5s for
+# an identical, correct reading. The Action Button is latency-critical, so AUTO
+# uses the fast tier and only ADVANCED pays for the reasoning model.
+_register(TaskType.VISION_ANALYSIS,         CHEAP,    CHEAP,    BALANCED)
 _register(TaskType.OCR_CLEANUP,             CHEAP,    CHEAP,    CHEAP)
 _register(TaskType.ASK_THIS_SIMPLE,         CHEAP,    CHEAP,    BALANCED)
 _register(TaskType.ASK_THIS_REASONING,      BALANCED, CHEAP,    STRONG)
