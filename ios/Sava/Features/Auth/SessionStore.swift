@@ -15,12 +15,15 @@ final class SessionStore: ObservableObject, AuthTokenProviding {
     @Published private(set) var phase: Phase = .restoring
 
     private let keychain = KeychainStore()
-    private let client: APIClient
+
+    /// The shared, authenticated API client. Feature services reuse this so
+    /// token injection and 401 handling live in one place.
+    let api: APIClient
     private let auth: AuthService
 
     init() {
         let client = APIClient()
-        self.client = client
+        self.api = client
         self.auth = AuthService(client: client)
         client.tokenProvider = self
     }
@@ -43,6 +46,14 @@ final class SessionStore: ObservableObject, AuthTokenProviding {
 
     /// Called once on launch to restore a prior session.
     func restore() async {
+        #if DEBUG
+        // Dev-only: seed a token from the launch environment so the app can be
+        // driven against a real account during development/QA. Never compiled
+        // into Release builds.
+        if let devToken = ProcessInfo.processInfo.environment["SAVA_DEV_TOKEN"], !devToken.isEmpty {
+            keychain.save(devToken, for: .authToken)
+        }
+        #endif
         guard let token = keychain.read(.authToken), !token.isEmpty else {
             phase = .signedOut
             return

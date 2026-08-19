@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from .db import get_db, init_db
+from .db import get_db, init_db, migrate_from_sqlite
 from .models import User, Bookmark
 from .ingestors import add_bookmark, refresh_bookmark
 from .email_validation import validate_email_comprehensive
@@ -23,6 +23,10 @@ from .transcript_service import get_youtube_transcript, get_available_transcript
 from .comment_service import youtube_comment_service
 from .tiktok_comment_service import tiktok_service
 from .rate_limiter import rate_limiter
+from .config import ASYNC_SAVE, PIPELINE_VERSION
+from .migrations import run_migrations
+from .routes_intelligence import router as intelligence_router
+from .pipeline import handlers as _job_handlers  # noqa: F401 (registers job handlers)
 from .auth import (
     authenticate_user, 
     create_access_token, 
@@ -93,6 +97,15 @@ class BookmarkUpdate(BaseModel):
 @app.on_event("startup")
 def on_startup():
     init_db()
+    # Additive, idempotent schema upgrade for the intelligence layer.
+    try:
+        from .db import engine
+        run_migrations(engine)
+    except Exception as e:
+        logger.error(f"Schema migration failed: {e}")
+    # Self-heal legacy SQLite schemas (e.g. pre-existing DBs missing
+    # users.updated_at). Idempotent and non-destructive — no-op on Postgres.
+    migrate_from_sqlite()
     logger.info("Sava API started successfully")
 
 def detect_platform(url: str) -> str:
@@ -185,6 +198,65 @@ def list_users(db: Session = Depends(get_db)):
     users = db.query(User).order_by(User.created_at.desc()).all()
     return [{"id": u.id, "email": u.email, "created_at": u.created_at} for u in users]
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Intelligence hook
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _clean_title(raw: Optional[str]) -> Optional[str]:
+    """Accept a client-supplied title only when it is a real one."""
+    placeholders = {"", "untitled", "title", "new bookmark", "bookmark", "n/a"}
+    t = (raw or "").strip()
+    if len(t) >= 3 and t.lower() not in placeholders:
+        return t
+    return None
+
+
+def _link_and_schedule_processing(db: Session, bookmark_id: int, user_id: int) -> dict:
+    """Attach a freshly created bookmark to canonical content and queue work.
+
+    Returns quickly. All expensive processing (download, transcription, frames,
+    vision, understanding, embeddings) happens in the background worker, and is
+    shared with every other user who saves the same content.
+    """
+    from .pipeline.ingest import resolve_or_create_canonical
+    from .jobs import enqueue
+
+    info = {"canonical_id": None, "processing_state": "queued", "reused": False}
+    try:
+        bookmark = db.query(Bookmark).filter(Bookmark.id == bookmark_id).first()
+        if bookmark is None:
+            return info
+
+        cc, created = resolve_or_create_canonical(db, bookmark.url, bookmark.platform)
+        if cc is None:
+            return info
+
+        bookmark.canonical_content_id = cc.id
+        bookmark.processing_state = cc.processing_state
+        db.commit()
+
+        info["canonical_id"] = cc.id
+        info["processing_state"] = cc.processing_state
+        info["reused"] = not created
+
+        # Already processed by someone else — nothing to pay for.
+        if cc.processing_state == "ready" and cc.pipeline_version == PIPELINE_VERSION:
+            from .ai import telemetry as _t
+            _t.record(db, operation="content.cache_hit", user_id=user_id,
+                      canonical_content_id=cc.id, bookmark_id=bookmark.id,
+                      platform=cc.platform, cache_hit=True)
+            return info
+
+        enqueue(db, "content.process",
+                {"canonical_id": cc.id, "user_id": user_id},
+                idempotency_key=f"content.process:{cc.id}",
+                priority=50)
+    except Exception as e:
+        logger.warning(f"Could not schedule processing for bookmark {bookmark_id}: {e}")
+    return info
+
+
 @app.post("/api/bookmarks/youtube")
 async def create_youtube_bookmark(
     bookmark_data: YouTubeBookmarkIn, 
@@ -200,11 +272,23 @@ async def create_youtube_bookmark(
                 detail="URL must be a valid YouTube URL"
             )
         
+        if ASYNC_SAVE:
+            from .services.save import DuplicateSave, create_save
+            try:
+                return create_save(db, url=url, user_id=current_user["id"])
+            except DuplicateSave as e:
+                raise HTTPException(status_code=409, detail=str(e))
+
         result = await add_bookmark(url, current_user["id"], db)
-        
+
+        if result.get("id"):
+            result.update(_link_and_schedule_processing(db, result["id"], current_user["id"]))
+
         logger.info(f"Successfully created YouTube bookmark: {result.get('title', 'Unknown')}")
         return result
         
+    except HTTPException:
+        raise
     except ValueError as e:
         logger.error(f"Validation error creating YouTube bookmark: {e}")
         error_msg = str(e)
@@ -224,6 +308,17 @@ async def create_bookmark(
 ):
     try:
         url = str(b.url)
+
+        # Fast path: no network I/O in the request handler. Expensive work is
+        # queued and shared across every user who saves the same content.
+        if ASYNC_SAVE:
+            from .services.save import DuplicateSave, create_save
+            try:
+                return create_save(db, url=url, user_id=current_user["id"],
+                                   note=b.note, title=_clean_title(b.title))
+            except DuplicateSave as e:
+                raise HTTPException(status_code=409, detail=str(e))
+
         result = await add_bookmark(url, current_user["id"], db)
         
         bookmark = db.query(Bookmark).filter(Bookmark.id == result["id"]).first()
@@ -243,9 +338,14 @@ async def create_bookmark(
             
             if b.note or (provided_title and len(provided_title) >= 3 and provided_title.lower() not in placeholder_titles):
                 db.commit()
-        
+
+        if result.get("id"):
+            result.update(_link_and_schedule_processing(db, result["id"], current_user["id"]))
+
         return result
         
+    except HTTPException:
+        raise
     except ValueError as e:
         error_msg = str(e)
         if "already" in error_msg.lower() and "bookmarked" in error_msg.lower():
@@ -757,3 +857,6 @@ async def get_tiktok_status():
             'message': f"Status check failed: {str(e)}"
         }
 
+
+# Intelligence endpoints (search, summary, ask, collections, ops).
+app.include_router(intelligence_router)
