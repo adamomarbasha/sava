@@ -15,7 +15,7 @@ struct RootView: View {
                 AuthFlowView()
                     .transition(.opacity.combined(with: .move(edge: .bottom)))
             case .signedIn(let user):
-                SignedInView(user: user)
+                AppShell(user: user)
                     .transition(.opacity.combined(with: .scale(scale: 1.02)))
             }
         }
