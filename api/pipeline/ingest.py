@@ -230,6 +230,42 @@ def process_content(canonical_id: int, db, *, force: bool = False,
                 if m.get("duration"):
                     cc.media_kind = "video"
                 cc.metadata_json = json.dumps(m, default=str)[:60000]
+
+                # Canonicalize short links. A TikTok /t/, vm., or vt. URL has
+                # no video id in it, so the row was keyed on a URL hash. Now
+                # that the platform has told us the real page, upgrade the key
+                # so every URL shape for this video shares one canonical row.
+                real_url = m.get("webpage_url")
+                if real_url:
+                    from ..content.identity import upgrade_identity
+                    better = upgrade_identity(cc.content_key, real_url)
+                    if better is not None:
+                        merged = (db.query(CanonicalContent)
+                                  .filter(CanonicalContent.content_key == better.content_key)
+                                  .filter(CanonicalContent.id != cc.id).first())
+                        if merged is None:
+                            logger.info("canonical %s upgraded: %s -> %s",
+                                        cc.id, cc.content_key, better.content_key)
+                            cc.content_key = better.content_key
+                            cc.platform_content_id = better.platform_content_id
+                            cc.canonical_url = better.canonical_url
+                            db.commit()
+                        else:
+                            # Another row already owns the real id — point this
+                            # user's saves at it rather than duplicating work.
+                            logger.info("canonical %s merges into %s (%s)",
+                                        cc.id, merged.id, better.content_key)
+                            from ..models import Bookmark as _BM
+                            (db.query(_BM)
+                               .filter(_BM.canonical_content_id == cc.id)
+                               .update({_BM.canonical_content_id: merged.id},
+                                       synchronize_session=False))
+                            db.commit()
+                            result["merged_into"] = merged.id
+                            return {"ok": True, "merged_into": merged.id,
+                                    "canonical_id": merged.id,
+                                    "stages": result["stages"]}
+
                 _set_stage(cc, "metadata", "ok")
                 result["stages"]["metadata"] = "ok"
             else:

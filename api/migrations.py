@@ -18,16 +18,18 @@ already partially migrated.
 from __future__ import annotations
 
 import logging
-from typing import List
+from typing import List, Optional
 
 from sqlalchemy import inspect, text
 
 from .config import EMBED_DIM, IS_POSTGRES
 from .models import Base
 
+_DIALECT = None  # set lazily in run_migrations
+
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 def _existing_columns(conn, table: str) -> set:
@@ -55,6 +57,38 @@ def _add_column(conn, table: str, column: str, ddl: str) -> bool:
     return True
 
 
+
+def _column_ddl(col) -> "Optional[str]":
+    """Render an ALTER-safe type for a model column.
+
+    SQLite cannot add a NOT NULL column without a default, and cannot add a
+    UNIQUE column at all, so those constraints are deliberately dropped here —
+    the goal is to make the column exist so writes stop failing. Full constraint
+    enforcement belongs to a fresh `create_all` (or Postgres).
+    """
+    try:
+        from sqlalchemy.schema import CreateColumn
+        rendered = str(CreateColumn(col).compile(dialect=_DIALECT))
+        # "name TYPE ..." -> keep only the type portion
+        parts = rendered.strip().split(None, 1)
+        if len(parts) < 2:
+            return None
+        type_sql = parts[1]
+        for banned in (" NOT NULL", " UNIQUE", " PRIMARY KEY"):
+            type_sql = type_sql.replace(banned, "")
+        if col.default is not None and getattr(col.default, "is_scalar", False):
+            value = col.default.arg
+            if isinstance(value, str):
+                type_sql += f" DEFAULT '{value}'"
+            elif isinstance(value, bool):
+                type_sql += f" DEFAULT {1 if value else 0}"
+            elif isinstance(value, (int, float)):
+                type_sql += f" DEFAULT {value}"
+        return type_sql.strip() or None
+    except Exception:
+        return None
+
+
 def _ensure_index(conn, name: str, ddl: str) -> None:
     try:
         conn.execute(text(ddl))
@@ -65,6 +99,8 @@ def _ensure_index(conn, name: str, ddl: str) -> None:
 
 def run_migrations(engine) -> List[str]:
     """Bring the database up to SCHEMA_VERSION. Returns applied step names."""
+    global _DIALECT
+    _DIALECT = engine.dialect
     applied: List[str] = []
 
     # ── Postgres prerequisites ───────────────────────────────────────────────
@@ -88,13 +124,34 @@ def run_migrations(engine) -> List[str]:
         logger.info("migration: created table %s", t)
 
     # ── New columns on existing tables ───────────────────────────────────────
+    # Generic reconciliation: every column declared on a model but missing from
+    # the live table is added. A hardcoded list cannot self-heal — if a table is
+    # ever restored from an older copy (a git checkout of a tracked .db file, a
+    # backup restore, a redeploy against a stale volume), drift reappears and
+    # the app starts failing on writes. This closes that whole class of bug.
     with engine.begin() as conn:
-        if _add_column(conn, "bookmarks", "canonical_content_id", "INTEGER"):
-            applied.append("bookmarks.canonical_content_id")
-        if _add_column(conn, "bookmarks", "processing_state", "VARCHAR(16)"):
-            applied.append("bookmarks.processing_state")
-        if _add_column(conn, "jobs", "platform", "VARCHAR(20)"):
-            applied.append("jobs.platform")
+        for table_name, table in Base.metadata.tables.items():
+            if not _has_table(conn, table_name):
+                continue
+            have = _existing_columns(conn, table_name)
+            if not have:
+                continue
+            for col in table.columns:
+                if col.name in have or col.primary_key:
+                    continue
+                ddl = _column_ddl(col)
+                if ddl is None:
+                    logger.warning(
+                        "cannot auto-add %s.%s (unsupported type %s) — "
+                        "add it manually", table_name, col.name, col.type)
+                    continue
+                try:
+                    conn.execute(text(
+                        f"ALTER TABLE {table_name} ADD COLUMN {col.name} {ddl}"))
+                    applied.append(f"{table_name}.{col.name}")
+                    logger.info("migration: added %s.%s", table_name, col.name)
+                except Exception as e:
+                    logger.warning("could not add %s.%s: %s", table_name, col.name, e)
 
     # Legacy schemas declared bookmarks.url globally UNIQUE, which prevents two
     # users from saving the same public video. Detect and drop it — the correct

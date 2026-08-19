@@ -186,3 +186,99 @@ def sync_bookmarks_for_canonical(db, canonical_id: int) -> int:
         except Exception as e:
             logger.warning("could not sync bookmark %s: %s", bm.id, e)
     return len(saves)
+
+
+def create_partial_capture(db, *, user_id: int, platform: str,
+                           read: Dict[str, Any], screenshot: bytes) -> Dict[str, Any]:
+    """Save a capture whose exact URL could not be recovered.
+
+    Instagram and TikTok expose no public lookup from a handle+caption back to
+    a post id, so a screenshot alone cannot yield the canonical URL. Everything
+    stored here was actually read off the screen — creator, caption, on-screen
+    text — and the screenshot itself becomes the thumbnail. Nothing is invented,
+    and the record can be upgraded later if the real URL turns up.
+
+    The URL points at the creator's profile (the most useful thing we can
+    legitimately link to) with a content fingerprint appended so two different
+    posts by the same creator stay distinct.
+    """
+    import hashlib
+    import json as _json
+    from pathlib import Path
+
+    from ..config import API_DIR
+    from ..models import CanonicalContent, ProcessingState
+
+    creator = (read.get("creator") or "").strip().lstrip("@")
+    caption = (read.get("caption") or "").strip()
+    on_screen = (read.get("on_screen_text") or "").strip()
+    title = (caption or on_screen or f"Capture from @{creator}" if creator else "Capture")
+    title = title.replace("\n", " ")[:200]
+
+    fingerprint = hashlib.sha256(
+        f"{platform}|{creator}|{caption}|{on_screen}".encode("utf-8")
+    ).hexdigest()[:12]
+
+    host = {"instagram": "www.instagram.com", "tiktok": "www.tiktok.com"}.get(
+        platform, "example.com")
+    profile = f"https://{host}/@{creator}/" if platform == "tiktok" and creator \
+        else (f"https://{host}/{creator}/" if creator else f"https://{host}/")
+    url = f"{profile}#sava-{fingerprint}"
+
+    existing = (db.query(Bookmark)
+                .filter(Bookmark.user_id == user_id, Bookmark.url == url).first())
+    if existing is not None:
+        raise DuplicateSave("You already saved this one.")
+
+    content_key = f"{platform}:partial:{fingerprint}"
+    cc = (db.query(CanonicalContent)
+          .filter(CanonicalContent.content_key == content_key).first())
+    if cc is None:
+        cc = CanonicalContent(
+            content_key=content_key, platform=platform, canonical_url=url,
+            media_kind="video", title=title, creator_handle=creator or None,
+            description=(on_screen or None),
+            # PARTIAL, never READY: this record is genuinely incomplete, and
+            # marking it ready would hide that from the rest of the system.
+            processing_state=ProcessingState.PARTIAL,
+            processing_level=1,
+            stage_status=_json.dumps({
+                "metadata": {"status": "ok", "detail": "read from screenshot"},
+                "transcript": {"status": "skipped", "detail": "no canonical URL"},
+            }),
+            last_error="exact post URL not recoverable from a screenshot",
+        )
+        db.add(cc)
+        db.commit()
+        db.refresh(cc)
+
+    # Persist the screenshot as the thumbnail so the library looks right.
+    try:
+        thumbs = Path(API_DIR) / "static" / "thumbnails"
+        thumbs.mkdir(parents=True, exist_ok=True)
+        name = f"capture_{platform}_{fingerprint}.jpg"
+        from .resolver import compress_for_vision
+        jpeg, _ = compress_for_vision(screenshot)
+        (thumbs / name).write_bytes(jpeg)
+        cc.thumbnail_url = f"/static/thumbnails/{name}"
+        db.commit()
+    except Exception as e:
+        logger.warning("could not store capture thumbnail: %s", e)
+
+    bookmark = Bookmark(
+        user_id=user_id, url=url, platform=platform, raw="{}",
+        title=title, author=(creator or None),
+        thumbnail_url=cc.thumbnail_url, description=(on_screen or None),
+        canonical_content_id=cc.id,
+        processing_state=ProcessingState.PARTIAL,
+    )
+    db.add(bookmark)
+    db.commit()
+    db.refresh(bookmark)
+
+    from ..ai import telemetry
+    telemetry.record(db, operation="save.partial_capture", user_id=user_id,
+                     canonical_content_id=cc.id, bookmark_id=bookmark.id,
+                     platform=platform)
+
+    return _response(bookmark, cc, reused=False)

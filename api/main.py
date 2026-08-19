@@ -100,9 +100,31 @@ def on_startup():
     # Additive, idempotent schema upgrade for the intelligence layer.
     try:
         from .db import engine
-        run_migrations(engine)
+        applied = run_migrations(engine)
+        if applied:
+            logger.warning(
+                "Schema was out of date and has been repaired (%d steps): %s",
+                len(applied), ", ".join(applied[:8]))
     except Exception as e:
         logger.error(f"Schema migration failed: {e}")
+
+    # Say plainly which database is live and what is in it. A silent switch
+    # between database files (or a restored/reverted file) previously looked
+    # like "login is broken" rather than "the schema moved underneath us".
+    try:
+        from sqlalchemy import text as _text
+        from .config import DATABASE_URL
+        from .db import SessionLocal
+        _db = SessionLocal()
+        try:
+            users = _db.execute(_text("SELECT COUNT(*) FROM users")).scalar()
+            saves = _db.execute(_text("SELECT COUNT(*) FROM bookmarks")).scalar()
+            logger.info("DATABASE IN USE: %s", DATABASE_URL)
+            logger.info("  users=%s  bookmarks=%s", users, saves)
+        finally:
+            _db.close()
+    except Exception as e:
+        logger.error("Could not read database summary: %s", e)
     # Self-heal legacy SQLite schemas (e.g. pre-existing DBs missing
     # users.updated_at). Idempotent and non-destructive — no-op on Postgres.
     migrate_from_sqlite()
