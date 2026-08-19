@@ -219,3 +219,6 @@ migrate_db.py
 youtube_metadata_ultra_fast.py
 youtube_metadata.py
 fast_youtube_endpoint.py
+
+# local db backups
+.sava_backups/
