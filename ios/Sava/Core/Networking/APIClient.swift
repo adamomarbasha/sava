@@ -60,11 +60,24 @@ final class APIClient {
     private func perform(_ endpoint: Endpoint) async throws -> Data {
         let request = try buildRequest(endpoint)
 
+        #if DEBUG
+        let hasAuth = request.value(forHTTPHeaderField: "Authorization") != nil
+        NSLog("[Sava http] -> %@ %@ auth=%@ body=%dB",
+              endpoint.method.rawValue,
+              request.url?.absoluteString ?? endpoint.path,
+              hasAuth ? "yes" : "NO",
+              request.httpBody?.count ?? 0)
+        #endif
+
         let data: Data
         let response: URLResponse
         do {
             (data, response) = try await session.data(for: request)
         } catch let urlError as URLError {
+            #if DEBUG
+            NSLog("[Sava http] <- %@ TRANSPORT FAILURE %@ (code %d)",
+                  endpoint.path, urlError.localizedDescription, urlError.code.rawValue)
+            #endif
             switch urlError.code {
             case .notConnectedToInternet, .dataNotAllowed:
                 throw APIError.offline
@@ -81,11 +94,22 @@ final class APIClient {
             throw APIError.invalidResponse
         }
 
+        #if DEBUG
+        NSLog("[Sava http] <- %@ HTTP %d  %dB  %@",
+              endpoint.path, http.statusCode, data.count,
+              String(data: data.prefix(300), encoding: .utf8) ?? "<binary>")
+        #endif
+
         switch http.statusCode {
         case 200...299:
             return data
         case 401:
             await tokenProvider?.handleUnauthorized()
+            throw APIError.unauthorized
+        case 403:
+            // FastAPI's HTTPBearer returns 403 "Not authenticated" when the
+            // Authorization header is missing entirely. Reporting that as a
+            // server fault ("Sava is having a moment") hid a real auth bug.
             throw APIError.unauthorized
         case 404:
             throw APIError.notFound(Self.detail(from: data))
@@ -112,16 +136,31 @@ final class APIClient {
 
         var request = URLRequest(url: url)
         request.httpMethod = endpoint.method.rawValue
+        if let timeout = endpoint.timeout {
+            request.timeoutInterval = timeout
+        }
         request.setValue("application/json", forHTTPHeaderField: "Accept")
 
         if let body = endpoint.body {
             request.httpBody = body
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.setValue(endpoint.contentTypeOverride ?? "application/json",
+                             forHTTPHeaderField: "Content-Type")
         }
 
         if endpoint.requiresAuth, let token = tokenProvider?.currentToken {
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
+        #if DEBUG
+        if endpoint.requiresAuth, request.value(forHTTPHeaderField: "Authorization") == nil {
+            // Either there is genuinely no token, or the weakly-held provider
+            // was released. The second case is a bug, so name it explicitly.
+            let hasToken = KeychainStore().read(.authToken)?.isEmpty == false
+            NSLog("[Sava http] WARNING sending %@ unauthenticated — provider=%@ keychainToken=%@",
+                  endpoint.path,
+                  tokenProvider == nil ? "RELEASED" : "present",
+                  hasToken ? "present" : "absent")
+        }
+        #endif
 
         return request
     }

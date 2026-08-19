@@ -50,28 +50,98 @@ enum PlatformDetector {
 
 /// What the user gave us to work with when the Action Button fired.
 struct CaptureInput {
-    /// A URL the Shortcut extracted from the current app (TikTok share/copy).
+    /// Every URL the Shortcut harvested from "Get What's On Screen". The
+    /// intent ranks these and picks the real content URL.
+    var candidateURLs: [String] = []
+    /// The URL finally selected from `candidateURLs` (or passed directly).
     var providedURL: String?
-    /// A screenshot the Shortcut took, used only when no direct URL exists.
+    /// A screenshot the Shortcut took, supplied ONLY when it found no URL.
     /// Held in memory and never written to the Photos library.
     var screenshot: Data?
+    /// What the client believes is on screen, when the Shortcut can say.
+    var platformHint: Platform?
+    /// Names of the inputs the intent actually received — DEBUG diagnostics.
+    var inputTypes: [String] = []
 }
 
-/// The result of resolving a capture into something saveable.
-enum CaptureResolution {
-    case ready(CapturedLink)
-    case needsResolutionUnavailable   // screenshot present but resolver not live
-    case nothingFound
+/// Chooses the real content URL out of everything "Get What's On Screen"
+/// returned.
+///
+/// That action commonly yields several URLs — a profile link, a sound page, a
+/// share/tracking link, a CDN asset. Saving the first one would frequently save
+/// the wrong thing, so candidates are ranked: a URL that identifies a specific
+/// piece of content on a supported platform always beats a bare profile or an
+/// unrelated host.
+enum URLSelector {
+    /// Higher is better. Negative means "never pick this".
+    static func score(_ raw: String) -> Int {
+        guard let link = CapturedLink(rawURL: raw, source: .direct) else { return -1 }
+        let url = raw.lowercased()
+        var score = 0
+
+        switch link.platform {
+        case .other:
+            score += 5                      // unknown host: usable but unloved
+        default:
+            score += 40                     // a platform we understand
+        }
+
+        // A specific item beats a profile/feed page.
+        if url.contains("/video/") || url.contains("/watch?v=")
+            || url.contains("/reel/") || url.contains("/reels/")
+            || url.contains("/p/") || url.contains("/shorts/")
+            || url.contains("youtu.be/") || url.contains("/photo/")
+            || url.contains("/status/") {
+            score += 50
+        }
+
+        // Short links resolve to real content server-side — still good.
+        if url.contains("vm.tiktok.com") || url.contains("vt.tiktok.com")
+            || url.contains("pin.it") {
+            score += 35
+        }
+
+        // Things that are never the content the user is watching.
+        for junk in ["/login", "/signup", "/privacy", "/terms", "/about",
+                     "/download", "/help", "/support", "apple.com", "itunes.",
+                     "apps.apple.com", "/music/", "/discover", "/foryou",
+                     "/following", "/explore"] where url.contains(junk) {
+            score -= 60
+        }
+        if url.hasSuffix(".jpg") || url.hasSuffix(".png") || url.hasSuffix(".mp4")
+            || url.contains("cdn") || url.contains("static.") {
+            score -= 70
+        }
+        return score
+    }
+
+    /// Pick the best candidate, or nil when none is usable.
+    static func best(from candidates: [String]) -> String? {
+        candidates
+            .map { (url: $0, score: score($0)) }
+            .filter { $0.score > 0 }
+            .max { $0.score < $1.score }?
+            .url
+    }
 }
 
 enum CaptureError: LocalizedError {
     case notSignedIn
-    case saveFailed(String)
+    case saveFailed(String, CapturePipeline.Outcome?)
+    case noContent(String, CapturePipeline.Outcome?)
 
     var errorDescription: String? {
         switch self {
         case .notSignedIn: return "Open Sava and sign in to start saving."
-        case .saveFailed(let m): return m
+        case .saveFailed(let m, _): return m
+        case .noContent(let m, _): return m
+        }
+    }
+
+    var outcome: CapturePipeline.Outcome? {
+        switch self {
+        case .notSignedIn: return nil
+        case .saveFailed(_, let o), .noContent(_, let o): return o
         }
     }
 }

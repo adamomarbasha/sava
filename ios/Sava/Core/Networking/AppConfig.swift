@@ -11,7 +11,7 @@ enum AppConfig {
         if let raw = resolvedBaseString(), let url = URL(string: raw) {
             return url
         }
-        return URL(string: "http://127.0.0.1:8000")!
+        return URL(string: "http://192.168.1.227:8000")!
     }()
 
     private static func resolvedBaseString() -> String? {
