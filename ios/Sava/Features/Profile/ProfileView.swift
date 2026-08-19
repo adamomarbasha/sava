@@ -13,6 +13,9 @@ struct ProfileView: View {
                 identity
                 actionButtonCard
                 captureBehaviorCard
+                #if DEBUG
+                captureDebugCard
+                #endif
                 signOutButton
             }
             .padding(.horizontal, Spacing.md)
@@ -84,6 +87,74 @@ struct ProfileView: View {
             }
         }
     }
+
+    #if DEBUG
+    /// DEBUG-only: what the Action Button actually received on recent presses.
+    /// Never compiled into Release.
+    @ViewBuilder private var captureDebugCard: some View {
+        InfoCard(icon: "ladybug", title: "Capture debug") {
+            let traces = CaptureDiagnostics.recent()
+            VStack(alignment: .leading, spacing: Spacing.sm) {
+                if traces.isEmpty {
+                    Text("No Action Button presses recorded yet. Press it once, then reopen this screen.")
+                        .font(SavaFont.footnote)
+                        .foregroundStyle(SavaColors.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    ForEach(traces.prefix(8)) { t in
+                        VStack(alignment: .leading, spacing: 3) {
+                            HStack {
+                                Text(t.path)
+                                    .font(.system(size: 12, weight: .bold, design: .monospaced))
+                                    .foregroundStyle(t.outcome == "saved"
+                                                     ? SavaColors.success : SavaColors.danger)
+                                Spacer()
+                                Text("\(t.durationMs)ms")
+                                    .font(.system(size: 11, design: .monospaced))
+                                    .foregroundStyle(SavaColors.textTertiary)
+                            }
+                            Text("input: \(t.hadShortcutInput ? t.inputTypes.joined(separator: ", ") : "NOTHING RECEIVED")")
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundStyle(t.hadShortcutInput
+                                                 ? SavaColors.textSecondary : SavaColors.danger)
+                            if let u = t.providedURL {
+                                Text("url: \(u)").font(.system(size: 10, design: .monospaced))
+                                    .foregroundStyle(SavaColors.textTertiary).lineLimit(2)
+                            }
+                            if t.screenshotBytes > 0 {
+                                Text("screenshot: \(t.screenshotBytes / 1024) KB")
+                                    .font(.system(size: 10, design: .monospaced))
+                                    .foregroundStyle(SavaColors.textTertiary)
+                            }
+                            if t.clipboardChecked {
+                                Text("clipboard(\(t.clipboardType ?? "none")): \(t.clipboardValue ?? "empty")")
+                                    .font(.system(size: 10, design: .monospaced))
+                                    .foregroundStyle(SavaColors.textTertiary).lineLimit(1)
+                            }
+                            if let r = t.resolverReason {
+                                Text("resolver: \(r)" + (t.resolverConfidence.map { String(format: " (%.2f)", $0) } ?? ""))
+                                    .font(.system(size: 10, design: .monospaced))
+                                    .foregroundStyle(SavaColors.textTertiary)
+                            }
+                            if let m = t.message {
+                                Text(m).font(.system(size: 10))
+                                    .foregroundStyle(SavaColors.textTertiary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                        .padding(Spacing.xs)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(SavaColors.surfaceMuted,
+                                    in: RoundedRectangle(cornerRadius: Radius.sm, style: .continuous))
+                    }
+                    Button("Clear") { CaptureDiagnostics.clear() }
+                        .font(SavaFont.subheadline)
+                        .foregroundStyle(SavaColors.accent)
+                }
+            }
+        }
+    }
+    #endif
 
     private var signOutButton: some View {
         Button {
