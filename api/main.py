@@ -10,7 +10,7 @@ import logging
 import json
 import os
 import requests
-from starlette.responses import StreamingResponse
+from starlette.responses import FileResponse, Response, StreamingResponse
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -23,9 +23,10 @@ from .transcript_service import get_youtube_transcript, get_available_transcript
 from .comment_service import youtube_comment_service
 from .tiktok_comment_service import tiktok_service
 from .rate_limiter import rate_limiter
-from .config import ASYNC_SAVE, PIPELINE_VERSION
+from .config import API_DIR, ASYNC_SAVE, PIPELINE_VERSION
 from .migrations import run_migrations
 from .routes_intelligence import router as intelligence_router
+from .routes_playback import router as playback_router
 from .pipeline import handlers as _job_handlers  # noqa: F401 (registers job handlers)
 from .auth import (
     authenticate_user, 
@@ -49,9 +50,14 @@ app = FastAPI(
     openapi_url="/openapi.json"  
 )
 
-os.makedirs("static", exist_ok=True)
+# Anchored to the package directory, not the working directory. `run_api.py`
+# chdirs into `api/` while `uvicorn api.main:app` does not, and a relative mount
+# meant stored thumbnails 404'd under one launch method and worked under the
+# other — the same cwd trap `config.py` already fixes for the database path.
+STATIC_DIR = API_DIR / "static"
+(STATIC_DIR / "thumbnails").mkdir(parents=True, exist_ok=True)
 
-app.mount("/static", StaticFiles(directory="static"), name="static")
+app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 app.add_middleware(
     CORSMiddleware,
@@ -378,6 +384,64 @@ async def create_bookmark(
         logger.error(f"Error creating bookmark: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
+def serialize_bookmark(bookmark, cc=None):
+    """The one bookmark payload.
+
+    List, single-fetch and collection-detail all render the same card, so they
+    must all send the same fields — a save that looks richer in the library than
+    inside a collection is a serialization bug, not a design choice. Canonical
+    content is the fallback for anything the bookmark row itself is missing.
+    """
+    published = bookmark.published_at or (cc.published_at if cc else None)
+    payload = {
+        "id": bookmark.id,
+        "platform": bookmark.platform,
+        "url": bookmark.url,
+        "title": bookmark.title or (cc.title if cc else None),
+        "author": bookmark.author or (
+            (cc.creator_name or cc.creator_handle) if cc else None),
+        "thumbnail_url": bookmark.thumbnail_url or (cc.thumbnail_url if cc else None),
+        # The caption. For TikTok/Instagram the title *is* the caption, so the
+        # client shows this only when it adds something.
+        "description": bookmark.description or (cc.description if cc else None),
+        "note": bookmark.note,
+        "published_at": published.isoformat() if published else None,
+        "created_at": bookmark.created_at.isoformat() if bookmark.created_at else None,
+        "canonical_id": bookmark.canonical_content_id,
+        "processing_state": (cc.processing_state if cc
+                             else bookmark.processing_state) or "ready",
+        "content_type": cc.content_type if cc else None,
+        "duration_seconds": cc.duration_seconds if cc else None,
+        "creator_handle": cc.creator_handle if cc else None,
+        # Short-form shape. The client builds the swipe feed by filtering the
+        # list it already has, so this has to ride along with every save rather
+        # than needing a second round trip per card.
+        "media_kind": cc.media_kind if cc else None,
+        "is_short": bool(cc.is_short) if cc else False,
+        "width": cc.width if cc else None,
+        "height": cc.height if cc else None,
+        "meta": {},
+    }
+
+    if bookmark.platform == "youtube" and bookmark.youtube_details:
+        yt = bookmark.youtube_details[0]
+        payload["meta"] = {
+            "video_id": yt.video_id,
+            "channel_id": yt.channel_id,
+            "duration_seconds": yt.duration_seconds,
+            "view_count": yt.view_count,
+            "like_count": yt.like_count,
+            "tags": json.loads(yt.tags) if yt.tags else [],
+        }
+
+    # Non-YouTube platforms have no youtube_details row, so surface the canonical
+    # duration under the same key the client already reads.
+    if not payload["meta"].get("duration_seconds") and payload["duration_seconds"]:
+        payload["meta"]["duration_seconds"] = payload["duration_seconds"]
+
+    return payload
+
+
 @app.get("/api/bookmarks")
 def list_bookmarks(
     platform: Optional[str] = Query(None, description="Filter by platform (youtube, tiktok, instagram, twitter, linkedin, reddit, pinterest, snapchat, facebook, other)"),
@@ -406,36 +470,23 @@ def list_bookmarks(
             )
         
         bookmarks = query.order_by(Bookmark.created_at.desc()).offset(offset).limit(limit).all()
-        
-        results = []
-        for bookmark in bookmarks:
-            response = {
-                "id": bookmark.id,
-                "platform": bookmark.platform,
-                "url": bookmark.url,
-                "title": bookmark.title,
-                "author": bookmark.author,
-                "thumbnail_url": bookmark.thumbnail_url,
-                "note": bookmark.note,
-                "published_at": bookmark.published_at.isoformat() if bookmark.published_at else None,
-                "created_at": bookmark.created_at.isoformat(),
-                "meta": {}
+
+        # Canonical content holds the richest metadata (title, creator, duration,
+        # thumbnail, content type, processing state) and is shared across users.
+        # Previously only YouTube rows exposed any of it, so TikTok and Instagram
+        # saves rendered with no duration and no processing state. Load it once
+        # for the page and fall back to it wherever the bookmark row is thinner.
+        from .models import CanonicalContent
+        canonical_ids = [b.canonical_content_id for b in bookmarks if b.canonical_content_id]
+        canonical = {}
+        if canonical_ids:
+            canonical = {
+                cc.id: cc for cc in db.query(CanonicalContent)
+                .filter(CanonicalContent.id.in_(canonical_ids)).all()
             }
-            
-            if bookmark.platform == "youtube" and bookmark.youtube_details:
-                yt = bookmark.youtube_details[0]
-                response["meta"] = {
-                    "video_id": yt.video_id,
-                    "channel_id": yt.channel_id,
-                    "duration_seconds": yt.duration_seconds,
-                    "view_count": yt.view_count,
-                    "like_count": yt.like_count,
-                    "tags": json.loads(yt.tags) if yt.tags else []
-                }
-            
-            results.append(response)
-        
-        return results
+
+        return [serialize_bookmark(b, canonical.get(b.canonical_content_id))
+                for b in bookmarks]
         
     except HTTPException:
         raise
@@ -451,6 +502,31 @@ def list_bookmarks_legacy(
     db: Session = Depends(get_db)
 ):
     return list_bookmarks(platform=platform, q=query, current_user=current_user, db=db)
+
+@app.get("/api/bookmarks/{bookmark_id}")
+def get_bookmark(
+    bookmark_id: int,
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """One save, in exactly the shape the list endpoint returns.
+
+    Ask Sava's answers cite saved media, and those citations have to be
+    openable. Without this the client could show a thumbnail it had no way to
+    navigate to.
+    """
+    from .models import CanonicalContent
+
+    bookmark = (db.query(Bookmark)
+                .filter(Bookmark.id == bookmark_id,
+                        Bookmark.user_id == current_user["id"]).first())
+    if bookmark is None:
+        raise HTTPException(status_code=404, detail="Bookmark not found")
+
+    cc = (db.query(CanonicalContent).get(bookmark.canonical_content_id)
+          if bookmark.canonical_content_id else None)
+    return serialize_bookmark(bookmark, cc)
+
 
 @app.delete("/api/bookmarks/{bookmark_id}")
 def delete_bookmark(
@@ -544,19 +620,48 @@ async def test_instagram_thumbnail(url: str):
     }
 
 @app.get("/api/thumbnail")
-async def proxy_thumbnail(url: str):
+async def proxy_thumbnail(url: str, platform: Optional[str] = None):
+    """Fetch a referer-gated thumbnail on the client's behalf — and keep a copy.
+
+    Write-through cache: the first view of an Instagram or TikTok thumbnail
+    stores it under `static/thumbnails/`, so when the signed URL later expires
+    the image is still there. Repeat views are served from disk without touching
+    the CDN at all.
+
+    A dead image returns 404, not 500: the client treats "gone" as a designed
+    fallback state, whereas a 5xx reads as a server fault and gets retried.
+    """
+    from .net_guard import PLATFORM_IMAGE_HOSTS, UnsafeURL, validate
+    from .services import thumbnails as thumb_svc
+
     if not url:
         raise HTTPException(status_code=400, detail="URL parameter is required")
-    
+
+    # This endpoint takes a URL from the caller and fetches it server-side, so
+    # without a guard it is an open proxy and an SSRF primitive. Restricted to
+    # platform image CDNs resolving to public addresses.
     try:
-        response = requests.get(url, stream=True)
-        response.raise_for_status()
-        
-        content_type = response.headers.get('Content-Type', 'application/octet-stream')
-        
-        return StreamingResponse(response.iter_content(chunk_size=8192), media_type=content_type)
-    except requests.exceptions.RequestException as e:
-        raise HTTPException(status_code=500, detail=f"Failed to fetch image: {e}")
+        validate(url, allowed_hosts=PLATFORM_IMAGE_HOSTS)
+    except UnsafeURL as e:
+        logger.warning("thumbnail proxy refused %s: %s", url[:120], e)
+        raise HTTPException(status_code=400, detail="That image host is not allowed")
+
+    # Already mirrored? Serve the local copy and skip the network entirely.
+    cached = thumb_svc.cached_path_for(url, platform=platform)
+    if cached is not None:
+        return FileResponse(cached, headers={"Cache-Control": "public, max-age=604800"})
+
+    data, content_type = thumb_svc.fetch(url, platform=platform)
+    if not data:
+        raise HTTPException(status_code=404, detail="Thumbnail is no longer available")
+
+    try:
+        thumb_svc.store(data, source_url=url, platform=platform, content_type=content_type)
+    except Exception as e:
+        logger.warning("could not cache proxied thumbnail: %s", e)
+
+    return Response(content=data, media_type=content_type or "image/jpeg",
+                    headers={"Cache-Control": "public, max-age=604800"})
 
 
 class TranscriptRequest(BaseModel):
@@ -882,3 +987,6 @@ async def get_tiktok_status():
 
 # Intelligence endpoints (search, summary, ask, collections, ops).
 app.include_router(intelligence_router)
+
+# Short-form playback: descriptor + the one proxied media route.
+app.include_router(playback_router)

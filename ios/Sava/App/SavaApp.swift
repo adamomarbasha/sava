@@ -3,6 +3,7 @@ import SwiftUI
 @main
 struct SavaApp: App {
     init() {
+        SavaAppearance.apply()
         #if DEBUG
         CaptureDiagnostics.runSelectorSelfCheck()
         CaptureDiagnostics.runAuthLifetimeSelfCheck()
@@ -15,7 +16,7 @@ struct SavaApp: App {
         WindowGroup {
             RootView()
                 .environmentObject(session)
-                .tint(SavaColors.accent)
+                .tint(SavaColor.primary)
         }
     }
 }

@@ -29,7 +29,7 @@ _DIALECT = None  # set lazily in run_migrations
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 7
 
 
 def _existing_columns(conn, table: str) -> set:

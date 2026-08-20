@@ -60,7 +60,13 @@ class Bookmark(Base):
         ),
         UniqueConstraint('user_id', 'url', name='uq_bookmark_user_url'),
         Index('idx_bookmarks_platform_created_at', 'platform', 'created_at'),
-        Index('idx_bookmarks_raw_gin', 'raw', postgresql_using='gin'),
+        # `raw` is TEXT, and Postgres has no default GIN operator class for TEXT,
+        # so declaring a plain GIN index on it makes `create_all` fail outright —
+        # the whole schema, not just this index. It never showed up because
+        # every test ran on SQLite, which ignores `postgresql_using`. If this
+        # column is ever wanted for search it needs either JSONB (`jsonb_ops`)
+        # or a trigram index (`gin_trgm_ops`, requires pg_trgm); until then the
+        # column is only ever read by primary key and needs no index at all.
         Index('idx_bookmarks_user_created', 'user_id', 'created_at'),
     )
     
@@ -162,6 +168,16 @@ class CanonicalContent(Base):
     title = Column(Text)
     description = Column(Text)
     duration_seconds = Column(Integer)
+
+    # Native pixel dimensions of the source media. Stored because orientation is
+    # not derivable from anything else we keep, and orientation is what decides
+    # whether an item belongs in the short-form viewer at all. `is_short` is the
+    # decision itself, cached so that neither the feed query nor the client has
+    # to re-derive it per row.
+    width = Column(Integer)
+    height = Column(Integer)
+    is_short = Column(Boolean, nullable=False, default=False)
+
     published_at = Column(DateTime(timezone=True))
     thumbnail_url = Column(Text)
     thumbnail_stored_key = Column(Text)
@@ -174,6 +190,23 @@ class CanonicalContent(Base):
     processing_state = Column(String(16), nullable=False, default=ProcessingState.QUEUED)
     processing_level = Column(Integer, nullable=False, default=0)
     pipeline_version = Column(Integer, nullable=False, default=1)
+
+    # Per-stage versions. One global `pipeline_version` forces an all-or-nothing
+    # reprocess: improve the summariser and you also re-download every video.
+    # Versioning each stage separately means an upgrade sweep can re-run exactly
+    # the stage that changed and reuse everything else.
+    acquisition_version = Column(Integer, nullable=False, default=0)
+    transcript_version = Column(Integer, nullable=False, default=0)
+    vision_version = Column(Integer, nullable=False, default=0)
+    understanding_version = Column(Integer, nullable=False, default=0)
+    embedding_version = Column(Integer, nullable=False, default=0)
+
+    # Comments are enrichment on a separate clock — fetched by their own job,
+    # refreshed on their own TTL, and never a precondition for READY.
+    comment_version = Column(Integer, nullable=False, default=0)
+    comments_fetched_at = Column(DateTime(timezone=True))
+    comments_state = Column(String(16), nullable=False, default="none")  # none|ok|failed|disabled
+    comment_count = Column(Integer)
     stage_status = Column(Text, nullable=False, default="{}")   # per-stage ok/failed/skipped
     last_error = Column(Text)
 
@@ -183,6 +216,7 @@ class CanonicalContent(Base):
     __table_args__ = (
         Index("idx_cc_platform_pid", "platform", "platform_content_id"),
         Index("idx_cc_state", "processing_state"),
+        Index("idx_cc_short", "is_short"),
     )
 
 
@@ -221,6 +255,73 @@ class ContentFrame(Base):
     created_at = Column(DateTime(timezone=True), nullable=False, default=func.now())
 
     __table_args__ = (Index("idx_frames_content_ts", "canonical_content_id", "ts_ms"),)
+
+
+class ContentAsset(Base):
+    """One durable image belonging to a piece of content.
+
+    Exists for TikTok photo posts, where the content *is* an ordered set of
+    images. Modelling them as assets rather than as frames matters: frames are
+    samples Sava chose out of a video and are disposable, whereas these slides
+    are the work itself, they have a meaningful order, and slide 1 is the cover
+    the creator picked.
+
+    `storage_key` points into object storage, so the asset survives the source
+    CDN URL expiring — which for TikTok is a matter of days, not years.
+    """
+    __tablename__ = "content_assets"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    canonical_content_id = Column(Integer, ForeignKey("canonical_content.id", ondelete="CASCADE"), nullable=False)
+    asset_index = Column(Integer, nullable=False, default=0)     # 0 = cover
+    kind = Column(String(16), nullable=False, default="image")   # image | cover
+    source_url = Column(Text)                                    # may expire
+    storage_key = Column(Text)                                   # durable, ours
+    width = Column(Integer)
+    height = Column(Integer)
+    ocr_text = Column(Text)
+    vision_caption = Column(Text)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("canonical_content_id", "asset_index", name="uq_asset_content_index"),
+        Index("idx_assets_content_index", "canonical_content_id", "asset_index"),
+    )
+
+
+class ContentComment(Base):
+    """A community comment, cached against the *content* rather than a save.
+
+    The pre-existing `comments` table hangs off `bookmarks`, which means ten
+    thousand people saving one video would fetch and store that video's comments
+    ten thousand times. This table is keyed on canonical content, so it is
+    fetched once and read by everyone — the same rule the rest of the pipeline
+    already follows.
+
+    Comments are explicitly *secondary*: `is_creator` and the separate modality
+    on retrieval chunks keep audience opinion from being mistaken for what the
+    video actually said.
+    """
+    __tablename__ = "content_comments"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    canonical_content_id = Column(Integer, ForeignKey("canonical_content.id", ondelete="CASCADE"), nullable=False)
+    platform_comment_id = Column(String(64))
+    author = Column(String(255))
+    text = Column(Text, nullable=False)
+    like_count = Column(Integer, default=0)
+    reply_count = Column(Integer, default=0)
+    is_creator = Column(Boolean, nullable=False, default=False)
+    rank = Column(Integer, nullable=False, default=0)            # position in the fetched sample
+    source = Column(String(24), nullable=False, default="top")   # top | recent
+    published_at = Column(DateTime(timezone=True))
+    fetched_at = Column(DateTime(timezone=True), nullable=False, default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("canonical_content_id", "platform_comment_id",
+                         name="uq_comment_content_platform_id"),
+        Index("idx_comments_content_rank", "canonical_content_id", "rank"),
+    )
 
 
 class ContentChunk(Base):
