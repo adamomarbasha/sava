@@ -104,3 +104,27 @@ WHISPER_COMPUTE_TYPE = os.getenv("WHISPER_COMPUTE_TYPE", "int8")
 
 def ai_enabled() -> bool:
     return bool(GEMINI_API_KEY or OPENAI_API_KEY)
+
+# ─── Comments enrichment ─────────────────────────────────────────────────────
+# Comments are secondary context: useful for "what did people think", never the
+# meaning of the content itself. They run as their own job on their own clock so
+# a comments outage can never hold up a save.
+COMMENTS_ENABLED = os.getenv("SAVA_COMMENTS_ENABLED", "1").lower() not in ("0", "false", "no")
+COMMENTS_MAX_PER_ITEM = int(os.getenv("SAVA_COMMENTS_MAX", "40"))
+COMMENTS_TTL_DAYS = int(os.getenv("SAVA_COMMENTS_TTL_DAYS", "30"))
+COMMENTS_MIN_LIKES = int(os.getenv("SAVA_COMMENTS_MIN_LIKES", "0"))
+# Per-platform switches. TikTok's path needs a session cookie it does not have
+# by default, so it stays off until someone configures it deliberately.
+COMMENTS_YOUTUBE_ENABLED = os.getenv("SAVA_COMMENTS_YOUTUBE", "1").lower() not in ("0", "false", "no")
+COMMENTS_TIKTOK_ENABLED = os.getenv("SAVA_COMMENTS_TIKTOK", "0").lower() not in ("0", "false", "no")
+
+# Per-stage versions. Bumping one causes only that stage to be re-run on the
+# next upgrade sweep; everything else is reused.
+ACQUISITION_VERSION = int(os.getenv("SAVA_ACQUISITION_VERSION", "1"))
+TRANSCRIPT_VERSION = int(os.getenv("SAVA_TRANSCRIPT_VERSION", "1"))
+VISION_VERSION = int(os.getenv("SAVA_VISION_VERSION", "1"))
+EMBEDDING_VERSION = int(os.getenv("SAVA_EMBEDDING_VERSION", "1"))
+COMMENT_VERSION = int(os.getenv("SAVA_COMMENT_VERSION", "1"))
+
+# TikTok photo posts. A ceiling because a carousel is billed per slide read.
+CAROUSEL_MAX_SLIDES = int(os.getenv("SAVA_CAROUSEL_MAX_SLIDES", "12"))

@@ -178,6 +178,22 @@ DEFAULT_POLICIES: Dict[str, PlatformPolicy] = {
         "instagram", concurrency=1, rpm=6, min_interval=5.0, failures=3, open_s=600),
     "other": PlatformPolicy.from_env(
         "other", concurrency=2, rpm=30, min_interval=0.5, failures=5, open_s=120),
+
+    # Not a platform — a *capacity*. Transcription is the one stage that can
+    # saturate a host regardless of which platform the media came from, so it
+    # gets its own ceiling. Without this, a queue full of TikToks would happily
+    # start as many concurrent transcriptions as there are workers.
+    "asr": PlatformPolicy.from_env(
+        "asr", concurrency=2, rpm=120, min_interval=0.0, failures=6, open_s=60),
+
+    # Also a capacity, and deliberately not the `tiktok` bucket. Background
+    # acquisition is a crawl and is throttled like one (12 rpm, 2s apart);
+    # resolving a stream so a human can watch it is a keypress, and putting it
+    # behind the crawl budget would make every third swipe wait two seconds.
+    # Separate buckets also mean a playback outage cannot open the circuit that
+    # ingestion depends on, or the reverse.
+    "playback": PlatformPolicy.from_env(
+        "playback", concurrency=4, rpm=60, min_interval=0.2, failures=6, open_s=90),
 }
 
 

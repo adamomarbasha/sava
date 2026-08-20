@@ -129,6 +129,20 @@ def tiktok_video_id(url: str) -> Optional[str]:
     return tail if _TT_NUMERIC.match(tail) else None
 
 
+def _tiktok_media_kind(url: str) -> Optional[str]:
+    """`/photo/<id>` is a carousel; `/video/<id>` is a video.
+
+    The id space is shared, so identity is unaffected — the same post reached
+    through either path is still one canonical row. Only the handling differs.
+    """
+    path = (urlparse(url).path or "").lower()
+    if "/photo/" in path:
+        return "carousel"
+    if "/video/" in path:
+        return "video"
+    return None
+
+
 def instagram_shortcode(url: str) -> Optional[str]:
     try:
         p = urlparse(url)
@@ -179,10 +193,15 @@ def resolve_identity(url: str, platform_hint: Optional[str] = None) -> Optional[
     elif platform == "tiktok":
         vid = tiktok_video_id(raw) or tiktok_video_id(normalized)
         if vid:
+            # A `/photo/` post is a swipeable image set, not a video that failed
+            # to have a video. Saying so here is what lets the pipeline skip
+            # audio acquisition entirely and read the slides instead.
+            kind = _tiktok_media_kind(raw) or _tiktok_media_kind(normalized) or "video"
+            path_segment = "photo" if kind == "carousel" else "video"
             return ContentIdentity(
                 platform="tiktok", platform_content_id=vid,
-                canonical_url=f"https://tiktok.com/@i/video/{vid}",
-                content_key=f"tiktok:{vid}", media_kind="video", is_resolvable=True,
+                canonical_url=f"https://tiktok.com/@i/{path_segment}/{vid}",
+                content_key=f"tiktok:{vid}", media_kind=kind, is_resolvable=True,
             )
         # vm.tiktok.com/XXXX — real id only known after following the redirect.
         return ContentIdentity(

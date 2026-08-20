@@ -178,6 +178,8 @@ def fetch_metadata(url: str) -> AcquisitionResult:
             "view_count": info.get("view_count"),
             "like_count": info.get("like_count"),
             "comment_count": info.get("comment_count"),
+            "width": info.get("width"),
+            "height": info.get("height"),
             "tags": info.get("tags") or [],
             "categories": info.get("categories") or [],
             "webpage_url": info.get("webpage_url") or url,
@@ -303,47 +305,33 @@ def fetch_native_captions(url: str, languages: Optional[List[str]] = None) -> Ac
 
 
 def transcribe_audio(audio_path: str) -> AcquisitionResult:
-    """Local Whisper transcription.
+    """Transcribe through the configured ASR provider.
 
-    Kept local because this deployment has no hosted-ASR credential. The audit
-    recommends a hosted endpoint (Groq whisper-large-v3-turbo at $0.04/hr) once
-    a key exists; swapping this function is the only change required.
+    The provider decision — hosted, local, or none — lives in `api/asr.py`.
+    Nothing here knows or cares which one ran. When no provider is configured
+    this returns a clean failure and the pipeline treats the item as having no
+    speech, which is accurate rather than broken.
     """
-    started = time.monotonic()
-    try:
-        from ..config import WHISPER_COMPUTE_TYPE, WHISPER_DEVICE, WHISPER_MODEL
-        segments: List[Dict[str, Any]] = []
-        language = "en"
-        try:
-            from faster_whisper import WhisperModel
-            model = WhisperModel(WHISPER_MODEL, device=WHISPER_DEVICE,
-                                 compute_type=WHISPER_COMPUTE_TYPE)
-            segs, info = model.transcribe(audio_path, beam_size=1, vad_filter=True)
-            language = getattr(info, "language", "en") or "en"
-            for s in segs:
-                segments.append({"text": s.text.strip(), "start": float(s.start),
-                                 "duration": float(s.end - s.start)})
-        except ImportError:
-            import whisper
-            model = whisper.load_model(WHISPER_MODEL)
-            res = model.transcribe(audio_path)
-            language = res.get("language", "en")
-            for s in res.get("segments", []):
-                segments.append({"text": (s.get("text") or "").strip(),
-                                 "start": float(s.get("start", 0)),
-                                 "duration": float(s.get("end", 0) - s.get("start", 0))})
+    from ..asr import MAX_AUDIO_SECONDS, get_asr
 
-        segments = [s for s in segments if s["text"]]
-        total = sum(s["duration"] for s in segments)
-        return AcquisitionResult(
-            True, "audio", wall_ms=int((time.monotonic() - started) * 1000),
-            duration_s=total,
-            metadata={"segments": segments, "language": language, "source": "asr",
-                      "model": WHISPER_MODEL},
-        )
-    except Exception as e:
-        return AcquisitionResult(False, "audio", error=str(e)[:400],
-                                 wall_ms=int((time.monotonic() - started) * 1000))
+    provider = get_asr()
+    if not provider.available:
+        return AcquisitionResult(False, "audio", error="no ASR provider configured")
+
+    result = provider.transcribe(audio_path)
+    if result.ok and result.audio_seconds > MAX_AUDIO_SECONDS:
+        logger.warning("transcript exceeded the %ss ceiling (%.0fs) — truncating",
+                       MAX_AUDIO_SECONDS, result.audio_seconds)
+        result.segments = [s for s in result.segments
+                           if s.get("start", 0) <= MAX_AUDIO_SECONDS]
+
+    return AcquisitionResult(
+        result.ok, "audio", wall_ms=result.wall_ms, duration_s=result.audio_seconds,
+        error=result.error,
+        metadata={"segments": result.segments, "language": result.language,
+                  "source": "asr", "model": result.model,
+                  "provider": result.provider},
+    )
 
 
 def extract_audio_from_video(video_path: str, out_path: Optional[str] = None) -> Optional[str]:
@@ -380,3 +368,91 @@ def cleanup(path: Optional[str]) -> None:
             shutil.rmtree(target, ignore_errors=True)
     except Exception:
         pass
+
+
+# ─── TikTok photo posts ──────────────────────────────────────────────────────
+
+def fetch_carousel(url: str, max_slides: int = 12) -> AcquisitionResult:
+    """Read a TikTok photo post as an ordered set of images.
+
+    A photo post is not a video that failed to have a video. yt-dlp surfaces it
+    in one of two shapes depending on the extractor version: a playlist whose
+    entries are the slides, or a single info dict whose `thumbnails` list *is*
+    the slides. Both are handled, because guessing wrong means treating a
+    carousel as a broken video and losing the entire post.
+
+    Only metadata and image URLs are fetched here — no bytes are downloaded.
+    Mirroring the slides into durable storage is a separate, budgeted step.
+    """
+    started = time.monotonic()
+    try:
+        import yt_dlp
+
+        opts = _ydl_base_opts()
+        opts["skip_download"] = True
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+        if not info:
+            return AcquisitionResult(False, "carousel", error="no info returned")
+
+        slides: List[Dict[str, Any]] = []
+
+        entries = info.get("entries")
+        if entries:
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                image = entry.get("url") or entry.get("thumbnail")
+                if not image:
+                    thumbs = entry.get("thumbnails") or []
+                    image = thumbs[-1].get("url") if thumbs else None
+                if image:
+                    slides.append({"url": image, "width": entry.get("width"),
+                                   "height": entry.get("height")})
+        else:
+            # Single info dict. Its `thumbnails` are the slides, but the list
+            # also contains multiple *resolutions of the same slide*, so keep
+            # the largest per distinct image rather than every entry.
+            best: Dict[str, Dict[str, Any]] = {}
+            for thumb in info.get("thumbnails") or []:
+                image = thumb.get("url")
+                if not image:
+                    continue
+                key = thumb.get("id") or image.split("?")[0]
+                current = best.get(key)
+                if current is None or (thumb.get("width") or 0) > (current.get("width") or 0):
+                    best[key] = {"url": image, "width": thumb.get("width"),
+                                 "height": thumb.get("height")}
+            slides = list(best.values())
+
+        slides = slides[:max_slides]
+        if not slides:
+            return AcquisitionResult(False, "carousel", error="no images found",
+                                     wall_ms=int((time.monotonic() - started) * 1000))
+
+        meta = {
+            "title": info.get("title"), "description": info.get("description"),
+            "uploader": info.get("uploader") or info.get("channel"),
+            "uploader_id": info.get("uploader_id") or info.get("channel_id"),
+            "upload_date": info.get("upload_date"),
+            "view_count": info.get("view_count"), "like_count": info.get("like_count"),
+            "comment_count": info.get("comment_count"),
+            "repost_count": info.get("repost_count"),
+            "track": (info.get("track") or (info.get("music") or {}).get("title")
+                      if isinstance(info.get("music"), dict) else info.get("track")),
+            "artist": info.get("artist"),
+            "webpage_url": info.get("webpage_url") or url,
+            "slide_count": len(slides),
+            # Slide one is the cover the creator chose. Never pick another.
+            "thumbnail": slides[0]["url"],
+            "slides": slides,
+        }
+        return AcquisitionResult(
+            True, "carousel",
+            bytes_moved=len(json.dumps(meta, default=str).encode()),
+            wall_ms=int((time.monotonic() - started) * 1000),
+            metadata=meta,
+        )
+    except Exception as e:
+        return AcquisitionResult(False, "carousel", error=str(e)[:400],
+                                 wall_ms=int((time.monotonic() - started) * 1000))

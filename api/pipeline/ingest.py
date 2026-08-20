@@ -119,12 +119,22 @@ def resolve_or_create_canonical(db, url: str, platform_hint: Optional[str] = Non
     if existing:
         return existing, False
 
+    # `resolve_identity` normalizes `/shorts/<id>` to `watch?v=<id>` so a Short
+    # and a watch link stay one canonical row — correct for identity, but it
+    # destroys the only unambiguous evidence that this is a Short. Record the
+    # hint now, while the URL the user actually saved is still in hand.
+    from ..content.shortform import is_short_form, is_shorts_url
+    shorts_hint = is_shorts_url(url)
+
     cc = CanonicalContent(
         content_key=ident.content_key,
         platform=ident.platform,
         platform_content_id=ident.platform_content_id,
         canonical_url=ident.canonical_url,
         media_kind=ident.media_kind,
+        is_short=is_short_form(ident.platform, media_kind=ident.media_kind,
+                               url_hint=url),
+        metadata_json=json.dumps({"shorts_url": True}) if shorts_hint else "{}",
         processing_state=ProcessingState.QUEUED,
         processing_level=0,
         pipeline_version=PIPELINE_VERSION,
@@ -169,12 +179,248 @@ def _meta_from_info(info: Dict[str, Any], nbytes: int):
         "uploader": info.get("uploader") or info.get("channel"),
         "uploader_id": info.get("uploader_id") or info.get("channel_id"),
         "thumbnail": info.get("thumbnail"), "upload_date": info.get("upload_date"),
+        "width": info.get("width"), "height": info.get("height"),
         "view_count": info.get("view_count"), "like_count": info.get("like_count"),
         "tags": info.get("tags") or [], "categories": info.get("categories") or [],
         "webpage_url": info.get("webpage_url"), "extractor": info.get("extractor"),
     }
     return AcquisitionResult(True, "metadata", bytes_moved=nbytes,
                              duration_s=info.get("duration"), metadata=meta)
+
+
+def _read_carousel_slides(db, cc: CanonicalContent, *, router,
+                          user_id: Optional[int] = None,
+                          force: bool = False) -> str:
+    """Read a photo post's slides as one ordered document.
+
+    Slide order carries the meaning — title, ingredients, method, result — so
+    the text is emitted with explicit indices and the whole set goes to the model
+    in a single call. Analysing slides independently produces four unrelated
+    image descriptions and loses the post.
+
+    Slides already stored durably are read from object storage, so this costs no
+    platform requests at all on a re-run.
+    """
+    from ..models import ContentAsset
+    from ..storage import get_storage
+
+    assets = (db.query(ContentAsset)
+              .filter(ContentAsset.canonical_content_id == cc.id)
+              .order_by(ContentAsset.asset_index).all())
+    if not assets:
+        return ""
+
+    already_read = [a for a in assets if a.ocr_text or a.vision_caption]
+    if already_read and not force:
+        return _carousel_text(assets)
+
+    storage = get_storage()
+    images: List[bytes] = []
+    usable: List[Any] = []
+    for asset in assets:
+        blob = storage.get(asset.storage_key) if asset.storage_key else None
+        if blob is None and asset.source_url:
+            from ..services import thumbnails as thumb_svc
+            blob, _ = thumb_svc.fetch(asset.source_url, platform=cc.platform)
+        if blob:
+            images.append(blob)
+            usable.append(asset)
+
+    if not images:
+        _set_stage(cc, "vision", "failed", "no slide images available")
+        return ""
+
+    try:
+        from ..ai.base import Mode, TaskType
+
+        completion = router.complete(
+            TaskType.VISION_ANALYSIS,
+            system=(
+                "You are reading a swipeable photo post as ONE piece of content. "
+                "The images are slides in the creator's order. Return STRICT JSON: "
+                '{"slides":[{"i":int,"ocr":str,"caption":str}],"post_summary":str}. '
+                "`ocr` is text visible on that slide, verbatim. `caption` is what "
+                "the slide shows. `post_summary` is what the post as a whole is "
+                "saying across all slides — treat them as a sequence, not as "
+                "unrelated pictures."
+            ),
+            prompt=(f"{len(images)} slides follow in order (indices 0..{len(images)-1}). "
+                    f"{'This appears to be ' + cc.content_type + ' content. ' if cc.content_type else ''}"
+                    "Return one entry per slide plus the post-level summary."),
+            mode=Mode.AUTO, json_mode=True, images=images,
+            temperature=0.1, max_output_tokens=4096,
+        )
+        data = json.loads(completion.text or "{}")
+        for entry in data.get("slides", []):
+            i = int(entry.get("i", -1))
+            if 0 <= i < len(usable):
+                usable[i].ocr_text = (entry.get("ocr") or "").strip() or None
+                usable[i].vision_caption = (entry.get("caption") or "").strip() or None
+        summary = (data.get("post_summary") or "").strip()
+        db.commit()
+
+        telemetry.record_completion(
+            db, completion, operation="vision.carousel", canonical_content_id=cc.id,
+            user_id=user_id, platform=cc.platform, frames_processed=len(images),
+        )
+        _set_stage(cc, "vision", "ok", f"{len(images)} slides")
+        text = _carousel_text(assets)
+        return (f"Post overall: {summary}\n{text}" if summary else text)
+    except Exception as e:
+        logger.warning("carousel reading failed for %s: %s", cc.id, e)
+        _set_stage(cc, "vision", "failed", str(e)[:160])
+        return _carousel_text(assets)
+
+
+def _carousel_text(assets) -> str:
+    """Slide text with its position preserved."""
+    lines = []
+    for asset in assets:
+        parts = []
+        if asset.ocr_text:
+            parts.append(f"on-screen: {asset.ocr_text}")
+        if asset.vision_caption:
+            parts.append(asset.vision_caption)
+        if parts:
+            lines.append(f"[slide {asset.asset_index + 1}] " + " ".join(parts))
+    return "\n".join(lines)
+
+
+def _mirror_cover(db, cc: CanonicalContent, *, user_id: Optional[int] = None) -> bool:
+    """Put the cover image somewhere it cannot expire.
+
+    Runs the instant metadata produces a thumbnail, not on first view. TikTok
+    signs its cover URLs with an expiry measured in days, so a save that is
+    never opened for a week loses its picture entirely under a lazy strategy.
+    Costs one small fetch per *canonical item*, shared by every user who saves it.
+    """
+    from ..services import thumbnails as thumb_svc
+
+    if not cc.thumbnail_url or cc.thumbnail_stored_key:
+        return False
+    try:
+        mirrored = thumb_svc.mirror_to_storage(
+            cc.thumbnail_url, namespace="thumbnails", platform=cc.platform)
+    except Exception as e:
+        logger.warning("cover mirror failed for %s: %s", cc.id, e)
+        return False
+    if not mirrored:
+        telemetry.record(db, operation="thumbnail.mirror", canonical_content_id=cc.id,
+                         user_id=user_id, platform=cc.platform, success=False,
+                         error="source image unavailable")
+        return False
+
+    key, public_url = mirrored
+    cc.thumbnail_stored_key = key
+    cc.thumbnail_url = public_url
+    db.commit()
+    telemetry.record(db, operation="thumbnail.mirror", canonical_content_id=cc.id,
+                     user_id=user_id, platform=cc.platform, success=True)
+    return True
+
+
+def _ingest_carousel(db, cc: CanonicalContent, *, user_id: Optional[int] = None,
+                     force: bool = False) -> Dict[str, Any]:
+    """Read a TikTok photo post: metadata, ordered slides, durable copies.
+
+    The slides *are* the content, so they are stored as assets rather than as
+    disposable frames, and slide one becomes the cover — the creator chose that
+    image, and picking a different one would misrepresent the post in the grid.
+    """
+    from ..config import CAROUSEL_MAX_SLIDES
+    from ..models import ContentAsset
+    from ..services import thumbnails as thumb_svc
+
+    existing = (db.query(ContentAsset)
+                .filter(ContentAsset.canonical_content_id == cc.id).count())
+    if existing and not force:
+        _set_stage(cc, "carousel", "ok", f"{existing} slides cached")
+        return {"status": f"cached ({existing} slides)", "bytes": 0}
+
+    fetched = guarded(cc.platform, "carousel", acquire.fetch_carousel,
+                      cc.canonical_url, CAROUSEL_MAX_SLIDES,
+                      db=db, canonical_content_id=cc.id, user_id=user_id)
+    telemetry.record(
+        db, operation="acquire.carousel", canonical_content_id=cc.id, user_id=user_id,
+        platform=cc.platform, proxy_bytes=fetched.bytes_moved, wall_ms=fetched.wall_ms,
+        success=fetched.ok, error=fetched.error,
+    )
+    if not fetched.ok:
+        _set_stage(cc, "carousel", "failed", fetched.error or "")
+        return {"status": f"failed: {fetched.error}", "bytes": fetched.bytes_moved}
+
+    meta = fetched.metadata
+    cc.title = cc.title or meta.get("title")
+    cc.description = cc.description or meta.get("description")
+    cc.creator_name = cc.creator_name or meta.get("uploader")
+    cc.creator_handle = cc.creator_handle or meta.get("uploader_id")
+    cc.media_kind = "carousel"
+    cc.is_short = True
+    cc.metadata_json = json.dumps(meta, default=str)[:60000]
+    db.commit()
+
+    (db.query(ContentAsset)
+       .filter(ContentAsset.canonical_content_id == cc.id)
+       .delete(synchronize_session=False))
+
+    stored = 0
+    for index, slide in enumerate(meta.get("slides") or []):
+        source = slide.get("url")
+        if not source:
+            continue
+        key = public = None
+        try:
+            mirrored = thumb_svc.mirror_to_storage(
+                source, namespace="slides", platform=cc.platform)
+            if mirrored:
+                key, public = mirrored
+        except Exception as e:
+            logger.warning("slide %s mirror failed for %s: %s", index, cc.id, e)
+
+        db.add(ContentAsset(
+            canonical_content_id=cc.id, asset_index=index,
+            kind="cover" if index == 0 else "image",
+            source_url=source, storage_key=key,
+            width=slide.get("width"), height=slide.get("height"),
+        ))
+        stored += 1
+        if index == 0:
+            # Slide one is the cover, always.
+            cc.thumbnail_url = public or source
+            cc.thumbnail_stored_key = key
+    db.commit()
+
+    _set_stage(cc, "carousel", "ok", f"{stored} slides")
+    telemetry.record(db, operation="carousel.slides", canonical_content_id=cc.id,
+                     user_id=user_id, platform=cc.platform,
+                     frames_processed=stored, success=True)
+    return {"status": f"ok ({stored} slides)", "bytes": fetched.bytes_moved}
+
+
+def _queue_comments(db, cc: CanonicalContent, *, user_id: Optional[int] = None) -> None:
+    """Schedule the comment sample if the platform supports it and it is stale."""
+    from ..config import COMMENTS_ENABLED
+    from ..jobs import enqueue
+    from ..services.comments import is_stale, provider_for
+
+    if not COMMENTS_ENABLED:
+        return
+    provider = provider_for(cc.platform)
+    if provider is None or not provider.available or not is_stale(cc):
+        return
+    try:
+        enqueue(
+            db, "content.comments",
+            {"canonical_id": cc.id, "user_id": user_id},
+            # Versioned so a comment-policy change re-queues, while an ordinary
+            # second save of the same video does not.
+            idempotency_key=f"content.comments:{cc.id}:v{cc.comment_version or 0}",
+            platform=cc.platform,
+            priority=900,          # behind every piece of user-visible work
+            max_attempts=2,        # optional enrichment does not deserve five tries
+        )
+    except Exception as e:
+        logger.warning("could not queue comments for %s: %s", cc.id, e)
 
 
 def process_content(canonical_id: int, db, *, force: bool = False,
@@ -209,7 +455,14 @@ def process_content(canonical_id: int, db, *, force: bool = False,
 
         # ── L1: metadata ────────────────────────────────────────────────────
         _state(db, cc, ProcessingState.FETCHING, 1)
-        if force or not cc.title:
+        if cc.media_kind == "carousel" and cc.platform == "tiktok":
+            # A photo post is read as an ordered image set, not as a video with
+            # a missing file. Handled before the video path so nothing tries to
+            # download an MP4 that was never going to exist.
+            carousel = _ingest_carousel(db, cc, user_id=user_id, force=force)
+            total_bytes += carousel.get("bytes", 0)
+            result["stages"]["carousel"] = carousel.get("status", "skipped")
+        elif force or not cc.title:
             if prefetched_captions is not None and prefetched_captions.ok:
                 meta = _meta_from_info(prefetched_captions.metadata.get("info") or {},
                                        prefetched_captions.bytes_moved)
@@ -229,6 +482,23 @@ def process_content(canonical_id: int, db, *, force: bool = False,
                 cc.thumbnail_url = cc.thumbnail_url or m.get("thumbnail")
                 if m.get("duration"):
                     cc.media_kind = "video"
+                cc.width = cc.width or m.get("width")
+                cc.height = cc.height or m.get("height")
+
+                # Now that duration and geometry are known, the classification
+                # can be made properly rather than guessed from the URL.
+                from ..content.shortform import is_short_form
+                try:
+                    prior = json.loads(cc.metadata_json or "{}")
+                except Exception:
+                    prior = {}
+                hint = m.get("webpage_url") or cc.canonical_url
+                cc.is_short = bool(prior.get("shorts_url")) or is_short_form(
+                    cc.platform, media_kind=cc.media_kind,
+                    duration_seconds=cc.duration_seconds,
+                    width=cc.width, height=cc.height, url_hint=hint)
+                if prior.get("shorts_url"):
+                    m = {**m, "shorts_url": True}
                 cc.metadata_json = json.dumps(m, default=str)[:60000]
 
                 # Canonicalize short links. A TikTok /t/, vm., or vt. URL has
@@ -266,6 +536,7 @@ def process_content(canonical_id: int, db, *, force: bool = False,
                                     "canonical_id": merged.id,
                                     "stages": result["stages"]}
 
+                _mirror_cover(db, cc, user_id=user_id)
                 _set_stage(cc, "metadata", "ok")
                 result["stages"]["metadata"] = "ok"
             else:
@@ -297,6 +568,7 @@ def process_content(canonical_id: int, db, *, force: bool = False,
         else:
             _state(db, cc, ProcessingState.TRANSCRIBING, 2)
             segments, source, lang, asr_seconds = [], None, "en", 0.0
+            asr_provider = "none"
 
             if strat.try_native_captions:
                 cap = prefetched_captions or guarded(
@@ -352,7 +624,13 @@ def process_content(canonical_id: int, db, *, force: bool = False,
                 )
 
                 if audio_path:
-                    asr = acquire.transcribe_audio(audio_path)
+                    # Under its own concurrency ceiling: transcription is the
+                    # one stage that can saturate a host irrespective of which
+                    # platform the media came from.
+                    asr = guarded("asr", "transcribe", acquire.transcribe_audio,
+                                  audio_path, db=db, canonical_content_id=cc.id,
+                                  user_id=user_id)
+                    asr_provider = asr.metadata.get("provider") or "none"
                     if asr.ok:
                         segments = asr.metadata.get("segments") or []
                         source = "asr"
@@ -362,8 +640,12 @@ def process_content(canonical_id: int, db, *, force: bool = False,
                         db, operation="asr", canonical_content_id=cc.id, user_id=user_id,
                         platform=cc.platform, audio_seconds=asr_seconds,
                         wall_ms=asr.wall_ms,
-                        estimated_usd=telemetry.asr_cost(asr_seconds, local=True),
-                        model=asr.metadata.get("model"), provider="local-whisper",
+                        # Local transcription costs machine time, not vendor
+                        # spend; hosted costs money. Price them differently or
+                        # the cost report is fiction.
+                        estimated_usd=telemetry.asr_cost(
+                            asr_seconds, local=(asr_provider == "local-whisper")),
+                        model=asr.metadata.get("model"), provider=asr_provider,
                         success=asr.ok, error=asr.error,
                     )
 
@@ -372,7 +654,7 @@ def process_content(canonical_id: int, db, *, force: bool = False,
                 transcript_row = ContentTranscript(
                     canonical_content_id=cc.id, source=source or "asr", lang=lang,
                     text=full_text, segments=json.dumps(segments, default=str),
-                    provider="youtube" if source == "captions" else "local-whisper",
+                    provider="youtube" if source == "captions" else asr_provider,
                     audio_seconds=asr_seconds or duration, is_complete=True,
                 )
                 db.add(transcript_row)
@@ -415,7 +697,12 @@ def process_content(canonical_id: int, db, *, force: bool = False,
             media_kind=cc.media_kind,
         )
 
-        if existing_frames and not force:
+        if cc.media_kind == "carousel":
+            visual_text = _read_carousel_slides(db, cc, router=router,
+                                                user_id=user_id, force=force)
+            result["stages"]["vision"] = (f"slides ({len(visual_text.splitlines())} read)"
+                                          if visual_text else "slides: nothing readable")
+        elif existing_frames and not force:
             rows = (db.query(ContentFrame)
                     .filter(ContentFrame.canonical_content_id == cc.id)
                     .order_by(ContentFrame.ts_ms).all())
@@ -536,6 +823,10 @@ def process_content(canonical_id: int, db, *, force: bool = False,
         cc.last_error = ", ".join(failed) if failed else None
         db.commit()
 
+        # Comments are enrichment, so they are queued *after* the item is
+        # already READY, at a priority that never competes with a fresh save.
+        _queue_comments(db, cc, user_id=user_id)
+
         result["ok"] = True
         result["state"] = cc.processing_state
         result["proxy_bytes"] = total_bytes
@@ -618,7 +909,22 @@ def build_embeddings(db, canonical_id: int, *, user_id: Optional[int] = None,
             chunks.extend(chunk_transcript(json.loads(tr.segments)))
         except Exception as e:
             logger.warning("chunking transcript failed: %s", e)
-    if visual_text:
+    if cc.media_kind == "carousel":
+        # A photo post's slides are the content. They keep their own modality so
+        # retrieval and Ask can say "slide 3 showed…" rather than pretending the
+        # text was spoken.
+        from ..models import ContentAsset
+        slides = (db.query(ContentAsset)
+                  .filter(ContentAsset.canonical_content_id == canonical_id)
+                  .order_by(ContentAsset.asset_index).all())
+        for slide in slides:
+            blob = " ".join(filter(None, [
+                f"on-screen: {slide.ocr_text}" if slide.ocr_text else "",
+                slide.vision_caption or ""]))
+            if blob:
+                chunks.extend(chunk_text(f"[slide {slide.asset_index + 1}] {blob}",
+                                         modality="carousel"))
+    elif visual_text:
         chunks.extend(chunk_text(visual_text, modality="vision"))
     elif not tr:
         for row in (db.query(ContentFrame)
@@ -626,7 +932,7 @@ def build_embeddings(db, canonical_id: int, *, user_id: Optional[int] = None,
             blob = " ".join(filter(None, [row.ocr_text, row.vision_caption]))
             if blob:
                 chunks.extend(chunk_text(blob, modality="vision"))
-    if cc.description and not tr:
+    if cc.description and (not tr or cc.media_kind == "carousel"):
         chunks.extend(chunk_text(cc.description, modality="caption"))
 
     if force:

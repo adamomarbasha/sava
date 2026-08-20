@@ -37,6 +37,26 @@ def process_content_job(payload: Dict[str, Any], db) -> None:
     logger.info("processed canonical %s: %s", canonical_id, result.get("stages"))
 
 
+@handler("content.comments")
+def comments_job(payload: Dict[str, Any], db) -> None:
+    """Fetch this content's comment sample, once, for everyone.
+
+    A separate job on purpose. Comments are the least reliable and least
+    important thing Sava reads: the provider is a scraper, the value is
+    secondary, and nothing about the item's usefulness depends on it. Running it
+    inline would let a comment-thread failure hold up or fail a save that is
+    otherwise complete.
+    """
+    from ..services.comments import ensure_comments
+
+    canonical_id = int(payload["canonical_id"])
+    result = ensure_comments(db, canonical_id, force=bool(payload.get("force")),
+                             user_id=payload.get("user_id"))
+    logger.info("comments for canonical %s: %s", canonical_id, result)
+    # A provider failure is recorded on the content and the job is done. It is
+    # not retried into the ground for something optional.
+
+
 @handler("content.backfill_metadata")
 def backfill_metadata_job(payload: Dict[str, Any], db) -> None:
     """Fill in title/creator/thumbnail for a canonical row from a user's bookmark.

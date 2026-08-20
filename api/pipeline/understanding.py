@@ -116,8 +116,29 @@ Rules:
   pad it with guesses.
 - `people`: creator handles or publicly named figures only. Never attempt to
   identify individuals from visual description.
-- `tl_dr`: 2-3 plain sentences a person would find useful on reopening.
-- `key_points`: 3-7 concrete takeaways, not restatements of the title.
+
+`tl_dr` is the part a person actually reads, so write it like a person:
+
+- Describe it the way you would to a friend who asked what it was. Plain prose.
+- Let the content decide the length. A joke, a meme or a short clip is one or
+  two sentences and nothing more. Something instructional, argued or detailed
+  earns a full paragraph. Do not pad a simple thing to look substantial, and do
+  not compress a rich thing into a caption.
+- Never open with "This video…", "This post…", "The content shows…", "Based on
+  …" or "In this clip…". Start with the substance.
+- No headings, no bullets, no meta-commentary about the material.
+
+`key_points` exists only when there is something the summary did not already
+say:
+
+- 2-4 items, never more. One short sentence each, roughly fifteen words at the
+  outside — a phrase is often better than a sentence. If a point needs two
+  clauses to survive, it belongs in `tl_dr`, not here.
+- Concrete and specific. Not a restatement of the title or of `tl_dr`.
+- Return [] whenever the item is simple enough that the summary covers it.
+  Most short-form entertainment should return []. An empty list is the correct,
+  expected answer far more often than a full one.
+
 - `topics`: 3-8 lowercase tags for grouping (e.g. "pasta", "budget travel").
 - `chapters`: only when the context contains real timestamps; else []."""
 

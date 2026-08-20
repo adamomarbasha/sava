@@ -14,7 +14,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Set
 
 from sqlalchemy import text as sql_text
 
@@ -24,6 +24,9 @@ from ..models import (
 from ..vectors import from_storage, knn, mmr, normalize
 
 logger = logging.getLogger(__name__)
+
+# A hit must score at least this fraction of the best hit to count as a match.
+RELEVANCE_RATIO = 0.55
 
 _USER_SCOPE = (
     "canonical_content_id IN (SELECT canonical_content_id FROM bookmarks "
@@ -161,15 +164,25 @@ def search_library(
     platform: Optional[str] = None,
     content_type: Optional[str] = None,
     diversify: bool = True,
+    restrict_to: Optional[Set[int]] = None,
 ) -> List[RetrievedSave]:
-    """Hybrid search. No generative model runs here — this must stay fast."""
+    """Hybrid search. No generative model runs here — this must stay fast.
+
+    `restrict_to` limits the candidate set to a specific group of canonical ids,
+    which is how a collection-scoped Ask stays inside its collection instead of
+    quietly answering from the whole library.
+    """
     query = (query or "").strip()
 
     if not query:
         rows = (db.query(Bookmark, CanonicalContent)
                 .outerjoin(CanonicalContent, CanonicalContent.id == Bookmark.canonical_content_id)
                 .filter(Bookmark.user_id == user_id)
-                .order_by(Bookmark.created_at.desc()).limit(limit).all())
+                .order_by(Bookmark.created_at.desc()).limit(limit * 4 if restrict_to else limit)
+                .all())
+        if restrict_to is not None:
+            rows = [(bm, cc) for bm, cc in rows
+                    if cc is not None and cc.id in restrict_to][:limit]
         out = []
         for bm, cc in rows:
             out.append(RetrievedSave(
@@ -195,8 +208,12 @@ def search_library(
 
     keyword = _keyword_scores(db, user_id, query)
 
+    candidates = set(semantic) | set(keyword)
+    if restrict_to is not None:
+        candidates &= restrict_to
+
     fused: Dict[int, float] = {}
-    for cid in set(semantic) | set(keyword):
+    for cid in candidates:
         s, k = semantic.get(cid, 0.0), keyword.get(cid, 0.0)
         # Semantic leads; keyword guarantees exact-match recall.
         fused[cid] = 0.72 * s + 0.42 * k
@@ -204,7 +221,21 @@ def search_library(
     if not fused:
         return []
 
-    ranked = sorted(fused.items(), key=lambda kv: kv[1], reverse=True)[: limit * 3]
+    ranked = sorted(fused.items(), key=lambda kv: kv[1], reverse=True)
+
+    # Relevance floor, relative to the best match.
+    #
+    # Embeddings never score zero: an unrelated video still lands around 0.36
+    # against any query, so an unfiltered top-10 is one real answer followed by
+    # nine coincidences. That is visible twice — as junk under "Also related" in
+    # search, and as context the model has to talk its way out of in Ask ("only
+    # one of these is about food"). A *relative* floor adapts to the query: a
+    # sharp question has one dominant score and everything else falls away, while
+    # a broad one has a flat distribution and keeps its whole set.
+    best = ranked[0][1]
+    ranked = [(cid, score) for cid, score in ranked
+              if score >= max(0.0, best * RELEVANCE_RATIO)] or ranked[:1]
+    ranked = ranked[: limit * 3]
 
     if diversify and qvec is not None and len(ranked) > limit:
         vecs = {}
@@ -274,13 +305,15 @@ def retrieve_chunks(
 
 
 def retrieve_for_library_question(
-    db, user_id: int, question: str, *, max_saves: int = 10, chunks_per_save: int = 2
+    db, user_id: int, question: str, *, max_saves: int = 10, chunks_per_save: int = 2,
+    restrict_to: Optional[Set[int]] = None,
 ) -> Dict[str, Any]:
     """Two-stage retrieval for Ask Sava: find the saves, then the passages.
 
     Only the selected passages reach the model — never the whole library.
     """
-    saves = search_library(db, user_id, question, limit=max_saves, diversify=True)
+    saves = search_library(db, user_id, question, limit=max_saves, diversify=True,
+                           restrict_to=restrict_to)
     if not saves:
         return {"saves": [], "context_blocks": [], "canonical_ids": []}
 

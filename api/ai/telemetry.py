@@ -333,3 +333,102 @@ def processing_latency(db, *, days: int = 7) -> dict:
              "p99_ms": pct(v, 0.99)}
         for op, v in sorted(buckets.items(), key=lambda kv: -len(kv[1]))
     }
+
+
+def extraction_health(db, *, platform: str, days: int = 7) -> dict:
+    """Per-platform extraction report, at the granularity the pipeline works in.
+
+    `platform_health` answers "is the platform letting us in?". This answers
+    "what is Sava actually getting out of it?" — which stages succeed, how much
+    is reused rather than re-fetched, and what one unique item costs. Those are
+    different questions and they fail in different ways: captions can be at 98%
+    while thumbnail mirroring is at 40% and the library slowly loses its images.
+    """
+    from sqlalchemy import text as sql_text
+
+    since = _since(days)
+    plat = (platform or "").lower()
+
+    def _ops(prefix: str) -> dict:
+        rows = db.execute(sql_text("""
+            SELECT operation,
+                   COUNT(*) AS n,
+                   SUM(CASE WHEN success THEN 1 ELSE 0 END) AS ok,
+                   COALESCE(SUM(proxy_bytes), 0) AS bytes,
+                   COALESCE(AVG(wall_ms), 0) AS avg_ms,
+                   COALESCE(SUM(estimated_usd), 0) AS usd
+            FROM usage_events
+            WHERE created_at >= :since AND platform = :plat
+              AND operation LIKE :prefix
+            GROUP BY operation
+        """), {"since": since, "plat": plat, "prefix": prefix + "%"}).mappings().all()
+        return {r["operation"]: {
+            "count": int(r["n"]), "ok": int(r["ok"] or 0),
+            "success_rate": round((r["ok"] or 0) / r["n"], 4) if r["n"] else None,
+            "bytes": int(r["bytes"] or 0),
+            "avg_ms": round(float(r["avg_ms"] or 0)),
+            "usd": round(float(r["usd"] or 0), 6),
+        } for r in rows}
+
+    content = db.execute(sql_text("""
+        SELECT
+          COUNT(*) AS unique_items,
+          SUM(CASE WHEN processing_state IN ('ready','partial') THEN 1 ELSE 0 END) AS processed,
+          SUM(CASE WHEN media_kind = 'carousel' THEN 1 ELSE 0 END) AS carousels,
+          SUM(CASE WHEN media_kind = 'video' THEN 1 ELSE 0 END) AS videos,
+          SUM(CASE WHEN thumbnail_stored_key IS NOT NULL THEN 1 ELSE 0 END) AS mirrored,
+          SUM(CASE WHEN comments_state = 'ok' THEN 1 ELSE 0 END) AS with_comments,
+          SUM(CASE WHEN comments_state = 'failed' THEN 1 ELSE 0 END) AS comments_failed
+        FROM canonical_content WHERE platform = :plat
+    """), {"plat": plat}).mappings().first() or {}
+
+    unique = int(content.get("unique_items", 0) or 0)
+
+    saves = db.execute(sql_text(
+        "SELECT COUNT(*) FROM bookmarks WHERE platform = :plat"), {"plat": plat}).scalar() or 0
+
+    transcripts = db.execute(sql_text("""
+        SELECT t.source, COUNT(*) AS n
+        FROM content_transcripts t
+        JOIN canonical_content c ON c.id = t.canonical_content_id
+        WHERE c.platform = :plat GROUP BY t.source
+    """), {"plat": plat}).mappings().all()
+
+    slides = db.execute(sql_text("""
+        SELECT COUNT(*) FROM content_assets a
+        JOIN canonical_content c ON c.id = a.canonical_content_id
+        WHERE c.platform = :plat
+    """), {"plat": plat}).scalar() or 0
+
+    spend = db.execute(sql_text(
+        "SELECT COALESCE(SUM(estimated_usd),0) FROM usage_events "
+        "WHERE created_at >= :since AND platform = :plat"),
+        {"since": since, "plat": plat}).scalar() or 0.0
+
+    carousels = int(content.get("carousels", 0) or 0)
+
+    return {
+        "platform": plat,
+        "window_days": days,
+        "user_saves": int(saves),
+        "unique_items": unique,
+        "dedup_ratio": round(saves / unique, 3) if unique else None,
+        "processed": int(content.get("processed", 0) or 0),
+        "media_mix": {"video": int(content.get("videos", 0) or 0), "carousel": carousels},
+        "carousel_slides_total": int(slides),
+        "avg_slides_per_carousel": round(slides / carousels, 2) if carousels else None,
+        "thumbnail_mirror_rate": (
+            round(int(content.get("mirrored", 0) or 0) / unique, 4) if unique else None),
+        "transcript_sources": {r["source"]: int(r["n"]) for r in transcripts},
+        "comments": {
+            "items_with_comments": int(content.get("with_comments", 0) or 0),
+            "items_failed": int(content.get("comments_failed", 0) or 0),
+            "operations": _ops("comments."),
+        },
+        "acquisition": _ops("acquire."),
+        "asr": _ops("asr"),
+        "vision": _ops("vision"),
+        "estimated_usd": round(float(spend), 6),
+        "cost_per_unique_item": round(float(spend) / unique, 6) if unique else None,
+        "cost_per_user_save": round(float(spend) / saves, 6) if saves else None,
+    }

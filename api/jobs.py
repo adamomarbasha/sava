@@ -25,7 +25,7 @@ import os
 import socket
 import traceback
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from sqlalchemy import text
 
@@ -125,12 +125,19 @@ def _unavailable_platforms() -> Dict[str, float]:
 
 
 def claim_next(db, *, worker_id: str = WORKER_ID,
-               skip_platforms: Optional[Dict[str, float]] = None) -> Optional[Job]:
+               skip_platforms: Optional[Dict[str, float]] = None,
+               kinds: Optional[List[str]] = None,
+               platforms: Optional[List[str]] = None) -> Optional[Job]:
     """Atomically take the next runnable job.
 
     Skips jobs whose platform is throttled or circuit-open, so an Instagram
     outage cannot starve YouTube work of worker threads. Those jobs stay
     queued — nothing is lost or failed.
+
+    `kinds` and `platforms` are the pool seam. One process with no filters is
+    the right shape today. When transcription needs GPUs and acquisition needs
+    residential egress, the same binary runs twice with different filters and the
+    workloads separate — no new services, no queue migration, no code change.
     """
     now = _now()
     stale = now - timedelta(seconds=JOB_LEASE_SECONDS)
@@ -145,11 +152,14 @@ def claim_next(db, *, worker_id: str = WORKER_ID,
                 WHERE ((state='queued' AND run_after <= :now)
                     OR (state='running' AND locked_at < :stale))
                   AND (:skip IS NULL OR platform IS NULL OR NOT (platform = ANY(:skip)))
+                  AND (:kinds IS NULL OR kind = ANY(:kinds))
+                  AND (:plats IS NULL OR platform = ANY(:plats))
                 ORDER BY priority ASC, run_after ASC, id ASC
                 FOR UPDATE SKIP LOCKED LIMIT 1
             ) RETURNING id
         """), {"w": worker_id, "now": now, "stale": stale,
-               "skip": blocked_names}).first()
+               "skip": blocked_names, "kinds": kinds or None,
+               "plats": platforms or None}).first()
         db.commit()
         return db.query(Job).get(row.id) if row else None
 
@@ -163,6 +173,10 @@ def claim_next(db, *, worker_id: str = WORKER_ID,
             q = q.filter(
                 (Job.platform.is_(None)) | (~Job.platform.in_(blocked_names))
             )
+        if kinds:
+            q = q.filter(Job.kind.in_(kinds))
+        if platforms:
+            q = q.filter(Job.platform.in_(platforms))
         job = q.order_by(Job.priority.asc(), Job.run_after.asc(), Job.id.asc()).first()
         if not job:
             return None
