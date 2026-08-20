@@ -80,7 +80,7 @@ final class SessionStore: ObservableObject, AuthTokenProviding {
 
     func signOut() {
         keychain.delete(.authToken)
-        withAnimation(SavaMotion.smooth) { phase = .signedOut }
+        withAnimation(Motion.standard) { phase = .signedOut }
     }
 
     // MARK: - Helpers
@@ -90,7 +90,7 @@ final class SessionStore: ObservableObject, AuthTokenProviding {
         do {
             let user = try await auth.me()
             Haptics.success()
-            withAnimation(SavaMotion.smooth) { phase = .signedIn(user) }
+            withAnimation(Motion.standard) { phase = .signedIn(user) }
         } catch {
             // If /auth/me fails right after obtaining a token, don't leave a
             // half-authenticated state around.

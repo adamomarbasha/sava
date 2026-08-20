@@ -25,6 +25,7 @@ final class AuthViewModel: ObservableObject {
     @Published var confirmPassword = ""
 
     @Published private(set) var isSubmitting = false
+    var isBusy: Bool { isSubmitting }
     @Published var errorMessage: String?
     @Published var emailInvalid = false
     @Published var passwordInvalid = false
@@ -36,8 +37,10 @@ final class AuthViewModel: ObservableObject {
         return true
     }
 
+    func toggleMode() { switchMode() }
+
     func switchMode() {
-        withAnimation(SavaMotion.standard) {
+        withAnimation(Motion.standard) {
             mode = (mode == .signIn) ? .register : .signIn
             errorMessage = nil
             emailInvalid = false

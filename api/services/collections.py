@@ -399,17 +399,25 @@ def list_collections(db, user_id: int) -> List[Dict[str, Any]]:
 
     out = []
     for r in rows:
-        cover = None
-        if r["cover_bookmark_id"]:
-            cov = db.execute(sql_text("""
-                SELECT COALESCE(cc.thumbnail_url, b.thumbnail_url) AS thumb
-                FROM bookmarks b LEFT JOIN canonical_content cc
-                  ON cc.id = b.canonical_content_id WHERE b.id = :b
-            """), {"b": r["cover_bookmark_id"]}).first()
-            cover = cov[0] if cov else None
+        # A collection's cover is built from the media actually inside it — a
+        # folder glyph would tell the user nothing. Up to four real thumbnails,
+        # the designated cover first when one has been chosen.
+        covers = [t for (t,) in db.execute(sql_text("""
+            SELECT COALESCE(cc.thumbnail_url, b.thumbnail_url) AS thumb
+            FROM collection_items ci
+            JOIN bookmarks b ON b.id = ci.bookmark_id
+            LEFT JOIN canonical_content cc ON cc.id = b.canonical_content_id
+            WHERE ci.collection_id = :c
+              AND COALESCE(cc.thumbnail_url, b.thumbnail_url) IS NOT NULL
+              AND COALESCE(cc.thumbnail_url, b.thumbnail_url) != ''
+            ORDER BY (b.id = COALESCE(:cover, -1)) DESC, ci.score DESC, b.created_at DESC
+            LIMIT 4
+        """), {"c": r["id"], "cover": r["cover_bookmark_id"]}).all()]
+
         out.append({"id": r["id"], "name": r["name"], "kind": r["kind"],
                     "description": r["description"], "count": int(r["n"]),
-                    "cover_thumbnail_url": cover,
+                    "cover_thumbnail_url": covers[0] if covers else None,
+                    "cover_thumbnails": covers,
                     "created_at": r["created_at"].isoformat()
                     if hasattr(r["created_at"], "isoformat") else r["created_at"]})
     return out

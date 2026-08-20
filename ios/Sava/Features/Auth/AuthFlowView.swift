@@ -1,148 +1,152 @@
 import SwiftUI
 
-/// The sign-in / registration experience. A single glass surface floating over
-/// Sava's liquid field, switching fluidly between the two modes.
+/// The signed-out entry point.
+///
+/// Built from exactly the same material as the signed-in app: the same ground,
+/// the same type, the same field and the same button. There is no gradient hero,
+/// no feature list, no card floating on a backdrop, and no paragraph explaining
+/// what AI is — none of which would appear again after sign-in, and all of which
+/// would make the first screen belong to a different product than the second.
+///
+/// A wordmark, a two-line promise, two fields, one action.
 struct AuthFlowView: View {
     @EnvironmentObject private var session: SessionStore
     @StateObject private var model = AuthViewModel()
-    @FocusState private var focus: Field?
+    @FocusState private var field: Field?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var appeared = false
 
     private enum Field { case email, password, confirm }
 
     var body: some View {
         ZStack {
-            LiquidBackground()
+            SavaColor.ground.ignoresSafeArea()
 
             ScrollView {
-                VStack(spacing: Spacing.xl) {
-                    header
-                    card
-                    switcher
+                VStack(alignment: .leading, spacing: 0) {
+                    masthead
+                        .padding(.top, 56)
+                        .padding(.bottom, 56)
+
+                    fields
+
+                    if let error = model.errorMessage {
+                        errorLine(error)
+                    }
+
+                    action
+                        .padding(.top, Space.l)
+
+                    modeToggle
+                        .padding(.top, Space.xl)
+
+                    Spacer(minLength: Space.xxl)
                 }
-                .padding(.horizontal, Spacing.lg)
-                .padding(.top, Spacing.xxl)
-                .padding(.bottom, Spacing.xxl)
-                .frame(maxWidth: 520)
+                .screenPadding()
+                .frame(maxWidth: 460)
                 .frame(maxWidth: .infinity)
             }
             .scrollDismissesKeyboard(.interactively)
             .scrollBounceBehavior(.basedOnSize)
         }
-    }
-
-    // MARK: Header
-
-    private var header: some View {
-        VStack(spacing: Spacing.md) {
-            SavaMark(size: 60)
-
-            VStack(spacing: Spacing.xxs) {
-                Text(model.mode.title)
-                    .font(SavaFont.title)
-                    .foregroundStyle(SavaColors.textPrimary)
-                    .contentTransition(.opacity)
-                Text(model.mode.subtitle)
-                    .font(SavaFont.callout)
-                    .foregroundStyle(SavaColors.textSecondary)
-                    .multilineTextAlignment(.center)
-                    .contentTransition(.opacity)
-            }
-            .animation(SavaMotion.standard, value: model.mode)
+        .opacity(appeared ? 1 : 0)
+        .onAppear {
+            withAnimation(Motion.respecting(Motion.standard, reduceMotion)) { appeared = true }
         }
-        .padding(.top, Spacing.sm)
+        .animation(Motion.respecting(Motion.gentle, reduceMotion), value: model.mode)
+        .animation(Motion.respecting(Motion.gentle, reduceMotion), value: model.errorMessage)
     }
 
-    // MARK: Card
+    // MARK: Masthead
 
-    private var card: some View {
-        GlassCard {
-            VStack(spacing: Spacing.md) {
-                SavaTextField(
-                    label: "Email",
-                    placeholder: "you@example.com",
-                    text: $model.email,
-                    hasError: model.emailInvalid,
-                    textContentType: .username,
-                    keyboardType: .emailAddress,
-                    submitLabel: .next,
-                    onSubmit: { focus = .password }
-                )
-                .focused($focus, equals: .email)
-                .onChange(of: model.email) { _, _ in model.clearErrorsOnEdit() }
+    private var masthead: some View {
+        VStack(alignment: .leading, spacing: Space.l) {
+            Text("Sava")
+                .font(SavaType.wordmark)
+                .tracking(-1.2)
+                .foregroundStyle(SavaColor.primary)
 
-                SavaTextField(
-                    label: "Password",
-                    placeholder: model.mode == .register ? "At least 6 characters" : "Your password",
-                    text: $model.password,
-                    isSecure: true,
-                    hasError: model.passwordInvalid,
-                    textContentType: model.mode == .register ? .newPassword : .password,
-                    submitLabel: model.mode == .register ? .next : .go,
-                    onSubmit: {
-                        if model.mode == .register { focus = .confirm }
-                        else { submit() }
-                    }
-                )
-                .focused($focus, equals: .password)
-                .onChange(of: model.password) { _, _ in model.clearErrorsOnEdit() }
-
-                if model.mode == .register {
-                    SavaTextField(
-                        label: "Confirm password",
-                        placeholder: "Re-enter your password",
-                        text: $model.confirmPassword,
-                        isSecure: true,
-                        hasError: model.passwordInvalid,
-                        textContentType: .newPassword,
-                        submitLabel: .go,
-                        onSubmit: submit
-                    )
-                    .focused($focus, equals: .confirm)
-                    .transition(.asymmetric(
-                        insertion: .move(edge: .top).combined(with: .opacity),
-                        removal: .opacity
-                    ))
-                }
-
-                if let message = model.errorMessage {
-                    InlineBanner(text: message)
-                        .transition(.move(edge: .top).combined(with: .opacity))
-                }
-
-                SavaPrimaryButton(
-                    title: model.mode.cta,
-                    isLoading: model.isSubmitting,
-                    isEnabled: model.canSubmit,
-                    action: submit
-                )
-                .padding(.top, Spacing.xxs)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Save what matters.")
+                Text("Find it again.")
             }
-            .padding(Spacing.lg)
-            .animation(SavaMotion.standard, value: model.mode)
-            .animation(SavaMotion.tap, value: model.errorMessage)
-        }
-    }
-
-    // MARK: Mode switch
-
-    private var switcher: some View {
-        HStack(spacing: Spacing.xxs) {
-            Text(model.mode.switchPrompt)
-                .font(SavaFont.footnote)
-                .foregroundStyle(SavaColors.textSecondary)
-            Button(model.mode.switchAction) {
-                focus = nil
-                model.switchMode()
-            }
-            .font(SavaFont.subheadline)
-            .foregroundStyle(SavaColors.accent)
-            .buttonStyle(.pressable)
+            .font(SavaType.lede)
+            .foregroundStyle(SavaColor.secondary)
         }
         .accessibilityElement(children: .combine)
+        .accessibilityLabel("Sava. Save what matters. Find it again.")
+        .accessibilityAddTraits(.isHeader)
+    }
+
+    // MARK: Fields
+
+    private var fields: some View {
+        VStack(spacing: Space.m) {
+            SavaField(placeholder: "Email", text: $model.email,
+                      keyboard: .emailAddress, contentType: .username,
+                      submitLabel: .next, isInvalid: model.emailInvalid) {
+                field = .password
+            }
+            .focused($field, equals: .email)
+            .onChange(of: model.email) { _, _ in model.clearErrorsOnEdit() }
+
+            SavaField(placeholder: "Password", text: $model.password,
+                      isSecure: true,
+                      contentType: model.mode == .signIn ? .password : .newPassword,
+                      submitLabel: model.mode == .signIn ? .go : .next,
+                      isInvalid: model.passwordInvalid) {
+                if model.mode == .register { field = .confirm } else { submit() }
+            }
+            .focused($field, equals: .password)
+            .onChange(of: model.password) { _, _ in model.clearErrorsOnEdit() }
+
+            if model.mode == .register {
+                SavaField(placeholder: "Confirm password", text: $model.confirmPassword,
+                          isSecure: true, contentType: .newPassword,
+                          submitLabel: .go, isInvalid: model.passwordInvalid) {
+                    submit()
+                }
+                .focused($field, equals: .confirm)
+                .onChange(of: model.confirmPassword) { _, _ in model.clearErrorsOnEdit() }
+                .transition(.move(edge: .top).combined(with: .opacity))
+            }
+        }
+    }
+
+    private func errorLine(_ message: String) -> some View {
+        Text(message)
+            .font(SavaType.callout)
+            .foregroundStyle(SavaColor.danger)
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.top, Space.m)
+            .transition(.opacity)
+            .accessibilityAddTraits(.isStaticText)
+    }
+
+    private var action: some View {
+        SavaButton(title: model.mode.cta,
+                   isLoading: model.isBusy,
+                   isEnabled: model.canSubmit,
+                   action: submit)
+    }
+
+    private var modeToggle: some View {
+        HStack(spacing: Space.xs) {
+            Text(model.mode.switchPrompt)
+                .foregroundStyle(SavaColor.tertiary)
+            Button(model.mode.switchAction) {
+                Haptics.select()
+                model.switchMode()
+                field = .email
+            }
+            .foregroundStyle(SavaColor.accent)
+        }
+        .font(SavaType.callout)
+        .frame(maxWidth: .infinity)
     }
 
     private func submit() {
-        focus = nil
+        field = nil
         Task { await model.submit(using: session) }
     }
 }

@@ -132,6 +132,51 @@ def summary(bookmark_id: int, refresh: bool = Query(False),
         db, bm, user_id=current_user["id"], force=refresh, mode=_mode(mode))
 
 
+# ─── Transcript ──────────────────────────────────────────────────────────────
+
+@router.get("/api/bookmarks/{bookmark_id}/transcript")
+def transcript(bookmark_id: int,
+               current_user: dict = Depends(get_current_user),
+               db: Session = Depends(get_db)):
+    """The stored transcript for an item, with timings.
+
+    Read-only and free: acquisition already happened once during ingestion and
+    the result is cached against canonical content, so opening the transcript
+    never costs a fetch, a transcription, or an inference call.
+    """
+    import json as _json
+
+    bm = _owned_bookmark(db, bookmark_id, current_user["id"])
+    if not bm.canonical_content_id:
+        return {"available": False, "reason": "not_processed"}
+
+    row = (db.query(ContentTranscript)
+           .filter(ContentTranscript.canonical_content_id == bm.canonical_content_id)
+           # Captions are verbatim; speech recognition is a best effort. Prefer
+           # the better source when an item happens to have both.
+           .order_by(ContentTranscript.source.desc())
+           .first())
+    if row is None or not (row.text or "").strip():
+        return {"available": False, "reason": "no_transcript"}
+
+    try:
+        segments = _json.loads(row.segments or "[]")
+    except Exception:
+        segments = []
+
+    return {
+        "available": True,
+        "source": row.source,
+        "language": row.lang,
+        "text": row.text,
+        "segments": [{
+            "text": (s.get("text") or "").strip(),
+            "start": float(s.get("start") or 0),
+            "duration": float(s.get("duration") or 0),
+        } for s in segments if (s.get("text") or "").strip()],
+    }
+
+
 # ─── Ask This ────────────────────────────────────────────────────────────────
 
 class AskIn(BaseModel):
@@ -168,6 +213,8 @@ class AskSavaIn(BaseModel):
     question: str
     mode: Optional[str] = "auto"
     thread_id: Optional[int] = None
+    # When present, the question is answered from this collection alone.
+    collection_id: Optional[int] = None
 
 
 @router.post("/api/ask")
@@ -177,12 +224,22 @@ def ask_sava(body: AskSavaIn,
     if not (body.question or "").strip():
         raise HTTPException(status_code=422, detail="A question is required")
 
+    if body.collection_id is not None:
+        owns = (db.query(Collection)
+                .filter(Collection.id == body.collection_id,
+                        Collection.user_id == current_user["id"]).first())
+        if owns is None:
+            raise HTTPException(status_code=404, detail="Collection not found")
+
     thread, history = _thread_and_history(
-        db, current_user["id"], body.thread_id, scope="library",
+        db, current_user["id"], body.thread_id,
+        scope="collection" if body.collection_id is not None else "library",
         bookmark_id=None, title=body.question[:60])
 
     result = intelligence.ask_sava(db, current_user["id"], body.question,
-                                   mode=_mode(body.mode), history=history)
+                                   mode=_mode(body.mode), history=history,
+                                   collection_id=body.collection_id,
+                                   carry_over_ids=_recent_sources(db, thread.id))
     if not result.get("ok"):
         return {**result, "thread_id": thread.id}
 
@@ -211,6 +268,29 @@ def _thread_and_history(db, user_id: int, thread_id: Optional[int], *, scope: st
     return thread, history
 
 
+def _recent_sources(db, thread_id: int, limit: int = 8) -> List[int]:
+    """Canonical ids the last answer in this thread talked about.
+
+    Stored on the assistant message when the turn was persisted, so a follow-up
+    can keep discussing the same items without having to re-find them from a
+    question that no longer names them.
+    """
+    import json as _json
+
+    last = (db.query(ChatMessage)
+            .filter(ChatMessage.thread_id == thread_id, ChatMessage.role == "assistant")
+            .order_by(ChatMessage.created_at.desc()).first())
+    if last is None:
+        return []
+    try:
+        payload = _json.loads(last.citations or "[]")
+    except Exception:
+        return []
+    ids = [item.get("canonical_id") for item in payload
+           if isinstance(item, dict) and item.get("canonical_id")]
+    return ids[:limit]
+
+
 def _persist_turn(db, thread_id: int, question: str, result: Dict[str, Any], mode: Mode):
     import json as _json
     db.add(ChatMessage(thread_id=thread_id, role="user", content=question,
@@ -228,16 +308,34 @@ def list_threads(scope: Optional[str] = Query(None),
                  bookmark_id: Optional[int] = Query(None),
                  current_user: dict = Depends(get_current_user),
                  db: Session = Depends(get_db)):
-    q = db.query(ChatThread).filter(ChatThread.user_id == current_user["id"])
+    from sqlalchemy import func as _func
+
+    # A thread row is created before generation runs, so a failed or abandoned
+    # turn leaves an empty one behind. Listing those would fill the history with
+    # conversations that have nothing in them, so the count is joined and empties
+    # are dropped. Ordering is by last activity, not creation: returning to the
+    # conversation you were most recently in is the common case.
+    counts = (db.query(ChatMessage.thread_id.label("tid"),
+                       _func.count(ChatMessage.id).label("n"),
+                       _func.max(ChatMessage.created_at).label("last_at"))
+              .group_by(ChatMessage.thread_id).subquery())
+
+    q = (db.query(ChatThread, counts.c.n, counts.c.last_at)
+         .join(counts, counts.c.tid == ChatThread.id)
+         .filter(ChatThread.user_id == current_user["id"]))
     if scope:
         q = q.filter(ChatThread.scope == scope)
     if bookmark_id:
         q = q.filter(ChatThread.bookmark_id == bookmark_id)
+
+    rows = q.order_by(counts.c.last_at.desc()).limit(50).all()
     return {"threads": [
         {"id": t.id, "title": t.title, "scope": t.scope,
          "bookmark_id": t.bookmark_id,
-         "created_at": t.created_at.isoformat() if t.created_at else None}
-        for t in q.order_by(ChatThread.created_at.desc()).limit(50).all()]}
+         "message_count": int(n or 0),
+         "created_at": t.created_at.isoformat() if t.created_at else None,
+         "updated_at": last_at.isoformat() if hasattr(last_at, "isoformat") else last_at}
+        for t, n, last_at in rows]}
 
 
 @router.get("/api/threads/{thread_id}/messages")
@@ -321,17 +419,18 @@ def get_collection(collection_id: int,
             .join(CollectionItem, CollectionItem.bookmark_id == Bookmark.id)
             .outerjoin(CanonicalContent, CanonicalContent.id == Bookmark.canonical_content_id)
             .filter(CollectionItem.collection_id == collection_id).all())
+    # Items are serialised in exactly the same shape as `GET /api/bookmarks`, so
+    # a save renders identically inside a collection and in the library — same
+    # geometry, same metadata, same processing state. Diverging here is what
+    # previously made collection tiles look poorer than library cards.
+    from .main import serialize_bookmark
+
     return {
         "id": coll.id, "name": coll.name, "kind": coll.kind,
         "description": coll.description,
-        "items": [{
-            "id": bm.id, "title": (cc.title if cc else None) or bm.title,
-            "author": (cc.creator_name if cc else None) or bm.author,
-            "platform": (cc.platform if cc else None) or bm.platform,
-            "url": bm.url, "note": bm.note,
-            "thumbnail_url": (cc.thumbnail_url if cc else None) or bm.thumbnail_url,
-            "added_by": ci.added_by, "score": ci.score,
-        } for bm, cc, ci in rows],
+        "items": [{**serialize_bookmark(bm, cc),
+                   "added_by": ci.added_by, "score": ci.score}
+                  for bm, cc, ci in rows],
     }
 
 
@@ -474,6 +573,14 @@ def platforms(days: int = Query(1, ge=1, le=30),
     return telemetry.platform_health(db, days=days)
 
 
+@router.get("/api/ops/extraction")
+def extraction(platform: str = Query("youtube"), days: int = Query(7, ge=1, le=90),
+               current_user: dict = Depends(get_current_user),
+               db: Session = Depends(get_db)):
+    """Per-platform extraction health: what each stage actually yields."""
+    return telemetry.extraction_health(db, platform=platform, days=days)
+
+
 @router.get("/api/ops/economics")
 def economics(days: int = Query(30, ge=1, le=365),
               current_user: dict = Depends(get_current_user),
@@ -508,3 +615,45 @@ def upgrade_pipeline(limit: int = Query(50, ge=1, le=500),
     if dry_run:
         return {"dry_run": True, **plan}
     return {"dry_run": False, **queue_upgrade(db, plan, user_id=current_user["id"])}
+
+
+# ─── Legacy repair ───────────────────────────────────────────────────────────
+#
+# Saves made before canonical content existed were never linked to it, and
+# thumbnails on signed CDN URLs quietly expire. Both are why an old save can
+# look thinner in the app than a new one. Neither is fixable in the client, and
+# neither should be papered over with per-view hacks in SwiftUI — so they get a
+# real, batched, opt-in repair here.
+
+@router.post("/api/ops/backfill-canonical")
+def backfill_canonical(limit: int = Query(200, ge=1, le=1000),
+                       dry_run: bool = Query(True),
+                       mine: bool = Query(True),
+                       current_user: dict = Depends(get_current_user),
+                       db: Session = Depends(get_db)):
+    """Attach legacy saves to canonical content.
+
+    Deterministic identity resolution only: no network calls, no inference, no
+    invented metadata. Safe to run repeatedly — already-linked saves are skipped.
+    """
+    from .content.backfill import plan_link, run_link
+
+    user_id = current_user["id"] if mine else None
+    if dry_run:
+        return {"dry_run": True, **plan_link(db, user_id=user_id, limit=limit)}
+    return {"dry_run": False, **run_link(db, user_id=user_id, limit=limit)}
+
+
+@router.post("/api/ops/backfill-thumbnails")
+def backfill_thumbnails(limit: int = Query(200, ge=1, le=1000),
+                        dry_run: bool = Query(True),
+                        mine: bool = Query(True),
+                        current_user: dict = Depends(get_current_user),
+                        db: Session = Depends(get_db)):
+    """Mirror expiring CDN thumbnails into local storage so they stop vanishing."""
+    from .content.backfill import plan_thumbnails, run_thumbnails
+
+    user_id = current_user["id"] if mine else None
+    if dry_run:
+        return {"dry_run": True, **plan_thumbnails(db, user_id=user_id, limit=limit)}
+    return {"dry_run": False, **run_thumbnails(db, user_id=user_id, limit=limit)}

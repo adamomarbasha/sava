@@ -10,11 +10,6 @@ struct IntelligenceService {
 
     // MARK: Processing
 
-    /// `GET /api/bookmarks/{id}/status` — where a save is in the ladder.
-    func status(bookmarkID: Int) async throws -> ProcessingStatus {
-        try await client.send(Endpoint(path: "api/bookmarks/\(bookmarkID)/status", method: .get))
-    }
-
     /// `POST /api/bookmarks/{id}/reprocess` — re-queue after a failure.
     @discardableResult
     func reprocess(bookmarkID: Int, force: Bool = false) async throws -> Data {
@@ -35,6 +30,15 @@ struct IntelligenceService {
             path: "api/bookmarks/\(bookmarkID)/summary", method: .get, query: query))
     }
 
+    // MARK: Transcript
+
+    /// `GET /api/bookmarks/{id}/transcript` — the stored transcript. Free: the
+    /// text was acquired once at ingestion and cached against the content.
+    func transcript(bookmarkID: Int) async throws -> Transcript {
+        try await client.send(Endpoint(path: "api/bookmarks/\(bookmarkID)/transcript",
+                                       method: .get))
+    }
+
     // MARK: Ask
 
     /// `POST /api/bookmarks/{id}/ask` — grounded Q&A about one save.
@@ -50,18 +54,44 @@ struct IntelligenceService {
             body: Body(question: question, mode: mode.rawValue, thread_id: threadID)))
     }
 
-    /// `POST /api/ask` — library-wide question. Retrieval happens before
-    /// generation; the whole library is never sent to a model.
+    /// `POST /api/ask` — a question across the library, or scoped to one
+    /// collection. Retrieval happens before generation; the whole library is
+    /// never sent to a model.
     func askSava(question: String, mode: AskMode = .auto,
-                 threadID: Int? = nil) async throws -> AskAnswer {
+                 threadID: Int? = nil, collectionID: Int? = nil) async throws -> AskAnswer {
         struct Body: Encodable {
             let question: String
             let mode: String
             let thread_id: Int?
+            let collection_id: Int?
         }
         return try await client.send(Endpoint.json(
             "api/ask", method: .post,
-            body: Body(question: question, mode: mode.rawValue, thread_id: threadID)))
+            body: Body(question: question, mode: mode.rawValue,
+                       thread_id: threadID, collection_id: collectionID)))
+    }
+
+    // MARK: Conversations
+
+    /// `GET /api/threads` — past conversations, most recently active first.
+    /// `bookmarkID` narrows it to the conversations about one item.
+    func threads(scope: String, bookmarkID: Int? = nil) async throws -> [ChatThreadSummary] {
+        struct Response: Decodable { let threads: [ChatThreadSummary] }
+        var query = [URLQueryItem(name: "scope", value: scope)]
+        if let bookmarkID {
+            query.append(URLQueryItem(name: "bookmark_id", value: String(bookmarkID)))
+        }
+        let response: Response = try await client.send(
+            Endpoint(path: "api/threads", method: .get, query: query))
+        return response.threads
+    }
+
+    /// `GET /api/threads/{id}/messages` — everything said in one conversation.
+    func messages(threadID: Int) async throws -> [ChatMessageRecord] {
+        struct Response: Decodable { let messages: [ChatMessageRecord] }
+        let response: Response = try await client.send(
+            Endpoint(path: "api/threads/\(threadID)/messages", method: .get))
+        return response.messages
     }
 
     // MARK: Retrieval
@@ -83,15 +113,6 @@ struct IntelligenceService {
         return response.results
     }
 
-    /// `GET /api/resurface` — deterministic ranking, no inference.
-    func resurface(limit: Int = 6) async throws -> [RelatedSave] {
-        struct Response: Decodable { let results: [RelatedSave] }
-        let response: Response = try await client.send(Endpoint(
-            path: "api/resurface", method: .get,
-            query: [URLQueryItem(name: "limit", value: String(limit))]))
-        return response.results
-    }
-
     // MARK: Collections
 
     func collections() async throws -> [SavaCollection] {
@@ -99,6 +120,19 @@ struct IntelligenceService {
         let response: Response = try await client.send(
             Endpoint(path: "api/collections", method: .get))
         return response.collections
+    }
+
+    /// `GET /api/collections/{id}` — the collection and its saves.
+    func collection(id: Int) async throws -> CollectionDetail {
+        try await client.send(Endpoint(path: "api/collections/\(id)", method: .get))
+    }
+
+    struct CollectionDetail: Decodable {
+        let id: Int
+        let name: String
+        let kind: String
+        let description: String?
+        let items: [Bookmark]
     }
 
     /// Creates immediately and returns likely members for the user to confirm.
