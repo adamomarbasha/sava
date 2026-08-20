@@ -11,12 +11,10 @@ struct BookmarkService {
               offset: Int = 0) async throws -> [Bookmark] {
         var items: [URLQueryItem] = [
             URLQueryItem(name: "limit", value: String(limit)),
-            URLQueryItem(name: "offset", value: String(offset))
+            URLQueryItem(name: "offset", value: String(offset)),
         ]
-        if let platform, platform != .other {
+        if let platform {
             items.append(URLQueryItem(name: "platform", value: platform.rawValue))
-        } else if platform == .other {
-            items.append(URLQueryItem(name: "platform", value: "other"))
         }
         if let query, !query.trimmingCharacters(in: .whitespaces).isEmpty {
             items.append(URLQueryItem(name: "q", value: query))
@@ -24,12 +22,18 @@ struct BookmarkService {
         return try await client.send(Endpoint(path: "api/bookmarks", method: .get, query: items))
     }
 
-    /// `POST /bookmarks` — creates a bookmark from a URL. The backend ingests
-    /// metadata and returns the created record.
+    /// `GET /api/bookmarks/{id}` — one save in the same shape as the list.
+    /// Used to open a save that was referenced by an answer or a search result.
+    func bookmark(id: Int) async throws -> Bookmark {
+        try await client.send(Endpoint(path: "api/bookmarks/\(id)", method: .get))
+    }
+
+    /// `POST /bookmarks` — creates a bookmark from a URL. The backend resolves
+    /// canonical identity and enriches asynchronously.
     @discardableResult
-    func create(url: String, note: String? = nil) async throws -> Bookmark {
-        struct Body: Encodable { let url: String; let note: String? }
-        let endpoint = Endpoint.json("bookmarks", method: .post, body: Body(url: url, note: note))
+    func create(url: String) async throws -> Bookmark {
+        struct Body: Encodable { let url: String }
+        let endpoint = Endpoint.json("bookmarks", method: .post, body: Body(url: url))
         return try await client.send(endpoint)
     }
 
