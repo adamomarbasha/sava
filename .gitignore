@@ -222,3 +222,12 @@ fast_youtube_endpoint.py
 
 # local db backups
 .sava_backups/
+
+# Databases must never be version-controlled. A tracked .db means any
+# checkout/stash/branch-switch silently reverts real user data and schema.
+bookmarks.db
+api/bookmarks.db
+*.sqlite
+*.sqlite3
+*.db-wal
+*.db-shm

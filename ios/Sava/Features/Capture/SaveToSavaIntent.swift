@@ -80,7 +80,7 @@ private enum CaptureRunner {
             switch result {
             case .saved(let bookmark):
                 trace.saveID = bookmark.id
-                let what = bookmark.displayAuthor.map { "from \($0)" } ?? "to your library"
+                let what = bookmark.displayCreator.map { "from \($0)" } ?? "to your library"
                 return finish(&trace, started, path: outcome.path.rawValue,
                               outcome: "saved", message: "Saved \(what) 🔖")
             case .partiallySaved(let what):
