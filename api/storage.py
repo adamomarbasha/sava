@@ -172,12 +172,25 @@ class S3CompatibleStorage(ObjectStorageProvider):
         except Exception:
             return False
 
+    # How long a presigned URL stays valid. Long enough that a client which
+    # fetched a library page an hour ago can still load its images; short enough
+    # that a URL copied out of a proxy log stops working the same day.
+    PRESIGN_SECONDS = int(os.getenv("SAVA_S3_PRESIGN_SECONDS", str(6 * 3600)))
+
     def url(self, key: str) -> str:
-        if self.public_base_url:
+        """A URL for this object. Presigned and expiring unless told otherwise.
+
+        `SAVA_S3_PUBLIC_BASE_URL` makes objects permanently and anonymously
+        readable by anyone who learns the key, which is the correct behaviour for
+        a CDN of our *own* assets and the wrong behaviour for mirrored copies of
+        other people's posts. It is deliberately opt-in and namespaced: the
+        public base is only honoured for keys under `public/`.
+        """
+        if self.public_base_url and key.startswith("public/"):
             return f"{self.public_base_url}/{key}"
         return self._client.generate_presigned_url(
             "get_object", Params={"Bucket": self.bucket, "Key": key},
-            ExpiresIn=7 * 24 * 3600,
+            ExpiresIn=self.PRESIGN_SECONDS,
         )
 
     def get(self, key: str) -> Optional[bytes]:
@@ -196,8 +209,25 @@ class S3CompatibleStorage(ObjectStorageProvider):
 _provider: Optional[ObjectStorageProvider] = None
 
 
+class StorageUnavailable(RuntimeError):
+    """Production storage is required but not usable."""
+
+
 def get_storage() -> ObjectStorageProvider:
-    """The configured backend. Local unless S3 credentials are present."""
+    """The configured backend.
+
+    Local disk in development; S3-compatible in production, with **no fallback**.
+
+    The fallback used to exist and was the wrong kindness. If S3 was misconfigured
+    or briefly unreachable at import time, this logged an error and quietly
+    returned local disk — so the process kept serving, kept accepting saves, and
+    wrote every mirrored thumbnail and collection cover to a container filesystem
+    that is discarded on the next deploy. The failure surfaced days later as
+    missing images with no event to point at.
+
+    In production a storage problem is now a startup problem: loud, immediate,
+    and attributable.
+    """
     global _provider
     if _provider is not None:
         return _provider
@@ -205,8 +235,11 @@ def get_storage() -> ObjectStorageProvider:
     bucket = os.getenv("SAVA_S3_BUCKET")
     access = os.getenv("SAVA_S3_ACCESS_KEY_ID")
     secret = os.getenv("SAVA_S3_SECRET_ACCESS_KEY")
+    configured = bool(bucket and access and secret)
 
-    if bucket and access and secret:
+    from .config import IS_PRODUCTION
+
+    if configured:
         try:
             _provider = S3CompatibleStorage(
                 bucket=bucket,
@@ -218,8 +251,20 @@ def get_storage() -> ObjectStorageProvider:
             logger.info("object storage: S3-compatible bucket %s", bucket)
             return _provider
         except Exception as e:
-            logger.error("S3 storage configured but unusable (%s); "
-                         "falling back to local disk", e)
+            if IS_PRODUCTION:
+                raise StorageUnavailable(
+                    f"Object storage is configured but unusable: {e}. Refusing to "
+                    "fall back to local disk in production — the filesystem is "
+                    "ephemeral, so every stored object would be lost silently on "
+                    "the next deploy.") from e
+            logger.warning("S3 configured but unusable (%s); using local disk "
+                           "because this is not production", e)
+
+    if IS_PRODUCTION:
+        raise StorageUnavailable(
+            "Object storage is not configured (SAVA_S3_BUCKET, "
+            "SAVA_S3_ACCESS_KEY_ID, SAVA_S3_SECRET_ACCESS_KEY) and production "
+            "must not write user media to local disk.")
 
     _provider = LocalObjectStorage()
     logger.info("object storage: local filesystem at %s", _provider.root)

@@ -32,6 +32,7 @@ import time
 from .config import WORKER_CONCURRENCY, WORKER_POLL_SECONDS
 from .db import SessionLocal
 from .jobs import WORKER_ID, claim_next, execute, queue_stats
+from .observability import configure_logging, init_sentry
 from .pipeline import handlers  # noqa: F401  (registers handlers)
 
 logging.basicConfig(
@@ -75,6 +76,12 @@ def run_loop(worker_index: int, poll_seconds: float,
 
 
 def main() -> int:
+    # The worker is where the slow, failure-prone work happens — extraction,
+    # transcription, model calls — and it has no user watching it. If anything
+    # deserves error reporting, it is this process.
+    configure_logging()
+    init_sentry("worker")
+
     parser = argparse.ArgumentParser(description="Sava background worker")
     parser.add_argument("--once", action="store_true",
                         help="drain the queue and exit")

@@ -1,6 +1,7 @@
 import secrets
 
-from fastapi import FastAPI, HTTPException, Depends, status, Query, Request
+from fastapi import (FastAPI, HTTPException, Depends, status, Query,
+                     Request, Response)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, HttpUrl
@@ -33,6 +34,9 @@ from .routes_playback import router as playback_router
 from .pipeline import handlers as _job_handlers  # noqa: F401 (registers job handlers)
 from . import auth_guard
 from .authz import owned_bookmark
+from .health import health_report
+from .observability import (RequestContextMiddleware, configure_logging,
+                           init_sentry)
 from .auth import (
     authenticate_user, 
     create_access_token, 
@@ -68,6 +72,12 @@ STATIC_DIR = API_DIR / "static"
 (STATIC_DIR / "thumbnails").mkdir(parents=True, exist_ok=True)
 
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+# Request correlation and error reporting. Added before CORS so every request,
+# including ones CORS rejects, carries an id.
+configure_logging()
+init_sentry("api")
+app.add_middleware(RequestContextMiddleware)
 
 # CORS.
 #
@@ -189,7 +199,36 @@ def detect_platform(url: str) -> str:
 
 @app.get("/")
 def health():
+    """Kept as a friendly root. The real check is `/health`."""
     return {"message": "Sava API is running 🚀", "version": "2.0.0"}
+
+
+@app.get("/livez")
+def livez():
+    """Shallow liveness, for a platform restart probe.
+
+    Deliberately checks nothing but the process. If this consulted the database,
+    a brief database blip would make the platform kill and restart every API
+    container — turning a recoverable dependency wobble into a self-inflicted
+    outage.
+    """
+    return {"ok": True}
+
+
+@app.get("/health")
+def health_deep(response: Response, db: Session = Depends(get_db)):
+    """Deep health, for humans, uptime monitors and alert rules.
+
+    Returns 503 when something a user depends on is broken, so a monitor does not
+    have to parse the body to know. The most operationally useful field is
+    `checks.queue.oldest_queued_age_seconds`: a dead worker leaves the API
+    perfectly healthy and nothing draining, and queue age is the only number that
+    moves in every version of that failure.
+    """
+    report = health_report(db)
+    if not report["ok"]:
+        response.status_code = 503
+    return report
 
 @app.post("/auth/register", response_model=dict)
 def register(user: UserRegister, request: Request, db: Session = Depends(get_db)):
