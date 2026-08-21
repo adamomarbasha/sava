@@ -124,12 +124,20 @@ private struct VideoStage: View {
     /// then.
     private var player: AVPlayer? { pool.existingPlayer(for: bookmark.id) }
 
-    /// Vertical video fills the screen; anything else is shown whole. Cropping
-    /// a landscape video to a portrait stage would cut the subject out of it.
-    private var gravity: AVLayerVideoGravity {
-        let aspect = bookmark.mediaAspect
-        return aspect <= 0.85 ? .resizeAspectFill : .resizeAspect
-    }
+    /// Always fit. Never fill.
+    ///
+    /// This was `.resizeAspectFill` for anything vertical, on the reasoning that
+    /// vertical video "should fill a vertical screen". It does not: a 9:16 clip
+    /// is 0.5625 wide-over-tall and a modern iPhone is about 0.46, so filling
+    /// scales the video until its height matches and then throws away roughly a
+    /// fifth of its width — which is the "slightly zoomed in" look, and it cuts
+    /// off captions and faces near the edges.
+    ///
+    /// Fitting shows the frame the creator actually composed. The leftover space
+    /// is absorbed by the stage's own black canvas, which is what every video
+    /// player does and the least distracting treatment available here — a blur
+    /// behind moving video would be both expensive and noisy.
+    private var gravity: AVLayerVideoGravity { .resizeAspect }
 
     var body: some View {
         ZStack {
@@ -193,32 +201,50 @@ private struct ShortFormGallery: View {
     @State private var index = 0
 
     var body: some View {
-        VStack(spacing: Space.l) {
-            TabView(selection: $index) {
-                ForEach(Array(images.enumerated()), id: \.offset) { offset, image in
-                    MediaImage(url: image.url, fallback: .transparent,
-                               fit: .fitOnBackdrop, cornerRadius: 0)
-                        .tag(offset)
-                }
+        // The pager fills the whole stage rather than sitting in a stack with
+        // the indicator. Every slide therefore gets an identical box, so paging
+        // between a 4:5 photo and a 9:16 one does not resize the viewport
+        // underneath the user's thumb — the picture changes shape inside a
+        // container that does not.
+        TabView(selection: $index) {
+            ForEach(Array(images.enumerated()), id: \.offset) { offset, image in
+                MediaImage(url: image.url, fallback: .transparent,
+                           fit: .fitOnBackdrop, cornerRadius: 0)
+                    .tag(offset)
             }
-            .tabViewStyle(.page(indexDisplayMode: .never))
-
+        }
+        .tabViewStyle(.page(indexDisplayMode: .never))
+        // The horizontal pager and the feed's vertical pager are different
+        // axes, so they coexist without a custom gesture recogniser: a
+        // sideways drag pages the gallery, a vertical one moves to the next
+        // item. Overlaying the indicator instead of stacking it is what keeps
+        // that true — a `VStack` would shrink the pager and leave a strip at
+        // the bottom where a vertical drag lands on nothing.
+        .overlay(alignment: .bottom) {
             if images.count > 1 {
-                // Sava's own marker rather than the system dots: a row of
-                // hairlines reads as pages of a set, and stays legible at
-                // twelve slides where dots stop being countable.
-                HStack(spacing: 4) {
-                    ForEach(images.indices, id: \.self) { slide in
-                        Capsule()
-                            .fill(.white.opacity(slide == index ? 0.95 : 0.3))
-                            .frame(width: slide == index ? 18 : 10, height: 2)
-                    }
-                }
-                .animation(Motion.gentle, value: index)
-                .padding(.bottom, 132)
+                pageIndicator
+                    .padding(.bottom, 150)
+                    .allowsHitTesting(false)
             }
         }
         .onChange(of: isCurrent) { _, current in if !current { index = 0 } }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Gallery, \(images.count) images")
+    }
+
+    /// Sava's own marker rather than the system dots: a row of hairlines reads
+    /// as pages of a set, and stays legible at twelve slides where dots stop
+    /// being countable.
+    private var pageIndicator: some View {
+        HStack(spacing: 4) {
+            ForEach(images.indices, id: \.self) { slide in
+                Capsule()
+                    .fill(.white.opacity(slide == index ? 0.95 : 0.3))
+                    .frame(width: slide == index ? 18 : 10, height: 2)
+            }
+        }
+        .animation(Motion.gentle, value: index)
+        .shadow(color: .black.opacity(0.4), radius: 4)
     }
 }
 

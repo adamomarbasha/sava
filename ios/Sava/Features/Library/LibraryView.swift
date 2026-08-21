@@ -19,17 +19,26 @@ struct LibraryView: View {
 
     var body: some View {
         ScrollView {
+            // Nothing in here may animate its own height.
+            //
+            // This is the root of the pull-to-refresh gap. `refreshable` owns
+            // the scroll view's content offset while the refresh control
+            // retracts; if the content's height *animates* during that
+            // retraction — which is exactly when it did, because the state
+            // switch, the filter row and the grid all changed at the moment the
+            // refresh finished — the scroll view is settling against a target
+            // that is still moving, and it stops short, leaving a band of empty
+            // space at the top.
+            //
+            // The fix is to make the content height a pure function of the
+            // data: it still changes when items arrive, but instantaneously, so
+            // retraction always has a stable target to settle against. An
+            // earlier attempt moved the filter row out into a `safeAreaInset`,
+            // which fixed the height but displaced the large navigation title —
+            // the row belongs in the scroll content, it just must not animate.
             LazyVStack(alignment: .leading, spacing: Space.l) {
                 filterRow
-                // The animation lives on the switching content, not on the
-                // scroll view's whole subtree. Animating the container also
-                // animates the geometry `refreshable` is manipulating, which is
-                // what left a band of empty space above the grid that never
-                // closed after a pull-to-refresh.
                 content
-                    .transition(.opacity)
-                    .animation(Motion.gentle, value: model.state)
-                    .animation(Motion.gentle, value: model.selectedPlatform)
             }
             .padding(.top, Space.s)
             .padding(.bottom, Space.xl)
@@ -47,7 +56,7 @@ struct LibraryView: View {
                     Image(systemName: "plus")
                         .font(.system(size: 16, weight: .semibold))
                 }
-                .accessibilityLabel("Save a link")
+                .accessibilityLabel("Add a link")
             }
             ToolbarItem(placement: .topBarTrailing) {
                 Button {
@@ -89,6 +98,18 @@ struct LibraryView: View {
         if model.availablePlatforms.count > 1 {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: Space.s) {
+                    // The short-form entry point lives here rather than as its
+                    // own button or a new section, because the filter row is
+                    // already the place where "which part of my library am I
+                    // looking at" is decided — and that is exactly what choosing
+                    // a feed is. It names what it will open, so there is no
+                    // separate "Scroll TikToks" and "Scroll Shorts" control to
+                    // find, and it is simply absent when the current selection
+                    // has nothing that plays.
+                    if let label = scrollEntryLabel {
+                        ScrollEntryChip(title: label) { openScrollFeed() }
+                    }
+
                     SavaChip(title: "All", count: model.all.count,
                              selected: model.selectedPlatform == nil) {
                         model.setFilter(nil)
@@ -104,8 +125,29 @@ struct LibraryView: View {
                 .screenPadding()
             }
             .scrollClipDisabled()
-            .animation(Motion.gentle, value: model.availablePlatforms)
         }
+    }
+
+    // MARK: Short-form entry
+
+    /// Items in the current selection that can actually play.
+    private var scrollable: [Bookmark] { model.visible.filter(\.isShortForm) }
+
+    /// What the entry point opens, named for what the user is looking at.
+    /// Nil when there is nothing to scroll, so the control is never a dead end.
+    private var scrollEntryLabel: String? {
+        guard scrollable.count >= 2 else { return nil }
+        switch model.selectedPlatform {
+        case .tiktok:  return "Scroll TikToks"
+        case .youtube: return "Scroll Shorts"
+        case .some:    return "Scroll"
+        case nil:      return "Scroll"
+        }
+    }
+
+    private func openScrollFeed() {
+        let source: ShortFormSource = model.selectedPlatform.map { .platform($0) } ?? .library
+        shortForm.openFeed(scrollable, source: source)
     }
 
     // MARK: States
@@ -125,8 +167,8 @@ struct LibraryView: View {
         case .empty:
             SavaEmptyState(
                 title: "Your library is empty",
-                message: "Save something from TikTok, Instagram or YouTube and it will appear here.",
-                actionTitle: "Save a link") { showSave = true }
+                message: "Add something from TikTok, Instagram or YouTube and it will appear here.",
+                actionTitle: "Add a link") { showSave = true }
 
         case .loaded:
             if model.visible.isEmpty {

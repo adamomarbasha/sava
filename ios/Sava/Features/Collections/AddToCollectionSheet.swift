@@ -109,7 +109,7 @@ struct AddToCollectionSheet: View {
         } label: {
             HStack(spacing: Space.m) {
                 CollectionCover(name: collection.name,
-                                thumbnails: collection.coverURLs, height: 40)
+                                thumbnails: collection.coverURLs)
                     .frame(width: 60)
 
                 VStack(alignment: .leading, spacing: 1) {

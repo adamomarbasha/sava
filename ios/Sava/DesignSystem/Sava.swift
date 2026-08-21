@@ -357,6 +357,39 @@ struct SavaChip: View {
 
 /// Empty and error states. A line of type, a line of explanation, one action.
 /// No illustration — an icon here would be decoration, not information.
+/// A filled action chip that sits among the filter chips.
+///
+/// Deliberately the same size and rhythm as `SavaChip` so the row reads as one
+/// control strip rather than as a button someone dropped next to some filters.
+/// Filled rather than outlined because it acts instead of filtering, and that
+/// is the only signal it needs — no icon badge, no gradient, no pill floating
+/// over the content.
+struct ScrollEntryChip: View {
+    let title: String
+    var action: () -> Void
+
+    var body: some View {
+        Button {
+            Haptics.tap()
+            action()
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: "play.fill")
+                    .font(.system(size: 9, weight: .black))
+                Text(title)
+                    .font(SavaType.caption)
+            }
+            .foregroundStyle(SavaColor.ground)
+            .padding(.horizontal, Space.m)
+            .padding(.vertical, 7)
+            .background(SavaColor.primary, in: Capsule())
+        }
+        .buttonStyle(.pressable)
+        .accessibilityLabel(title)
+        .accessibilityHint("Opens a full-screen feed")
+    }
+}
+
 struct SavaEmptyState: View {
     let title: String
     let message: String

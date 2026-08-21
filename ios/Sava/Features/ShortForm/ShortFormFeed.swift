@@ -11,6 +11,9 @@ enum ShortFormSource: Equatable {
     case library
     case collection(String)
     case search(String)
+    /// Everything short-form from one platform: "Scroll TikToks", "Scroll
+    /// Shorts". A filtered view of the library rather than a different feed.
+    case platform(Platform)
 
     /// Shown in the viewer's header so the feed says what it is.
     var label: String {
@@ -18,6 +21,7 @@ enum ShortFormSource: Equatable {
         case .library:              return "Library"
         case .collection(let name): return name
         case .search:               return "Search"
+        case .platform(let p):      return p.displayName
         }
     }
 }

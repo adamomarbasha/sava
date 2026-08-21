@@ -51,7 +51,7 @@ struct QuickSaveSheet: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
-                SavaButton(title: "Save", isLoading: model.phase == .saving,
+                SavaButton(title: "Add", isLoading: model.phase == .saving,
                            isEnabled: model.canSave, action: save)
 
                 Spacer(minLength: 0)

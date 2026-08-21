@@ -71,7 +71,7 @@ struct ProfileView: View {
             VStack(alignment: .leading, spacing: Space.m) {
                 SectionHeader(text: "Library")
                 VStack(spacing: 0) {
-                    SavaRow(title: "Saves", detail: "\(library.all.count)",
+                    SavaRow(title: "Library", detail: "\(library.all.count)",
                             showsChevron: false)
                     ForEach(library.availablePlatforms.prefix(4)) { platform in
                         SavaRow(title: platform.displayName,

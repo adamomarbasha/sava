@@ -11,6 +11,10 @@ import SwiftUI
 struct MediaGrid: View {
     let bookmarks: [Bookmark]
     var onDelete: ((Bookmark) -> Void)? = nil
+    /// Taking a save out of the collection being viewed, which is a different
+    /// act from deleting it — the save stays in the library. Only supplied when
+    /// the grid is showing a collection.
+    var onRemove: ((Bookmark) -> Void)? = nil
 
     @EnvironmentObject private var shortForm: ShortFormContext
 
@@ -65,6 +69,11 @@ struct MediaGrid: View {
                 Button {
                     shortForm.open(bookmark)
                 } label: { Label("Play", systemImage: "play.fill") }
+            }
+            if let onRemove {
+                Button {
+                    onRemove(bookmark)
+                } label: { Label("Remove from collection", systemImage: "minus.circle") }
             }
             if let onDelete {
                 Button(role: .destructive) {

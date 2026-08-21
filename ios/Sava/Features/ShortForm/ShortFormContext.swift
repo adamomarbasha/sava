@@ -35,6 +35,20 @@ final class ShortFormContext: ObservableObject {
         presenting = bookmark
     }
 
+    /// Open a feed of exactly these items, starting at the first.
+    ///
+    /// This is how "Scroll TikToks" and "Scroll Shorts" work, and deliberately
+    /// the only difference between them: the caller filters the list and names
+    /// the source, and the same viewer renders it. There is no TikTok viewer
+    /// and no Shorts viewer to keep in sync — a platform-specific feed is a
+    /// platform-filtered list handed to the one that already exists.
+    func openFeed(_ items: [Bookmark], source: ShortFormSource) {
+        let playable = items.filter(\.isShortForm)
+        guard let first = playable.first else { return }
+        publish(playable, source: source)
+        presenting = first
+    }
+
     /// The feed for a given item, falling back to the item alone when the
     /// surrounding list is unknown — reached from a deep link, say. A feed of
     /// one still plays; it simply has nothing to swipe to.

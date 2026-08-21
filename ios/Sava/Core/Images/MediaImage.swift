@@ -63,10 +63,16 @@ actor ImagePipeline {
         if let existing = inFlight[key] { return await existing.value }
 
         let task = Task<UIImage?, Never> { [session] in
-            guard let (data, response) = try? await session.data(from: url) else { return nil }
-            if let http = response as? HTTPURLResponse,
-               !(200...299).contains(http.statusCode) { return nil }
-            return Self.downsample(data, to: CGFloat(bucket) * scale)
+            for candidate in Self.candidates(for: url) {
+                guard let (data, response) = try? await session.data(from: candidate)
+                else { continue }
+                if let http = response as? HTTPURLResponse,
+                   !(200...299).contains(http.statusCode) { continue }
+                if let image = Self.downsample(data, to: CGFloat(bucket) * scale) {
+                    return image
+                }
+            }
+            return nil
         }
         inFlight[key] = task
         let result = await task.value
@@ -79,6 +85,38 @@ actor ImagePipeline {
             failed.insert(url.absoluteString)
         }
         return result
+    }
+
+    /// The URLs to try, in order.
+    ///
+    /// YouTube only guarantees `hqdefault`. `maxresdefault` exists for popular
+    /// uploads and 404s for the rest, and `vi_webp` is missing for older ones —
+    /// which is why a grid of YouTube saves had holes in it while the same
+    /// videos showed a thumbnail everywhere else. Rather than downgrade every
+    /// thumbnail to the safe size, ask for the good one and fall back.
+    ///
+    /// Only YouTube gets this treatment: it is the one host whose URLs are
+    /// mechanically derivable from a video id, so a fallback is a certainty
+    /// rather than a guess.
+    nonisolated static func candidates(for url: URL) -> [URL] {
+        let text = url.absoluteString
+        guard text.contains("ytimg.com"), text.contains("maxresdefault") else {
+            return [url]
+        }
+        var out = [url]
+        // webp first (smaller), then jpg, at the size that always exists.
+        for replacement in ["sddefault", "hqdefault"] {
+            if let alt = URL(string: text.replacingOccurrences(
+                of: "maxresdefault", with: replacement)) {
+                out.append(alt)
+            }
+        }
+        if let jpg = URL(string: text
+            .replacingOccurrences(of: "/vi_webp/", with: "/vi/")
+            .replacingOccurrences(of: "maxresdefault.webp", with: "hqdefault.jpg")) {
+            out.append(jpg)
+        }
+        return out
     }
 
     /// Quantise the requested width so two cards a point apart share one decode
@@ -233,7 +271,76 @@ enum MediaFit {
     case fitOnBackdrop
 }
 
-/// Fills a Sava-defined box with remote media, or a designed fallback.
+/// Where a piece of media is being shown, and therefore what shape it takes.
+///
+/// This is the one place that answers "how tall is this box". Before it existed
+/// the answer was spelled out at every call site — `aspectRatio(4/5)` in the
+/// grid, `verticalHero` in the detail screen, a hardcoded height in a row — and
+/// they drifted, which is how a library ends up with one TikTok card taller than
+/// its neighbour and a grid that looks crooked.
+///
+/// The rule the whole system rests on: **the container owns the geometry and the
+/// picture fits inside it.** A remote image never gets to decide layout, because
+/// its dimensions arrive after the layout has already been drawn — letting it
+/// decide is exactly what makes cards jump when images load.
+enum MediaPresentation {
+    /// A tile in a two-column grid: library, search, inside a collection.
+    case card
+    /// The media at the top of a detail screen.
+    case hero
+    /// A collection's cover.
+    case cover
+    /// Full-screen, in the short-form feed.
+    case stage
+    /// A small thumbnail beside text, in a list row or an inline reference.
+    case row
+
+    /// Width ÷ height of the box.
+    ///
+    /// `intrinsic` is the real ratio of the loaded picture, when it is known.
+    /// It is consulted only where a variable shape is actually wanted; every
+    /// other case ignores it on purpose, because a fixed box is what keeps a
+    /// row of neighbours aligned.
+    func ratio(for platform: Platform, intrinsic: CGFloat? = nil) -> CGFloat {
+        switch self {
+        case .card:
+            // Fixed per platform class, never per image. Two TikToks shot at
+            // different resolutions must produce identically sized cards, or
+            // the column rhythm breaks and the grid reads as crooked.
+            return MediaRatio.forPlatform(platform)
+        case .hero:
+            // Vertical media gets a fixed square stage so a 9:16 clip does not
+            // become a 700pt wall; landscape keeps its true shape, falling back
+            // to the platform default until the picture reports in.
+            if platform.prefersPortrait { return MediaRatio.verticalHero }
+            return intrinsic ?? MediaRatio.landscape
+        case .cover:
+            return 4.0 / 3.0
+        case .stage:
+            // The stage is the screen. The media fits inside it rather than
+            // reshaping it.
+            return 0
+        case .row:
+            return 1.0
+        }
+    }
+
+    /// How the picture meets that box.
+    func fit(for platform: Platform) -> MediaFit {
+        switch self {
+        case .card, .row:
+            // Small, and a shared rhythm matters more than any one image, so a
+            // crop reads as framing rather than as loss.
+            return .fill
+        case .hero, .cover, .stage:
+            // Large enough that cropping destroys the thing the user came to
+            // look at. Show all of it and absorb the leftover deliberately.
+            return .fitOnBackdrop
+        }
+    }
+}
+
+/// Fills a Sava-defined box with remote media, or a designed fallback./// Fills a Sava-defined box with remote media, or a designed fallback.
 ///
 /// The caller decides the box. This view never asks the image how big it wants
 /// to be — which is what keeps the layout from moving when a picture arrives.
@@ -512,31 +619,58 @@ struct MediaHero: View {
 struct CollectionCover: View {
     let name: String
     let thumbnails: [URL?]
-    var height: CGFloat = 132
+    /// Every cover in the grid is the same shape. A shelf whose tiles are all
+    /// slightly different heights reads as a bug long before it reads as
+    /// variety, so the ratio is fixed and the imagery adapts to it.
+    var aspect: CGFloat = 4.0 / 3.0
 
-    private var tiles: [URL?] {
-        let usable = thumbnails.compactMap { $0 }
-        return usable.isEmpty ? [nil] : Array(usable.prefix(3))
-    }
+    private var usable: [URL] { thumbnails.compactMap { $0 } }
 
     var body: some View {
-        ZStack {
-            MediaPlate(platform: nil, title: name)
+        Color.clear
+            .aspectRatio(aspect, contentMode: .fit)
+            // The named plate sits *behind* the imagery, not instead of it, so
+            // a cover whose source images have expired degrades to something
+            // legible rather than to an empty grey box. Instagram and TikTok
+            // thumbnail URLs are signed and do expire, and a collection is not
+            // broken merely because its cover art is.
+            .overlay { MediaPlate(platform: nil, title: name) }
+            .overlay { content }
+            .background(SavaColor.fill)
+            .clipShape(RoundedRectangle(cornerRadius: Radius.media, style: .continuous))
+            .accessibilityHidden(true)
+    }
 
-            HStack(spacing: 2) {
-                ForEach(Array(tiles.enumerated()), id: \.offset) { index, url in
-                    MediaImage(url: url, fallback: .transparent, cornerRadius: 0)
-                        .frame(maxWidth: .infinity)
-                        // The first member gets twice the width: a cover needs a
-                        // subject, not three equal slivers.
-                        .layoutPriority(index == 0 ? 2 : 1)
+    @ViewBuilder private var content: some View {
+        if usable.isEmpty {
+            // Nothing to draw; the plate behind is already showing the name.
+            EmptyView()
+        } else if usable.count < 4 {
+            // Not enough for a mosaic that would not look broken, and with one
+            // or two members the first image genuinely is the collection.
+            MediaImage(url: usable[0], fallback: .transparent,
+                       fit: .fitOnBackdrop, cornerRadius: 0)
+        } else {
+            mosaic
+        }
+    }
+
+    /// Four members, evenly quartered. Hairline gaps rather than padding, so
+    /// the tile still reads as one object.
+    private var mosaic: some View {
+        let tiles = Array(usable.prefix(4))
+        return VStack(spacing: 1.5) {
+            ForEach(0..<2, id: \.self) { row in
+                HStack(spacing: 1.5) {
+                    ForEach(0..<2, id: \.self) { column in
+                        MediaImage(url: tiles[row * 2 + column],
+                                   fallback: .transparent, cornerRadius: 0)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .clipped()
+                    }
                 }
             }
         }
-        .frame(height: height)
-        .background(SavaColor.fill)
-        .clipShape(RoundedRectangle(cornerRadius: Radius.media, style: .continuous))
-        .accessibilityHidden(true)
     }
 }
 

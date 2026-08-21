@@ -193,7 +193,7 @@ struct AskView: View {
         case .collection(let collection):
             HStack(spacing: Space.m) {
                 CollectionCover(name: collection.name,
-                                thumbnails: collection.coverURLs, height: 46)
+                                thumbnails: collection.coverURLs)
                     .frame(width: 68)
 
                 VStack(alignment: .leading, spacing: 2) {
@@ -693,13 +693,29 @@ struct AskView: View {
 /// look just as broken as readable ones. The hairline below carries the
 /// separation that the translucency was implying.
 private extension View {
+    /// The pinned context strip at the top of a scoped Ask.
+    ///
+    /// Messages scroll *underneath* this, so it has to be a solid surface. It
+    /// was not: the background covered the strip's own bounds but stopped at
+    /// the safe-area boundary, leaving the band between it and the top of the
+    /// screen unpainted — so message text slid up into that band and appeared
+    /// to pass through the header.
+    ///
+    /// Extending the same opaque colour past the top edge closes it. No
+    /// material and no blur: this sits over arbitrary chat text, and legibility
+    /// of the title beats any translucency effect.
     func headerSurface() -> some View {
         self
             .screenPadding()
             .padding(.vertical, Space.m)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(SavaColor.ground)
+            .background {
+                SavaColor.ground
+                    .ignoresSafeArea(edges: .top)
+            }
             .hairline()
-            .zIndex(1)
+            // Above the scroll content in the same stacking context, so nothing
+            // can composite on top of it.
+            .zIndex(10)
     }
 }
