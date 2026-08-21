@@ -67,6 +67,12 @@ def is_short_form(
         # Video and carousel both page vertically; only a plain link does not.
         return kind in ("video", "carousel", "image", "")
 
+    if platform == "instagram":
+        # Reels are vertical video and carousels page horizontally; both belong
+        # in the same viewer TikTok already uses. A screenshot capture never
+        # does — there is nothing to play and no post it can claim to be.
+        return kind in ("video", "carousel", "image")
+
     if platform == "youtube":
         if is_shorts_url(url_hint):
             return True

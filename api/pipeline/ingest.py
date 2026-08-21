@@ -319,6 +319,166 @@ def _mirror_cover(db, cc: CanonicalContent, *, user_id: Optional[int] = None) ->
     return True
 
 
+def _ingest_instagram(db, cc: CanonicalContent, *, user_id: Optional[int] = None,
+                      force: bool = False) -> Dict[str, Any]:
+    """Fill in an Instagram post through the provider chain.
+
+    Two rules shape this, both from what Instagram actually does rather than
+    from what would be convenient:
+
+      * **Never invent.** Every field is written only when a provider supplied
+        it, and `field_sources` records which one. A post whose caption could
+        not be read keeps a null caption; it does not get "Instagram Post".
+      * **Never lose the save.** A provider failure sets PARTIAL with a
+        structured reason and returns. The canonical identity, the user's
+        library reference and the original URL all survive, so the card still
+        opens in Instagram and can be upgraded later without the user doing
+        anything.
+    """
+    from ..config import INSTAGRAM_MAX_CAROUSEL_ITEMS, INSTAGRAM_MIRROR_MEDIA
+    from ..models import ContentAsset
+    from ..services import instagram as ig
+
+    shortcode = cc.platform_content_id
+    if not shortcode:
+        # A `/share/` link that has not been followed yet. Honest, and retryable.
+        _set_stage(cc, "metadata", "failed", "share link not yet resolved")
+        cc.last_error = "instagram share link has not been resolved to a post id"
+        db.commit()
+        return {"status": "unresolved_share_link", "bytes": 0}
+
+    result = guarded("instagram", "metadata", ig.extract_metadata,
+                     shortcode, cc.canonical_url, db=db,
+                     canonical_content_id=cc.id, user_id=user_id)
+
+    if not result.ok:
+        # Failure is a product state, not an error path. Say exactly why, so a
+        # deleted post and a rate limit are distinguishable by anything that
+        # later decides whether to retry.
+        _set_stage(cc, "metadata", "failed",
+                   f"{result.failure_reason}: {result.error or ''}")
+        cc.last_error = f"[{result.failure_reason}] {result.error or 'extraction failed'}"[:400]
+        db.commit()
+        return {"status": f"failed:{result.failure_reason}",
+                "bytes": result.bytes_moved, "provider": result.provider}
+
+    meta = result.metadata
+    # Only ever fills gaps. A value a provider could not supply must not erase
+    # one an earlier run did.
+    if meta.creator_name and not cc.creator_name:
+        cc.creator_name = meta.creator_name[:255]
+    if meta.creator_handle and not cc.creator_handle:
+        cc.creator_handle = meta.creator_handle[:255]
+    if meta.caption and not cc.description:
+        cc.description = meta.caption
+    if meta.caption and not cc.title:
+        cc.title = meta.caption.replace("\n", " ")[:200]
+    if meta.published_at and not cc.published_at:
+        cc.published_at = meta.published_at
+    if meta.thumbnail_url and not cc.thumbnail_url:
+        cc.thumbnail_url = meta.thumbnail_url
+    if meta.width and not cc.width:
+        cc.width, cc.height = meta.width, meta.height
+    if meta.duration_seconds and not cc.duration_seconds:
+        cc.duration_seconds = int(meta.duration_seconds)
+    if meta.media_kind:
+        cc.media_kind = meta.media_kind
+    # One classifier, shared with YouTube and TikTok, rather than a second
+    # rule here that would drift from it.
+    from ..content.shortform import is_short_form
+    cc.is_short = is_short_form(
+        cc.platform, media_kind=cc.media_kind,
+        duration_seconds=cc.duration_seconds, width=cc.width, height=cc.height,
+        url_hint=cc.canonical_url)
+
+    try:
+        existing_meta = json.loads(cc.metadata_json or "{}")
+    except Exception:
+        existing_meta = {}
+    existing_meta.update({
+        "shortcode": shortcode,
+        "like_count": meta.like_count,
+        "comment_count": meta.comment_count,
+        "carousel_count": meta.carousel_count,
+        # How we know each thing. Without this there is no way to tell a value
+        # a provider asserted from one a later heuristic guessed.
+        "field_sources": meta.provenance,
+        "extracted_by": result.provider,
+    })
+    cc.metadata_json = json.dumps(existing_meta, default=str)[:60000]
+    db.commit()
+
+    # Instagram signs its CDN URLs with a short expiry, so the copy has to be
+    # taken now rather than on first view.
+    if INSTAGRAM_MIRROR_MEDIA:
+        _mirror_cover(db, cc, user_id=user_id)
+
+    stored_children = 0
+    if meta.children:
+        cc.media_kind = "carousel"
+        existing = (db.query(ContentAsset)
+                    .filter(ContentAsset.canonical_content_id == cc.id).count())
+        if existing and not force:
+            stored_children = existing
+        else:
+            (db.query(ContentAsset)
+               .filter(ContentAsset.canonical_content_id == cc.id)
+               .delete(synchronize_session=False))
+            stored_children = _store_instagram_children(
+                db, cc, meta.children[:INSTAGRAM_MAX_CAROUSEL_ITEMS],
+                mirror=INSTAGRAM_MIRROR_MEDIA)
+        db.commit()
+
+    _set_stage(cc, "metadata", "ok",
+               f"{result.provider}"
+               + (f", {stored_children} carousel items" if stored_children else ""))
+    db.commit()
+    return {"status": "ok", "bytes": result.bytes_moved,
+            "provider": result.provider, "carousel_items": stored_children}
+
+
+def _store_instagram_children(db, cc: CanonicalContent, children: List[Dict[str, Any]],
+                              *, mirror: bool) -> int:
+    """Persist carousel children in order, mirroring each image.
+
+    Same `ContentAsset` table TikTok photo posts use — the shape is identical
+    (an ordered set of images belonging to one post) and a second model would
+    mean the gallery viewer needing to know which platform it was rendering.
+    Index 0 is the cover, which is the image the creator chose.
+    """
+    from ..models import ContentAsset
+    from ..services import thumbnails as thumb_svc
+
+    stored = 0
+    for child in children:
+        source = child.get("source_url")
+        if not source:
+            continue
+        key = public = None
+        if mirror:
+            try:
+                mirrored = thumb_svc.mirror_to_storage(
+                    source, namespace="instagram", platform="instagram")
+                if mirrored:
+                    key, public = mirrored
+            except Exception as e:
+                logger.warning("carousel child mirror failed (%s): %s", cc.id, e)
+        db.add(ContentAsset(
+            canonical_content_id=cc.id,
+            asset_index=int(child.get("index", stored)),
+            kind="cover" if int(child.get("index", stored)) == 0 else "image",
+            source_url=public or source, storage_key=key,
+            width=child.get("width"), height=child.get("height"),
+        ))
+        stored += 1
+    if stored:
+        cc.metadata_json = json.dumps({
+            **(json.loads(cc.metadata_json or "{}") if cc.metadata_json else {}),
+            "carousel_count": stored,
+        }, default=str)[:60000]
+    return stored
+
+
 def _ingest_carousel(db, cc: CanonicalContent, *, user_id: Optional[int] = None,
                      force: bool = False) -> Dict[str, Any]:
     """Read a TikTok photo post: metadata, ordered slides, durable copies.
@@ -455,7 +615,20 @@ def process_content(canonical_id: int, db, *, force: bool = False,
 
         # ── L1: metadata ────────────────────────────────────────────────────
         _state(db, cc, ProcessingState.FETCHING, 1)
-        if cc.media_kind == "carousel" and cc.platform == "tiktok":
+        if cc.platform == "instagram":
+            # Instagram never goes through yt-dlp metadata: that path requires
+            # an operator account, and the provider chain exists precisely so
+            # this decision lives in one place.
+            ig_result = _ingest_instagram(db, cc, user_id=user_id, force=force)
+            total_bytes += ig_result.get("bytes", 0)
+            result["stages"]["metadata"] = ig_result.get("status", "skipped")
+            if not str(ig_result.get("status", "")).startswith("ok"):
+                # Keep the content, describe the state honestly, and stop —
+                # there is nothing downstream that can run without metadata.
+                _state(db, cc, ProcessingState.PARTIAL, 1)
+                result["partial"] = True
+                return result
+        elif cc.media_kind == "carousel" and cc.platform == "tiktok":
             # A photo post is read as an ordered image set, not as a video with
             # a missing file. Handled before the video path so nothing tries to
             # download an MP4 that was never going to exist.

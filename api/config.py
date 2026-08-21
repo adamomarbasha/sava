@@ -128,3 +128,36 @@ COMMENT_VERSION = int(os.getenv("SAVA_COMMENT_VERSION", "1"))
 
 # TikTok photo posts. A ceiling because a carousel is billed per slide read.
 CAROUSEL_MAX_SLIDES = int(os.getenv("SAVA_CAROUSEL_MAX_SLIDES", "12"))
+
+
+# ─── Instagram ───────────────────────────────────────────────────────────────
+# Provider order. `opengraph` needs no account and is the only one that scales;
+# `ytdlp` is richer (it can enumerate carousel children) but requires operator
+# credentials, so it is deliberately not in the default chain.
+INSTAGRAM_PROVIDERS = [
+    p.strip() for p in
+    os.getenv("SAVA_INSTAGRAM_PROVIDERS", "opengraph").split(",") if p.strip()
+]
+INSTAGRAM_YTDLP_ENABLED = os.getenv(
+    "SAVA_INSTAGRAM_YTDLP", "").lower() in ("1", "true", "yes")
+
+# Instagram comments have no unauthenticated path at all, so the provider
+# exists and reports itself unavailable rather than pretending.
+COMMENTS_INSTAGRAM_ENABLED = os.getenv(
+    "SAVA_COMMENTS_INSTAGRAM", "0").lower() not in ("0", "false", "no")
+
+# Mirror Instagram imagery into object storage on ingest. Instagram CDN URLs are
+# signed and expire within days, so without this a library silently loses its
+# thumbnails — which is the single most visible way this platform degrades.
+INSTAGRAM_MIRROR_MEDIA = os.getenv(
+    "SAVA_INSTAGRAM_MIRROR", "1").lower() not in ("0", "false", "no")
+INSTAGRAM_MAX_CAROUSEL_ITEMS = int(os.getenv("SAVA_INSTAGRAM_MAX_CAROUSEL", "20"))
+
+
+# ─── Collection covers ───────────────────────────────────────────────────────
+# Rights-aware image sources, in order. Both publish machine-readable licence
+# metadata, which is what makes a rights check possible at all.
+COLLECTION_COVER_PROVIDERS = [
+    p.strip() for p in
+    os.getenv("SAVA_COVER_PROVIDERS", "openverse,wikimedia").split(",") if p.strip()
+]

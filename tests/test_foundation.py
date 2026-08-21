@@ -385,20 +385,39 @@ class TestCollections:
         assert "kai cenat" in titles
 
     def test_auto_collections_reflect_actual_saves(self, clean_db, monkeypatch):
+        """Grouping is derived from named signals, not from cluster count.
+
+        The old contract reported how many clusters k-means produced, which said
+        nothing about whether the result was any good — it happily reported two
+        clusters called "Late Night Scroll" and "Creative Inspo". What matters
+        now is that the collections are specific and drawn from this library.
+        """
         from api.services import collections as cs
+        from api.services.grouping import is_junk_label
+
         db = clean_db
-        user, fake = TestRetrieval()._library(db, monkeypatch, n_saves=48)
-        fake.completion_text = '{"name":"Pasta Night","description":"Recipes"}'
+        user, _ = TestRetrieval()._library(db, monkeypatch, n_saves=48)
         stats = cs.rebuild_auto_collections(db, user.id)
+
         assert stats["status"] == "ok"
-        assert stats["clusters"] >= 2, f"expected multiple clusters, got {stats}"
+        names = [c["name"] for c in stats["collections"]]
+        assert len(names) >= 2, f"expected several groupings, got {stats}"
+        assert not any(is_junk_label(n) for n in names), names
+        # Every collection traces back to something in the user's own data
+        # rather than to a fixed taxonomy.
+        assert all(c["signature"] for c in stats["collections"])
+        assert stats["items_covered"] > 0
 
     def test_no_auto_collections_for_a_tiny_library(self, clean_db, monkeypatch):
+        """Four saves is not enough to have interests. Producing a collection
+        from one or two weakly related items is the failure mode, so the
+        correct output is nothing at all."""
         from api.services import collections as cs
+
         db = clean_db
         user, _ = TestRetrieval()._library(db, monkeypatch, n_saves=4)
         stats = cs.rebuild_auto_collections(db, user.id)
-        assert stats["status"] == "not_enough_saves"
+        assert stats["collections"] == [], stats
 
 
 # ─── Job queue ───────────────────────────────────────────────────────────────

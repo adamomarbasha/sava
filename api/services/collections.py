@@ -1,13 +1,23 @@
 """Collections — manual and automatic.
 
-Automatic collections must reflect *this* user's actual interests. Someone who
-never saves cooking content must never be handed a "Recipes" collection. That
-rules out a fixed taxonomy, so grouping is discovered from the user's own
-embeddings.
+Manual collections are the user's. They are created, renamed, filled and
+emptied by hand, and nothing in this module ever rewrites one.
 
-The clustering itself uses no model — it is k-means over vectors we already
-store. A cheap model is used only to put a human name on a cluster once it
-exists, which costs a fraction of a cent per rebuild.
+Automatic collections are derived, and derivation happens in `grouping.py`;
+this module is what turns a set of discovered groupings into durable rows and
+keeps them stable while the library changes underneath them. Three properties
+matter, and each is a decision rather than a detail:
+
+  * **Stability.** A rebuild reconciles by *signature*, not by deleting every
+    automatic collection and creating new ones. "Kai Cenat" keeps its id, its
+    cover and its place on the screen when the library grows, instead of
+    flickering into a different collection with the same name.
+  * **Deference.** Corrections recorded in `collection_feedback` are applied
+    before anything is written, so a rebuild cannot undo a removal or resurrect
+    a deleted collection.
+  * **Restraint.** No model is called to decide what the collections are. The
+    only optional model call names an embedding cluster, and a cluster whose
+    name comes back generic is dropped rather than shown.
 """
 from __future__ import annotations
 
@@ -215,6 +225,25 @@ def _set_cover(db, coll: Collection) -> None:
         db.commit()
 
 
+def refresh_cover(db, coll: Collection) -> None:
+    """Re-pick the cover after membership changed.
+
+    `_set_cover` deliberately does nothing when a cover is already set, so that
+    a stable collection keeps a stable face. That is wrong in exactly one case:
+    the cover image was the item just removed, and leaving it would show a
+    collection fronted by something no longer in it.
+    """
+    if coll.cover_bookmark_id is not None:
+        still_present = db.execute(sql_text(
+            "SELECT 1 FROM collection_items WHERE collection_id = :c AND bookmark_id = :b"
+        ), {"c": coll.id, "b": coll.cover_bookmark_id}).first()
+        if still_present:
+            return
+        coll.cover_bookmark_id = None
+        db.commit()
+    _set_cover(db, coll)
+
+
 def _supports_nulls_last(db) -> bool:
     return db.bind.dialect.name == "postgresql"
 
@@ -301,100 +330,310 @@ a place, an activity. Do not use generic words like "Videos", "Content",
     return (fallback or "Saved"), None
 
 
-def rebuild_auto_collections(db, user_id: int, *, max_collections: int = MAX_AUTO_COLLECTIONS
-                             ) -> Dict[str, Any]:
-    """Discover this user's natural groupings and materialise them."""
+def _feedback(db, user_id: int):
+    """What this user has already corrected, as (rejected, removed)."""
+    from ..models import CollectionFeedback
+
+    rejected: set = set()
+    removed: Dict[str, set] = {}
+    for row in db.query(CollectionFeedback).filter(
+            CollectionFeedback.user_id == user_id).all():
+        if row.action == "reject_collection":
+            rejected.add(row.signature)
+        elif row.action == "remove_item" and row.bookmark_id is not None:
+            removed.setdefault(row.signature, set()).add(row.bookmark_id)
+    return rejected, removed
+
+
+def record_feedback(db, user_id: int, signature: str, action: str,
+                    bookmark_id: Optional[int] = None) -> None:
+    """Remember a correction so the next rebuild does not undo it."""
+    from ..models import CollectionFeedback
+
+    if not signature:
+        return
+    exists = (db.query(CollectionFeedback)
+              .filter(CollectionFeedback.user_id == user_id,
+                      CollectionFeedback.signature == signature,
+                      CollectionFeedback.action == action,
+                      CollectionFeedback.bookmark_id == bookmark_id)
+              .first())
+    if exists:
+        return
+    db.add(CollectionFeedback(user_id=user_id, signature=signature,
+                              action=action, bookmark_id=bookmark_id))
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+
+
+def _cluster_candidates(db, user_id: int, covered: set, library, *,
+                        limit: int):
+    """Embedding clusters, for saves the named signals could not reach.
+
+    Last resort, and deliberately hard to satisfy. This is the tier that
+    produced "Late Night Scroll" and "Cinematic Chaos", because a centroid has
+    no name and a model asked to name one will reach for atmosphere. So it runs
+    only over leftovers, demands real cohesion, and — critically — throws the
+    cluster away if the name that comes back is generic, rather than showing a
+    vague collection because the clustering succeeded.
+    """
     from ..ai.router import get_router
+    from ..vectors import from_storage, normalize
 
-    rows = db.execute(sql_text("""
-        SELECT b.id AS bid, cc.id AS cid, cc.title, cc.creator_name, cc.content_type,
-               e.embedding, u.topics
-        FROM bookmarks b
-        JOIN canonical_content cc ON cc.id = b.canonical_content_id
-        JOIN content_embeddings e ON e.canonical_content_id = cc.id
-        LEFT JOIN content_understanding u ON u.canonical_content_id = cc.id
-        WHERE b.user_id = :uid AND e.embedding IS NOT NULL
-    """), {"uid": user_id}).mappings().all()
+    leftovers = [i for i in library if i.bookmark_id not in covered]
+    if len(leftovers) < MIN_CLUSTER_SIZE * 2:
+        return []
 
-    if len(rows) < MIN_SAVES_FOR_AUTO:
-        return {"status": "not_enough_saves", "saves": len(rows),
-                "required": MIN_SAVES_FOR_AUTO}
+    ids = [i.canonical_id for i in leftovers if i.canonical_id]
+    if len(ids) < MIN_CLUSTER_SIZE * 2:
+        return []
+    placeholders = ",".join(str(int(i)) for i in ids)
+    rows = db.execute(sql_text(
+        f"SELECT canonical_content_id AS cid, embedding FROM content_embeddings "
+        f"WHERE canonical_content_id IN ({placeholders}) AND embedding IS NOT NULL"
+    )).mappings().all()
+    if len(rows) < MIN_CLUSTER_SIZE * 2:
+        return []
 
-    vectors, items = [], []
+    by_canonical = {i.canonical_id: i for i in leftovers}
+    vectors, members = [], []
     for r in rows:
-        v = normalize(from_storage(r["embedding"]))
-        if v is None:
+        vec = normalize(from_storage(r["embedding"]))
+        item = by_canonical.get(r["cid"])
+        if vec is None or item is None:
             continue
-        vectors.append(v)
-        topics = []
-        if r["topics"]:
-            try:
-                topics = json.loads(r["topics"])
-            except Exception:
-                pass
-        items.append({"bookmark_id": r["bid"], "canonical_id": r["cid"],
-                      "title": r["title"], "creator": r["creator_name"],
-                      "content_type": r["content_type"], "topics": topics})
-    if len(vectors) < MIN_SAVES_FOR_AUTO:
-        return {"status": "not_enough_embeddings", "saves": len(vectors)}
+        vectors.append(vec)
+        members.append(item)
+    if len(vectors) < MIN_CLUSTER_SIZE * 2:
+        return []
 
     X = np.vstack(vectors).astype(np.float32)
-    k = max(2, min(max_collections, len(X) // MIN_CLUSTER_SIZE))
+    k = max(2, min(limit, len(X) // MIN_CLUSTER_SIZE))
     labels, centers = _kmeans(X, k)
 
     router = get_router()
-    # Replace previous auto collections; manual ones are never touched.
-    old = db.query(Collection).filter(Collection.user_id == user_id,
-                                      Collection.kind == "auto").all()
-    for c in old:
-        db.query(CollectionItem).filter(CollectionItem.collection_id == c.id).delete()
-        db.delete(c)
+    if router is None or not router.is_available():
+        # Without a namer this tier can only produce unnamed clusters, and an
+        # unnamed collection is worse than a missing one.
+        return []
+
+    from .grouping import Candidate, is_junk_label
+
+    out = []
+    for j in range(k):
+        idx = [i for i, lab in enumerate(labels) if lab == j]
+        if len(idx) < MIN_CLUSTER_SIZE:
+            continue
+        cohesion = float(np.mean(X[idx] @ centers[j]))
+        if cohesion < 0.62:
+            continue
+        group = [members[i] for i in idx]
+        payload = [{"title": m.title, "creator": m.creator, "topics": m.topics}
+                   for m in group]
+        name, desc = _name_cluster(router, db, user_id, payload)
+        if not name or is_junk_label(name):
+            continue
+        out.append(Candidate(
+            signature=f"cluster:{_slug_signature(name)}", label=name,
+            members={m.bookmark_id for m in group}, source="cluster",
+            strength=0.3 + cohesion))
+    return out
+
+
+def _slug_signature(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", (text or "").lower())[:60]
+
+
+def rebuild_auto_collections(db, user_id: int, *,
+                             max_collections: int = MAX_AUTO_COLLECTIONS,
+                             use_clusters: bool = False) -> Dict[str, Any]:
+    """Discover this user's groupings and reconcile them into rows.
+
+    Reconciliation rather than replacement. The previous implementation deleted
+    every automatic collection and rebuilt it, which meant ids churned, covers
+    were re-picked, and anything the user had done was silently reverted. Here
+    a signature that already exists is updated in place, one that has gone is
+    removed, and one that is new is created.
+
+    `use_clusters` is off by default, and that default is the finding rather
+    than a configuration preference. Enabling it on this library produced "Late
+    Night Scroll" (11 items), "Beat Lab", "Sci-Fi & Geek Lore" and "Random
+    Fixations" — evocative, and useless for finding anything. The failure is
+    structural: a centroid has no name, so a model asked to supply one writes
+    atmosphere, and no amount of prompt tightening turns an unnamed cluster into
+    a recognisable subject. The named tiers do not have this problem because
+    they never invent a name. Left in place, behind the flag, for the day
+    embedding coverage is high enough to be worth revisiting.
+    """
+    from .grouping import MAX_COLLECTIONS, discover
+
+    max_collections = max_collections or MAX_COLLECTIONS
+    rejected, removed = _feedback(db, user_id)
+    candidates, library = discover(db, user_id, limit=max_collections,
+                                   rejected=rejected, removed=removed)
+
+    if not library:
+        return {"status": "empty_library", "collections": []}
+
+    if use_clusters and len(candidates) < max_collections:
+        covered = {m for c in candidates for m in c.members}
+        try:
+            extra = _cluster_candidates(
+                db, user_id, covered, library,
+                limit=max_collections - len(candidates))
+        except Exception as e:
+            logger.warning("cluster tier failed: %s", e)
+            extra = []
+        for cand in extra:
+            if cand.signature in rejected:
+                continue
+            cand.members -= removed.get(cand.signature, set())
+            if len(cand.members) >= MIN_CLUSTER_SIZE:
+                candidates.append(cand)
+
+    # Manual collections are untouchable, including their names — an automatic
+    # collection must never collide with one the user made.
+    manual = db.query(Collection).filter(Collection.user_id == user_id,
+                                         Collection.kind == "manual").all()
+    manual_names = {(c.name or "").strip().lower() for c in manual}
+
+    # And their *signatures* are taken too. Renaming an automatic collection
+    # converts it to manual but leaves the signature on the row, which records
+    # that this grouping already has a home. Without this the next rebuild finds
+    # no automatic collection for the signature, decides it is missing, and
+    # creates a second collection holding exactly the same saves — the user
+    # renames "Kai Cenat Live" and gets a fresh "Kai Cenat Live" beside it.
+    claimed_signatures = {c.signature for c in manual if c.signature}
+
+    existing = {c.signature: c for c in db.query(Collection).filter(
+        Collection.user_id == user_id, Collection.kind == "auto",
+        Collection.signature.isnot(None)).all()}
+
+    kept_signatures = set()
+    report: List[Dict[str, Any]] = []
+
+    for cand in candidates:
+        if cand.label.strip().lower() in manual_names:
+            continue
+        if cand.signature in claimed_signatures:
+            continue
+        kept_signatures.add(cand.signature)
+        coll = existing.get(cand.signature)
+
+        if coll is None:
+            name = _unique_name(db, user_id, cand.label)
+            coll = Collection(user_id=user_id, name=name, kind="auto",
+                              signature=cand.signature)
+            db.add(coll)
+            db.commit()
+            db.refresh(coll)
+        elif coll.name != cand.label and _name_free(db, user_id, cand.label, coll.id):
+            # The grouping is the same; the best available name for it improved
+            # (an acronym expanded, say). Follow it rather than freezing the
+            # first name ever chosen.
+            coll.name = cand.label
+            db.commit()
+
+        _sync_members(db, coll, cand.members)
+        _set_cover(db, coll)
+        report.append({"id": coll.id, "name": coll.name, "size": len(cand.members),
+                       "source": cand.source, "signature": cand.signature})
+
+    # A signature that no longer describes anything is retired. Its feedback
+    # rows stay, so a rejection still holds if the grouping ever returns.
+    for signature, coll in existing.items():
+        if signature in kept_signatures:
+            continue
+        db.query(CollectionItem).filter(
+            CollectionItem.collection_id == coll.id).delete()
+        db.delete(coll)
     db.commit()
 
-    created: List[Dict[str, Any]] = []
-    for j in range(k):
-        member_idx = [i for i, lab in enumerate(labels) if lab == j]
-        if len(member_idx) < MIN_CLUSTER_SIZE:
+    _queue_cover_selection(db, [r["id"] for r in report])
+
+    return {"status": "ok", "collections": report,
+            "saves_considered": len(library),
+            "items_covered": len({m for c in candidates for m in c.members})}
+
+
+def _queue_cover_selection(db, collection_ids: List[int]) -> None:
+    """Ask for covers to be chosen, later and elsewhere.
+
+    Enqueued rather than run inline so a rebuild returns immediately, and keyed
+    per collection so replaying a rebuild cannot schedule the same search twice.
+    A collection whose cover is still valid costs nothing when the job runs —
+    `select_cover` checks before it searches.
+    """
+    from ..jobs import enqueue
+    from . import collection_covers as cover_svc
+
+    for collection_id in collection_ids:
+        coll = db.query(Collection).filter(Collection.id == collection_id).first()
+        if coll is None or not cover_svc.needs_reselection(db, coll):
             continue
-        members = [items[i] for i in member_idx]
-        # Cohesion guard: a loose cluster is noise, not a collection.
-        cohesion = float(np.mean(X[member_idx] @ centers[j]))
-        if cohesion < 0.55:
-            continue
+        try:
+            enqueue(db, "collection.cover", {"collection_id": collection_id},
+                    idempotency_key=f"cover:{collection_id}:"
+                                    f"{cover_svc.cover_signature(db, coll)}",
+                    priority=200)   # behind anything a user is waiting on
+        except Exception as e:
+            logger.warning("could not queue cover selection for %s: %s",
+                           collection_id, e)
 
-        name, desc = _name_cluster(router, db, user_id, members)
-        base, n = name, 2
-        while db.query(Collection).filter(Collection.user_id == user_id,
-                                          Collection.name == name).first():
-            name = f"{base} {n}"
-            n += 1
 
-        coll = Collection(user_id=user_id, name=name, kind="auto", description=desc,
-                          embedding=to_storage(centers[j]))
-        db.add(coll)
-        db.commit()
-        db.refresh(coll)
-        for m in members:
-            db.add(CollectionItem(collection_id=coll.id, bookmark_id=m["bookmark_id"],
-                                  added_by="auto", score=cohesion))
-        db.commit()
-        _set_cover(db, coll)
-        created.append({"id": coll.id, "name": name, "size": len(members),
-                        "cohesion": round(cohesion, 3)})
+def _name_free(db, user_id: int, name: str, own_id: int) -> bool:
+    clash = (db.query(Collection)
+             .filter(Collection.user_id == user_id, Collection.name == name,
+                     Collection.id != own_id).first())
+    return clash is None
 
-    return {"status": "ok", "clusters": len(created), "collections": created,
-            "saves_considered": len(X)}
+
+def _unique_name(db, user_id: int, base: str) -> str:
+    name, n = base, 2
+    while db.query(Collection).filter(Collection.user_id == user_id,
+                                      Collection.name == name).first():
+        name = f"{base} {n}"
+        n += 1
+    return name
+
+
+def _sync_members(db, coll: Collection, wanted: set) -> None:
+    """Make membership match, without disturbing anything the user added.
+
+    An item the user put in by hand stays even if the signal no longer picks
+    it, and only rows this process added are ever taken away.
+    """
+    rows = db.query(CollectionItem).filter(
+        CollectionItem.collection_id == coll.id).all()
+    current_auto = {r.bookmark_id for r in rows if r.added_by == "auto"}
+    manual = {r.bookmark_id for r in rows if r.added_by != "auto"}
+
+    for bid in wanted - current_auto - manual:
+        db.add(CollectionItem(collection_id=coll.id, bookmark_id=bid,
+                              added_by="auto", score=1.0))
+    for bid in current_auto - wanted:
+        db.query(CollectionItem).filter(
+            CollectionItem.collection_id == coll.id,
+            CollectionItem.bookmark_id == bid,
+            CollectionItem.added_by == "auto").delete()
+    db.commit()
 
 
 def list_collections(db, user_id: int) -> List[Dict[str, Any]]:
     rows = db.execute(sql_text("""
-        SELECT c.id, c.name, c.kind, c.description, c.cover_bookmark_id,
+        SELECT c.id, c.name, c.kind, c.signature, c.description,
+               c.cover_bookmark_id, c.cover_url, c.cover_mosaic, c.cover_source,
                c.created_at, COUNT(ci.bookmark_id) AS n
         FROM collections c
         LEFT JOIN collection_items ci ON ci.collection_id = c.id
         WHERE c.user_id = :uid
-        GROUP BY c.id, c.name, c.kind, c.description, c.cover_bookmark_id, c.created_at
-        ORDER BY c.kind ASC, n DESC
+        GROUP BY c.id, c.name, c.kind, c.signature, c.description,
+                 c.cover_bookmark_id, c.cover_url, c.cover_mosaic, c.cover_source,
+                 c.created_at
+        HAVING COUNT(ci.bookmark_id) > 0 OR c.kind = 'manual'
+        ORDER BY n DESC, c.name ASC
     """), {"uid": user_id}).mappings().all()
 
     out = []
@@ -402,6 +641,12 @@ def list_collections(db, user_id: int) -> List[Dict[str, Any]]:
         # A collection's cover is built from the media actually inside it — a
         # folder glyph would tell the user nothing. Up to four real thumbnails,
         # the designated cover first when one has been chosen.
+        # Covers are ordered by how likely the image is to still exist, not just
+        # by how representative it is. A signed TikTok or Instagram CDN URL
+        # expires within days, so a mosaic built from "best" members was coming
+        # back with holes in it — a collection of five YouTube saves and one
+        # TikTok would front itself with the one dead image. Durable sources
+        # first, expiring ones only if nothing else is available.
         covers = [t for (t,) in db.execute(sql_text("""
             SELECT COALESCE(cc.thumbnail_url, b.thumbnail_url) AS thumb
             FROM collection_items ci
@@ -410,14 +655,39 @@ def list_collections(db, user_id: int) -> List[Dict[str, Any]]:
             WHERE ci.collection_id = :c
               AND COALESCE(cc.thumbnail_url, b.thumbnail_url) IS NOT NULL
               AND COALESCE(cc.thumbnail_url, b.thumbnail_url) != ''
-            ORDER BY (b.id = COALESCE(:cover, -1)) DESC, ci.score DESC, b.created_at DESC
+            ORDER BY
+              (b.id = COALESCE(:cover, -1)) DESC,
+              CASE
+                WHEN cc.thumbnail_stored_key IS NOT NULL THEN 0
+                WHEN COALESCE(cc.thumbnail_url, b.thumbnail_url) LIKE '%ytimg.com%' THEN 1
+                WHEN COALESCE(cc.thumbnail_url, b.thumbnail_url) LIKE '%x-expires%' THEN 3
+                WHEN COALESCE(cc.thumbnail_url, b.thumbnail_url) LIKE '%tiktokcdn%' THEN 3
+                WHEN COALESCE(cc.thumbnail_url, b.thumbnail_url) LIKE '%cdninstagram%' THEN 3
+                WHEN COALESCE(cc.thumbnail_url, b.thumbnail_url) LIKE '%fbcdn.net%' THEN 3
+                ELSE 2
+              END ASC,
+              ci.score DESC, b.created_at DESC
             LIMIT 4
         """), {"c": r["id"], "cover": r["cover_bookmark_id"]}).all()]
 
+        # A selected cover wins over member thumbnails. It was chosen for this
+        # collection rather than merely belonging to it, it is already mirrored
+        # into Sava's storage, and it does not change when the membership does.
+        selected: List[str] = []
+        if r["cover_mosaic"]:
+            try:
+                selected = [u for u in json.loads(r["cover_mosaic"]) if u]
+            except Exception:
+                selected = []
+        elif r["cover_url"]:
+            selected = [r["cover_url"]]
+
         out.append({"id": r["id"], "name": r["name"], "kind": r["kind"],
+                    "signature": r["signature"],
                     "description": r["description"], "count": int(r["n"]),
-                    "cover_thumbnail_url": covers[0] if covers else None,
-                    "cover_thumbnails": covers,
+                    "cover_source": r["cover_source"] or "automatic",
+                    "cover_thumbnail_url": (selected or covers or [None])[0],
+                    "cover_thumbnails": selected or covers,
                     "created_at": r["created_at"].isoformat()
                     if hasattr(r["created_at"], "isoformat") else r["created_at"]})
     return out

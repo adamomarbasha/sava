@@ -43,6 +43,15 @@ class Bookmark(Base):
     note = Column(Text)
     published_at = Column(DateTime(timezone=True))
     created_at = Column(DateTime(timezone=True), nullable=False, default=func.now())
+
+    # Whether this save was ever actually returned to.
+    #
+    # Resurfacing needs to distinguish "kept and re-read" from "saved and never
+    # opened again", and the second is the larger and more interesting group —
+    # the whole point of a library is that things in it can be found later.
+    # Null means never opened since saving.
+    last_opened_at = Column(DateTime(timezone=True))
+    open_count = Column(Integer, nullable=False, default=0)
     updated_at = Column(DateTime(timezone=True), nullable=False, default=func.now(), onupdate=func.now())
     raw = Column(Text, nullable=False, default='{}')
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
@@ -383,7 +392,36 @@ class Collection(Base):
     name = Column(String(120), nullable=False)
     kind = Column(String(12), nullable=False, default="manual")  # manual | auto
     description = Column(Text)
+
+    # What an automatic collection *is*, independently of its name or row id —
+    # "creator:penguinz0", "tag:attackontitan". Rebuilds match on this, so a
+    # collection keeps its identity, its cover and its edits across runs instead
+    # of being deleted and recreated with a new id every time. Null for manual
+    # collections, which are defined by the user rather than by a signal.
+    signature = Column(String(160))
     cover_bookmark_id = Column(Integer, ForeignKey("bookmarks.id", ondelete="SET NULL"))
+
+    # ── Cover ────────────────────────────────────────────────────────────────
+    # Where the cover came from, and therefore who is allowed to change it.
+    # "automatic" is Sava's; everything else is the user's and is never
+    # overwritten by reselection.
+    cover_source = Column(String(20), nullable=False, default="automatic")
+    # The durable copy. External imagery is mirrored on selection, so a cover
+    # chosen today does not vanish when the source page changes next month.
+    cover_storage_key = Column(Text)
+    cover_url = Column(Text)
+    # 2–4 durable keys when the cover is an editorial mosaic rather than one
+    # image, as JSON.
+    cover_mosaic = Column(Text)
+    # What the cover was chosen *for*. Reselection happens when this changes,
+    # and not when the user merely opened the screen — which is what keeps a
+    # normal Collections read free of any search or inference.
+    cover_signature = Column(String(200))
+    cover_confidence = Column(Float)
+    # Source page, domain, licence and attribution, as JSON. Kept because an
+    # image is only usable if we can still say where it came from.
+    cover_provenance = Column(Text)
+    cover_updated_at = Column(DateTime(timezone=True))
     embedding = Column(VectorColumn(EMBED_DIM))
     is_pinned = Column(Boolean, nullable=False, default=False)
     created_at = Column(DateTime(timezone=True), nullable=False, default=func.now())
@@ -392,6 +430,7 @@ class Collection(Base):
     __table_args__ = (
         UniqueConstraint("user_id", "name", name="uq_collection_user_name"),
         Index("idx_collections_user", "user_id"),
+        Index("idx_collections_signature", "user_id", "signature"),
     )
 
 
@@ -403,6 +442,52 @@ class CollectionItem(Base):
     added_by = Column(String(10), nullable=False, default="user")   # user | auto
     score = Column(Float)
     created_at = Column(DateTime(timezone=True), nullable=False, default=func.now())
+
+
+class CollectionFeedback(Base):
+    """What the user has told us about automatic grouping, by correcting it.
+
+    Automatic collections are rebuilt from scratch as the library grows, which
+    means every rebuild is an opportunity to undo a correction the user already
+    made — to put back the item they removed, or to resurrect the collection
+    they deleted. That is the single most irritating thing an "smart" feature
+    can do, so corrections are recorded here and consulted on every rebuild.
+
+    Keyed by *signature* rather than by collection id, because the collection
+    row may not survive a rebuild but the grouping it represented will. Deleting
+    "Attack on Titan" has to mean "stop suggesting this grouping", not "delete
+    this row so it can be recreated in thirty seconds".
+    """
+    __tablename__ = "collection_feedback"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    signature = Column(String(160), nullable=False)
+    # remove_item -> bookmark_id is set. reject_collection -> it is null.
+    action = Column(String(20), nullable=False)
+    bookmark_id = Column(Integer, ForeignKey("bookmarks.id", ondelete="CASCADE"))
+    created_at = Column(DateTime(timezone=True), nullable=False, default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "signature", "action", "bookmark_id",
+                         name="uq_feedback_unique"),
+        Index("idx_feedback_user_sig", "user_id", "signature"),
+    )
+
+
+class CollectionView(Base):
+    """When the user last opened a collection.
+
+    Feeds resurfacing: something belonging to a collection opened recently is
+    more worth bringing back than something from a corner of the library that
+    has not been touched in months.
+    """
+    __tablename__ = "collection_views"
+
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    collection_id = Column(Integer, ForeignKey("collections.id", ondelete="CASCADE"), primary_key=True)
+    viewed_at = Column(DateTime(timezone=True), nullable=False, default=func.now())
+    view_count = Column(Integer, nullable=False, default=1)
 
 
 class Job(Base):

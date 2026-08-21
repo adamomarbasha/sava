@@ -85,11 +85,25 @@ class TestShortFormClassification:
         """
         assert not is_short_form("youtube", media_kind="video", duration_seconds=30)
 
-    @pytest.mark.parametrize("platform", ["instagram", "twitter", "reddit", "other"])
-    def test_other_platforms_are_out_of_scope(self, platform):
-        """Instagram is deliberately excluded from V1, not accidentally."""
+    @pytest.mark.parametrize("platform", ["twitter", "reddit", "linkedin", "other"])
+    def test_unsupported_platforms_are_out_of_scope(self, platform):
         assert not is_short_form(platform, media_kind="video", duration_seconds=20,
                                  width=1080, height=1920)
+
+    @pytest.mark.parametrize("kind", ["video", "carousel", "image"])
+    def test_instagram_posts_use_the_same_viewer(self, kind):
+        """Instagram was excluded when the viewer shipped and is included now.
+
+        Reels are vertical video and carousels page horizontally, which is what
+        the gallery already does for TikTok photo posts — so this is reuse of
+        one viewer rather than a second Instagram-shaped one.
+        """
+        assert is_short_form("instagram", media_kind=kind)
+
+    def test_an_instagram_screenshot_capture_is_not_playable(self):
+        """A capture has no media and names no post, so it must never open in
+        a viewer that implies it does."""
+        assert not is_short_form("instagram", media_kind="capture")
 
 
 class TestShortsDoNotDuplicateCanonicals:

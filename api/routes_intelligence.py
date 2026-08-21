@@ -424,14 +424,261 @@ def get_collection(collection_id: int,
     # geometry, same metadata, same processing state. Diverging here is what
     # previously made collection tiles look poorer than library cards.
     from .main import serialize_bookmark
+    from .services import resurfacing as resurf_svc
+
+    # Opening a collection is the signal that its subject is live for this
+    # person right now, which is what lets resurfacing prefer older saves from
+    # the things they are actually thinking about.
+    resurf_svc.record_collection_view(db, current_user["id"], collection_id)
 
     return {
         "id": coll.id, "name": coll.name, "kind": coll.kind,
+        "signature": coll.signature,
         "description": coll.description,
         "items": [{**serialize_bookmark(bm, cc),
                    "added_by": ci.added_by, "score": ci.score}
                   for bm, cc, ci in rows],
     }
+
+
+class RenameIn(BaseModel):
+    name: str
+
+
+@router.patch("/api/collections/{collection_id}")
+def rename_collection(collection_id: int, body: RenameIn,
+                      current_user: dict = Depends(get_current_user),
+                      db: Session = Depends(get_db)):
+    """Rename a collection.
+
+    A renamed automatic collection becomes the user's: `kind` flips to manual
+    so the next rebuild leaves it alone entirely. Naming something is the
+    clearest possible statement that you have opinions about it, and having a
+    rebuild quietly rename it back would be indefensible.
+    """
+    coll = (db.query(Collection)
+            .filter(Collection.id == collection_id,
+                    Collection.user_id == current_user["id"]).first())
+    if coll is None:
+        raise HTTPException(status_code=404, detail="Collection not found")
+
+    name = (body.name or "").strip()[:120]
+    if not name:
+        raise HTTPException(status_code=422, detail="Name is required")
+
+    clash = (db.query(Collection)
+             .filter(Collection.user_id == current_user["id"],
+                     Collection.name == name, Collection.id != collection_id).first())
+    if clash is not None:
+        raise HTTPException(status_code=409, detail="You already have a collection with that name")
+
+    coll.name = name
+    if coll.kind == "auto":
+        coll.kind = "manual"
+    db.commit()
+    return {"id": coll.id, "name": coll.name, "kind": coll.kind}
+
+
+@router.delete("/api/collections/{collection_id}")
+def delete_collection(collection_id: int,
+                      current_user: dict = Depends(get_current_user),
+                      db: Session = Depends(get_db)):
+    """Delete a collection, and remember the deletion if it was automatic.
+
+    Without the second half, deleting a derived collection accomplishes nothing
+    — the signal that produced it is still true, so the next rebuild recreates
+    it. The rejection is recorded against the signature so it survives even
+    though the row does not.
+    """
+    coll = (db.query(Collection)
+            .filter(Collection.id == collection_id,
+                    Collection.user_id == current_user["id"]).first())
+    if coll is None:
+        raise HTTPException(status_code=404, detail="Collection not found")
+
+    if coll.kind == "auto" and coll.signature:
+        coll_svc.record_feedback(db, current_user["id"], coll.signature,
+                                 "reject_collection")
+
+    db.query(CollectionItem).filter(
+        CollectionItem.collection_id == collection_id).delete()
+    db.delete(coll)
+    db.commit()
+    return {"deleted": collection_id}
+
+
+@router.delete("/api/collections/{collection_id}/items/{bookmark_id}")
+def delete_collection_item(collection_id: int, bookmark_id: int,
+                           current_user: dict = Depends(get_current_user),
+                           db: Session = Depends(get_db)):
+    """Remove one item, and remember it if the collection is automatic."""
+    coll = (db.query(Collection)
+            .filter(Collection.id == collection_id,
+                    Collection.user_id == current_user["id"]).first())
+    if coll is None:
+        raise HTTPException(status_code=404, detail="Collection not found")
+
+    if coll.kind == "auto" and coll.signature:
+        coll_svc.record_feedback(db, current_user["id"], coll.signature,
+                                 "remove_item", bookmark_id)
+
+    db.query(CollectionItem).filter(
+        CollectionItem.collection_id == collection_id,
+        CollectionItem.bookmark_id == bookmark_id).delete()
+    # The cover may have been the item just removed.
+    if coll.cover_bookmark_id == bookmark_id:
+        coll.cover_bookmark_id = None
+    db.commit()
+    coll_svc.refresh_cover(db, coll)
+    return {"removed": bookmark_id}
+
+
+# ─── Collection covers ───────────────────────────────────────────────────────
+
+@router.get("/api/collections/{collection_id}/cover/suggestions")
+def cover_suggestions(collection_id: int,
+                      current_user: dict = Depends(get_current_user),
+                      db: Session = Depends(get_db)):
+    """Alternative covers for the picker.
+
+    This is the ONE collection endpoint that performs image search, and it runs
+    only when the user has opened Change Cover. Listing collections and opening
+    one both stay free of any search or inference.
+    """
+    from .services import collection_covers as cover_svc
+
+    coll = (db.query(Collection)
+            .filter(Collection.id == collection_id,
+                    Collection.user_id == current_user["id"]).first())
+    if coll is None:
+        raise HTTPException(status_code=404, detail="Collection not found")
+    return cover_svc.suggestions(db, coll)
+
+
+class CoverIn(BaseModel):
+    image_url: Optional[str] = None
+    source: str = "suggested"          # suggested | collection_media
+    bookmark_id: Optional[int] = None
+
+
+@router.put("/api/collections/{collection_id}/cover")
+def set_cover(collection_id: int, body: CoverIn,
+              current_user: dict = Depends(get_current_user),
+              db: Session = Depends(get_db)):
+    """Install a cover the user picked. Authoritative from here on."""
+    from .services import collection_covers as cover_svc
+
+    coll = (db.query(Collection)
+            .filter(Collection.id == collection_id,
+                    Collection.user_id == current_user["id"]).first())
+    if coll is None:
+        raise HTTPException(status_code=404, detail="Collection not found")
+
+    url = body.image_url
+    source = body.source if body.source in (
+        "suggested", "collection_media", "user_upload") else "suggested"
+
+    if body.bookmark_id is not None:
+        owned = (db.query(Bookmark)
+                 .filter(Bookmark.id == body.bookmark_id,
+                         Bookmark.user_id == current_user["id"]).first())
+        if owned is None:
+            raise HTTPException(status_code=404, detail="Item not found")
+        cc = (db.query(CanonicalContent)
+              .filter(CanonicalContent.id == owned.canonical_content_id).first()
+              if owned.canonical_content_id else None)
+        url = (cc.thumbnail_url if cc else None) or owned.thumbnail_url
+        source = "collection_media"
+
+    if not url:
+        raise HTTPException(status_code=422, detail="No image supplied")
+
+    result = cover_svc.set_manual_cover(db, coll, image_url=url, source=source)
+    if result.get("status") != "ok":
+        raise HTTPException(status_code=502, detail="Couldn't store that image")
+    return result
+
+
+@router.post("/api/collections/{collection_id}/cover/upload")
+async def upload_cover(collection_id: int,
+                       file: UploadFile = File(...),
+                       current_user: dict = Depends(get_current_user),
+                       db: Session = Depends(get_db)):
+    """A photo from the user's own library. Stored durably like any other cover."""
+    from .services import collection_covers as cover_svc
+
+    coll = (db.query(Collection)
+            .filter(Collection.id == collection_id,
+                    Collection.user_id == current_user["id"]).first())
+    if coll is None:
+        raise HTTPException(status_code=404, detail="Collection not found")
+
+    payload = await file.read()
+    if not payload:
+        raise HTTPException(status_code=422, detail="Empty image")
+    if len(payload) > 12 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="That image is too large")
+
+    result = cover_svc.set_manual_cover(
+        db, coll, image_bytes=payload, source="user_upload",
+        provenance={"origin": "user_upload"})
+    if result.get("status") != "ok":
+        raise HTTPException(status_code=502, detail="Couldn't store that image")
+    return result
+
+
+@router.delete("/api/collections/{collection_id}/cover")
+def reset_cover(collection_id: int,
+                current_user: dict = Depends(get_current_user),
+                db: Session = Depends(get_db)):
+    """Hand cover choice back to Sava's automatic selection."""
+    from .services import collection_covers as cover_svc
+
+    coll = (db.query(Collection)
+            .filter(Collection.id == collection_id,
+                    Collection.user_id == current_user["id"]).first())
+    if coll is None:
+        raise HTTPException(status_code=404, detail="Collection not found")
+    return cover_svc.reset_to_automatic(db, coll, user_id=current_user["id"])
+
+
+@router.get("/api/resurfacing")
+def get_resurfacing(limit: int = Query(8, ge=1, le=24),
+                    current_user: dict = Depends(get_current_user),
+                    db: Session = Depends(get_db)):
+    """A few older saves worth another look, each with a factual reason."""
+    from .main import serialize_bookmark
+    from .services import resurfacing as resurf_svc
+
+    picks = resurf_svc.worth_revisiting(db, current_user["id"], limit=limit)
+    if not picks:
+        return {"items": []}
+
+    ids = [p["bookmark_id"] for p in picks]
+    rows = (db.query(Bookmark, CanonicalContent)
+            .outerjoin(CanonicalContent, CanonicalContent.id == Bookmark.canonical_content_id)
+            .filter(Bookmark.id.in_(ids)).all())
+    by_id = {bm.id: (bm, cc) for bm, cc in rows}
+
+    items = []
+    for pick in picks:
+        pair = by_id.get(pick["bookmark_id"])
+        if not pair:
+            continue
+        bm, cc = pair
+        items.append({**serialize_bookmark(bm, cc), "reason": pick["reason"]})
+    return {"items": items}
+
+
+@router.post("/api/bookmarks/{bookmark_id}/opened")
+def mark_opened(bookmark_id: int,
+                current_user: dict = Depends(get_current_user),
+                db: Session = Depends(get_db)):
+    """Note that a save was actually opened. Feeds resurfacing only."""
+    from .services import resurfacing as resurf_svc
+
+    resurf_svc.record_open(db, current_user["id"], bookmark_id)
+    return {"ok": True}
 
 
 class ItemsIn(BaseModel):

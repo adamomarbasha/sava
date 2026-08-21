@@ -326,6 +326,29 @@ def descriptor_for(db, cc, *, user_id: int, base_url: str = "") -> PlaybackDescr
     platform = (cc.platform or "").lower()
     kind = (cc.media_kind or "").lower()
 
+    if platform == "instagram":
+        # Carousels and single images both render as a gallery — the same
+        # component TikTok photo posts already use, because the content shape is
+        # the same ordered set of images. A one-image "gallery" simply has
+        # nothing to swipe to.
+        images = _gallery_images(db, cc)
+        if not images and poster:
+            images = [{"url": poster, "width": getattr(cc, "width", None),
+                       "height": getattr(cc, "height", None), "index": 0}]
+        if images:
+            first = images[0]
+            aspect = (round(first["width"] / first["height"], 4)
+                      if first.get("width") and first.get("height") else _aspect(cc))
+            return PlaybackDescriptor(kind="gallery", poster=poster, aspect=aspect,
+                                      images=images)
+        # A Reel with no obtainable media. Saying so beats a player that spins:
+        # Instagram serves video URLs only to authenticated sessions, and the
+        # cover image is the most any unauthenticated provider returns.
+        return PlaybackDescriptor(
+            kind="unavailable", poster=poster,
+            reason=("Instagram doesn't allow this to play inside other apps. "
+                    "Open it in Instagram to watch."))
+
     if platform == "tiktok" and kind == "carousel":
         images = _gallery_images(db, cc)
         if not images:
