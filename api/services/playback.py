@@ -42,6 +42,7 @@ import hmac
 import logging
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional, Tuple
 from urllib.parse import urlparse
@@ -255,6 +256,78 @@ def resolve_stream(db, cc, *, user_id: Optional[int] = None) -> Optional[_Resolv
     return resolved
 
 
+# ─── Warming ─────────────────────────────────────────────────────────────────
+#
+# The resolve is the expensive thing in this file — a live `yt-dlp` extraction,
+# measured at 1.5–2.2s cold. It used to run inline on the first byte of the
+# stream request, which put all of it on the critical path: the player asked for
+# video and waited two seconds before receiving any.
+#
+# The client already prefetches descriptors three items ahead. Descriptors are
+# cheap (4ms) so that alone bought very little; hooking the resolve to it is what
+# makes the prefetch worth having. Asking for a descriptor now also warms the
+# stream behind it, so by the time the player reaches that item the handle is in
+# the cache and the first byte is a CDN round trip rather than an extraction.
+
+# Four, to match the client's prefetch window (the current item plus three
+# ahead) — with three, the last item in a window queued behind the others and
+# was still cold when a fast swiper reached it.
+_WARM_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="sava-warm")
+
+# Ids currently being warmed, so three descriptor prefetches in a row do not
+# start three extractions of the same video.
+_warming: set = set()
+_warming_lock = threading.Lock()
+
+
+def warm_stream(canonical_id: int, user_id: Optional[int] = None) -> None:
+    """Resolve this item's stream in the background, if it isn't already.
+
+    Fire and forget: nothing waits on the result, and a failure is logged
+    exactly as an inline failure would be. The worst case is that the player
+    arrives before the warm finishes and resolves inline — which is the old
+    behaviour, not a regression.
+    """
+    if _cache.get(canonical_id) is not None:
+        return
+
+    with _warming_lock:
+        if canonical_id in _warming:
+            return
+        _warming.add(canonical_id)
+
+    def run() -> None:
+        # Its own session: the request's session belongs to the request and is
+        # very likely closed by the time this runs.
+        from ..db import SessionLocal
+        from ..models import CanonicalContent
+        from ..platform_budget import PlatformUnavailable
+        db = SessionLocal()
+        try:
+            cc = (db.query(CanonicalContent)
+                  .filter(CanonicalContent.id == canonical_id).first())
+            if cc is not None:
+                resolve_stream(db, cc, user_id=user_id)
+        except PlatformUnavailable as e:
+            # The budget guard is doing its job — the platform is rate-limited
+            # or the circuit is open. Expected, and speculative work is exactly
+            # what should be dropped first. A traceback here would be noise.
+            logger.info("stream warm skipped for canonical %s: %s", canonical_id, e)
+        except Exception:
+            logger.exception("stream warm failed for canonical %s", canonical_id)
+        finally:
+            db.close()
+            with _warming_lock:
+                _warming.discard(canonical_id)
+
+    try:
+        _WARM_POOL.submit(run)
+    except RuntimeError:
+        # Interpreter shutting down. Nothing to warm for.
+        with _warming_lock:
+            _warming.discard(canonical_id)
+
+
 # ─── Descriptor ──────────────────────────────────────────────────────────────
 
 @dataclass
@@ -327,27 +400,38 @@ def descriptor_for(db, cc, *, user_id: int, base_url: str = "") -> PlaybackDescr
     kind = (cc.media_kind or "").lower()
 
     if platform == "instagram":
-        # Carousels and single images both render as a gallery — the same
-        # component TikTok photo posts already use, because the content shape is
-        # the same ordered set of images. A one-image "gallery" simply has
-        # nothing to swipe to.
-        images = _gallery_images(db, cc)
-        if not images and poster:
-            images = [{"url": poster, "width": getattr(cc, "width", None),
-                       "height": getattr(cc, "height", None), "index": 0}]
-        if images:
-            first = images[0]
-            aspect = (round(first["width"] / first["height"], 4)
-                      if first.get("width") and first.get("height") else _aspect(cc))
-            return PlaybackDescriptor(kind="gallery", poster=poster, aspect=aspect,
-                                      images=images)
-        # A Reel with no obtainable media. Saying so beats a player that spins:
-        # Instagram serves video URLs only to authenticated sessions, and the
-        # cover image is the most any unauthenticated provider returns.
+        # Photos and carousels keep the native gallery: the images are already
+        # mirrored, and swiping real thumbnails beats an iframe.
+        #
+        # Everything else goes to Instagram's own embed. The important part is
+        # what is *not* here any more — a fallback that wrapped the cover image
+        # in a one-item gallery. For a photo post that was right; for a Reel it
+        # produced a still that could never play, which is precisely the "it
+        # won't show the video" symptom. A cover image is not a degraded video,
+        # it is the wrong medium.
+        if kind != "video":
+            images = _gallery_images(db, cc)
+            if images:
+                first = images[0]
+                aspect = (round(first["width"] / first["height"], 4)
+                          if first.get("width") and first.get("height") else _aspect(cc))
+                return PlaybackDescriptor(kind="gallery", poster=poster, aspect=aspect,
+                                          images=images)
+
+        if cc.platform_content_id:
+            expires = int(time.time()) + TOKEN_TTL_SECONDS
+            token = sign_token(cc.id, user_id, expires)
+            url = f"{base_url.rstrip('/')}/api/playback/{cc.id}/embed?t={token}"
+            # 4:5 rather than 9:16: Instagram's embed adds a header and a caption
+            # strip around the media, so the frame it needs is squarer than the
+            # video inside it.
+            return PlaybackDescriptor(kind="embed", url=url, poster=poster,
+                                      aspect=_aspect(cc) or 0.8,
+                                      duration_seconds=duration)
+
         return PlaybackDescriptor(
             kind="unavailable", poster=poster,
-            reason=("Instagram doesn't allow this to play inside other apps. "
-                    "Open it in Instagram to watch."))
+            reason="This post can't be identified.")
 
     if platform == "tiktok" and kind == "carousel":
         images = _gallery_images(db, cc)
@@ -384,6 +468,10 @@ def descriptor_for(db, cc, *, user_id: int, base_url: str = "") -> PlaybackDescr
         expires = int(time.time()) + TOKEN_TTL_SECONDS
         token = sign_token(cc.id, user_id, expires)
         url = f"{base_url.rstrip('/')}/api/playback/{cc.id}/stream?t={token}"
+        # Start resolving now rather than when the player asks for bytes. The
+        # client fetches descriptors several items ahead, so this is what turns
+        # that lead time into an actually-warm stream.
+        warm_stream(cc.id, user_id)
         return PlaybackDescriptor(kind="video", url=url, poster=poster,
                                   aspect=_aspect(cc) or (9 / 16),
                                   duration_seconds=duration)
@@ -498,6 +586,47 @@ EMBED_PAGE = """<!doctype html>
   function savaUnmute(){{ post('unMute'); }}
 </script>
 </body></html>"""
+
+
+# Instagram's own embed, which is the only sanctioned way to show a Reel.
+#
+# Instagram serves media URLs to authenticated sessions only, so there is no
+# stream to proxy the way TikTok's is — the previous code correctly refused to
+# invent one, but then fell back to rendering the *cover image* as a one-item
+# gallery, which is why a saved Reel appeared as a photo that would not play.
+#
+# `/embed/` is the endpoint Instagram publishes for exactly this purpose and
+# every news site uses. It renders the real post — video, carousel or photo —
+# plays inline, and requires no credentials. The captioned variant is used
+# because the plain one crops tall Reels awkwardly.
+INSTAGRAM_EMBED_PAGE = """<!doctype html>
+<html><head>
+<meta name="viewport" content="width=device-width, initial-scale=1,
+      maximum-scale=1, user-scalable=no">
+<style>
+  html,body{{margin:0;padding:0;background:#000;height:100%;overflow:hidden}}
+  #frame{{position:absolute;inset:0;width:100%;height:100%;border:0}}
+</style>
+</head><body>
+<iframe id="frame" allow="autoplay; encrypted-media; fullscreen"
+  allowtransparency="true" frameborder="0" scrolling="no"
+  src="https://www.instagram.com/p/{code}/embed/captioned/"></iframe>
+<script>
+  // Instagram's embed exposes no JS control surface, so these exist only so the
+  // app's player protocol has something to call. Playback is the user's tap
+  // inside the frame.
+  function savaPlay(){{}}
+  function savaPause(){{}}
+  function savaMute(){{}}
+  function savaUnmute(){{}}
+</script>
+</body></html>"""
+
+
+def instagram_embed_page(code: str, origin: str) -> str:
+    """Host page for one Instagram post. `origin` is unused by Instagram but
+    kept in the signature so both embed builders are called the same way."""
+    return INSTAGRAM_EMBED_PAGE.format(code=code)
 
 
 def embed_page(video_id: str, origin: str) -> str:

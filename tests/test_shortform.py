@@ -180,9 +180,37 @@ class TestPlaybackDescriptor:
         assert d.kind == "unavailable"
         assert d.reason
 
-    def test_unsupported_platform_refuses_clearly(self, db):
+    def test_instagram_video_is_an_embed_not_a_still(self, db):
+        """The regression this replaces: a Reel rendered as its cover image.
+
+        Instagram serves media only to authenticated sessions, so there is no
+        stream to proxy — but falling back to a one-item gallery of the poster
+        produced a photo that could never play. The sanctioned embed plays.
+        """
         cc = _canonical(db, content_key="instagram:ig1", platform="instagram",
-                        platform_content_id="ig1")
+                        media_kind="video", platform_content_id="ig1")
+        d = P.descriptor_for(db, cc, user_id=1, base_url="https://sava.test")
+        assert d.kind == "embed"
+        assert "/api/playback/" in (d.url or "")
+
+    def test_instagram_video_never_degrades_to_a_gallery(self, db):
+        """Even with a poster stored, a video must not become an image."""
+        cc = _canonical(db, content_key="instagram:ig3", platform="instagram",
+                        media_kind="video", platform_content_id="ig3",
+                        thumbnail_url="https://cdn.example/cover.jpg")
+        d = P.descriptor_for(db, cc, user_id=1, base_url="https://sava.test")
+        assert d.kind == "embed"
+
+    def test_instagram_without_an_id_refuses_clearly(self, db):
+        cc = _canonical(db, content_key="instagram:u:deadbeef",
+                        platform="instagram", platform_content_id=None)
+        d = P.descriptor_for(db, cc, user_id=1, base_url="https://sava.test")
+        assert d.kind == "unavailable"
+        assert d.reason
+
+    def test_unsupported_platform_refuses_clearly(self, db):
+        cc = _canonical(db, content_key="linkedin:li1", platform="linkedin",
+                        platform_content_id="li1")
         d = P.descriptor_for(db, cc, user_id=1, base_url="https://sava.test")
         assert d.kind == "unavailable"
         assert d.reason
@@ -294,3 +322,51 @@ class TestStreamOwnership:
         client = TestClient(app)
         r = client.get(f"/api/playback/{cc.id}/embed?t=nonsense")
         assert r.status_code == 403
+
+class TestStreamWarming:
+    """The prefetch only pays off if it warms the expensive half.
+
+    Measured before this existed: the descriptor returned in 4ms and the first
+    byte of the stream took 1.5–2.2s, because the yt-dlp resolve ran inline on
+    the stream request. Prefetching descriptors three items ahead therefore
+    bought almost nothing.
+    """
+
+    def test_asking_for_a_tiktok_descriptor_warms_its_stream(self, db, monkeypatch):
+        warmed = []
+        monkeypatch.setattr(P, "warm_stream",
+                            lambda cid, uid=None: warmed.append((cid, uid)))
+        cc = _canonical(db, content_key="tiktok:warm1", platform="tiktok",
+                        platform_content_id="warm1")
+        P.descriptor_for(db, cc, user_id=7, base_url="https://sava.test")
+        assert warmed == [(cc.id, 7)]
+
+    def test_an_already_cached_stream_is_not_warmed_again(self, db):
+        """Three prefetches of one item must not start three extractions."""
+        cc = _canonical(db, content_key="tiktok:warm2", platform="tiktok",
+                        platform_content_id="warm2")
+        P._cache.put(cc.id, P._Resolved(url="https://cdn.example/v.mp4", headers={},
+                                        cookies={}, expires_at=time.time() + 300))
+        try:
+            calls = []
+            original = P.resolve_stream
+            P.resolve_stream = lambda *a, **k: calls.append(1)
+            try:
+                P.warm_stream(cc.id, 7)
+            finally:
+                P.resolve_stream = original
+            assert calls == [], "a cached handle should short-circuit the warm"
+        finally:
+            P.reset_cache()
+
+    def test_embed_and_gallery_platforms_are_never_warmed(self, db, monkeypatch):
+        """Only the proxied path has a stream to resolve."""
+        warmed = []
+        monkeypatch.setattr(P, "warm_stream",
+                            lambda cid, uid=None: warmed.append(cid))
+        for key, platform, pid in (("youtube:w1", "youtube", "w1"),
+                                   ("instagram:w1", "instagram", "w1")):
+            cc = _canonical(db, content_key=key, platform=platform,
+                            media_kind="video", platform_content_id=pid)
+            P.descriptor_for(db, cc, user_id=1, base_url="https://sava.test")
+        assert warmed == []

@@ -26,6 +26,8 @@ from sqlalchemy.orm import Session
 from .auth import get_current_user
 from .db import get_db
 from .models import Bookmark, CanonicalContent
+from .authz import owned_bookmark
+from .platform_budget import PlatformUnavailable
 from .services import playback as playback_svc
 
 logger = logging.getLogger(__name__)
@@ -33,13 +35,8 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["playback"])
 
 
-def _owned_bookmark(db: Session, bookmark_id: int, user_id: int) -> Bookmark:
-    bookmark = (db.query(Bookmark)
-                .filter(Bookmark.id == bookmark_id, Bookmark.user_id == user_id)
-                .first())
-    if bookmark is None:
-        raise HTTPException(status_code=404, detail="Not found")
-    return bookmark
+# See `api/authz.py` — one definition, used everywhere.
+_owned_bookmark = owned_bookmark
 
 
 def _base_url(request: Request) -> str:
@@ -101,7 +98,8 @@ def playback_embed(
 
     cc = (db.query(CanonicalContent)
           .filter(CanonicalContent.id == canonical_id).first())
-    if cc is None or (cc.platform or "").lower() != "youtube" or not cc.platform_content_id:
+    platform = (cc.platform or "").lower() if cc else ""
+    if cc is None or platform not in ("youtube", "instagram") or not cc.platform_content_id:
         raise HTTPException(status_code=404, detail="Not found")
 
     owns = (db.query(Bookmark.id)
@@ -111,7 +109,14 @@ def playback_embed(
     if owns is None:
         raise HTTPException(status_code=404, detail="Not found")
 
-    html = playback_svc.embed_page(cc.platform_content_id, _base_url(request))
+    # Two platforms, one route: both need a page served from a real origin, and
+    # both are gated by the same token and the same ownership check. The only
+    # difference is which iframe goes inside.
+    if platform == "instagram":
+        html = playback_svc.instagram_embed_page(cc.platform_content_id,
+                                                 _base_url(request))
+    else:
+        html = playback_svc.embed_page(cc.platform_content_id, _base_url(request))
     # No bytes of media pass through here, but the page embeds a token; keep it
     # out of shared caches.
     return HTMLResponse(html, headers={"Cache-Control": "private, no-store"})
@@ -153,8 +158,19 @@ def playback_stream(
         raise HTTPException(status_code=400,
                             detail="This platform is not proxied")
 
-    status, headers, body = playback_svc.stream_upstream(
-        db, cc, range_header=range, user_id=user_id)
+    try:
+        status, headers, body = playback_svc.stream_upstream(
+            db, cc, range_header=range, user_id=user_id)
+    except PlatformUnavailable as e:
+        # The circuit breaker is open or the platform budget is spent. That is a
+        # temporary, expected condition with a known retry time — not a server
+        # fault. It was surfacing as an unhandled 500, which told the client
+        # nothing and logged a traceback for a working safety mechanism.
+        raise HTTPException(
+            status_code=503,
+            detail="This video can't be loaded right now. Try again shortly.",
+            headers={"Retry-After": str(int(getattr(e, "retry_after", 60) or 60))})
+
     if body is None:
         raise HTTPException(status_code=502,
                             detail="Couldn't reach this video right now")
