@@ -14,20 +14,39 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-_TMP_DB = Path(tempfile.mkdtemp(prefix="sava_test_")) / "test.db"
-os.environ["DATABASE_URL"] = f"sqlite:///{_TMP_DB}"
+# The whole suite can run against either database.
+#
+# SQLite by default, because it needs no service and keeps `pytest` a one-word
+# command. But "the tests pass" previously meant "the tests pass on SQLite",
+# while production is Postgres — a suite that is green about the wrong database
+# is green about the wrong thing. Setting SAVA_TEST_DATABASE_URL runs every test,
+# not just tests/test_postgres.py, against a real server. CI does exactly that.
+_OVERRIDE = os.getenv("SAVA_TEST_DATABASE_URL")
+if _OVERRIDE:
+    os.environ["DATABASE_URL"] = _OVERRIDE
+else:
+    _TMP_DB = Path(tempfile.mkdtemp(prefix="sava_test_")) / "test.db"
+    os.environ["DATABASE_URL"] = f"sqlite:///{_TMP_DB}"
+
+# Tests are a test environment, stated explicitly. `ENVIRONMENT` now defaults to
+# production, so leaving it unset would make every test run assert itself into
+# the production configuration gate.
+os.environ.setdefault("ENVIRONMENT", "test")
 os.environ["SAVA_INLINE_JOBS"] = "0"
 os.environ.setdefault("SAVA_TIKTOK_VISION_MODE", "conditional")
 
 import pytest  # noqa: E402
 
-from api.db import SessionLocal, engine  # noqa: E402
+from api.db import SessionLocal, engine, ensure_extensions  # noqa: E402
 from api.migrations import run_migrations  # noqa: E402
 from api.models import Base, Bookmark, User  # noqa: E402
 
 
 @pytest.fixture(scope="session", autouse=True)
 def _schema():
+    # Same ordering the application uses: the embedding column is of type
+    # `vector`, so the extension has to exist before any table is created.
+    ensure_extensions(engine)
     Base.metadata.create_all(bind=engine)
     run_migrations(engine)
     yield

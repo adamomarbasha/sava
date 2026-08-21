@@ -52,24 +52,54 @@ def test_connection():
         logger.error(f"Failed to connect to database: {e}")
         return False
 
+def ensure_extensions(bind) -> None:
+    """Create the Postgres extensions the schema depends on. No-op on SQLite.
+
+    `vector` is required before `create_all`, because the embedding table
+    declares a column of that type. The other two back trigram and composite
+    indexes used by search.
+    """
+    if not IS_POSTGRES:
+        return
+    with bind.connect() as conn:
+        for extension in ("vector", "pg_trgm", "btree_gin"):
+            try:
+                conn.execute(text(f"CREATE EXTENSION IF NOT EXISTS {extension}"))
+            except Exception as e:
+                # `vector` is not optional; the others degrade to slower search.
+                if extension == "vector":
+                    raise RuntimeError(
+                        "The pgvector extension is required but could not be "
+                        f"created: {e}. Install it on the server "
+                        "(e.g. the pgvector/pgvector image, or `CREATE EXTENSION "
+                        "vector` as a superuser).") from e
+                logger.warning("Could not enable extension %s: %s", extension, e)
+        conn.commit()
+    logger.info("PostgreSQL extensions ready")
+
+
 def init_db():
     try:
         if not test_connection():
             raise RuntimeError("Cannot connect to database")
         
+        # Extensions first, and `vector` among them.
+        #
+        # Two bugs lived here, and both only appear against a real Postgres —
+        # which is why they survived a green SQLite suite:
+        #
+        #   1. `vector` was never created at all, only pg_trgm and btree_gin.
+        #   2. Extensions were created *after* `create_all`, but ContentEmbedding
+        #      declares a `vector` column, so `create_all` needs the type to
+        #      already exist. Against a fresh database the first deploy failed
+        #      with `type "vector" does not exist`.
+        #
+        # Ordering matters, so this runs before any table is created.
+        ensure_extensions(engine)
+
         Base.metadata.create_all(bind=engine)
         logger.info("Database tables created successfully")
-        
-        if DATABASE_URL.startswith("postgresql"):
-            with engine.connect() as conn:
-                try:
-                    conn.execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm;"))
-                    conn.execute(text("CREATE EXTENSION IF NOT EXISTS btree_gin;"))
-                    logger.info("PostgreSQL extensions enabled")
-                except Exception as e:
-                    logger.warning(f"Could not enable PostgreSQL extensions: {e}")
-                conn.commit()
-                
+
     except Exception as e:
         logger.error(f"Failed to initialize database: {e}")
         raise RuntimeError(f"Database initialization failed: {e}")

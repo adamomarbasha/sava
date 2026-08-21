@@ -264,8 +264,14 @@ class TestRebuildIntegration:
 
     def test_feedback_is_recorded_once(self, db):
         user = make_user(db, "feedback-dedup@test.dev")
+        # A real bookmark, because `CollectionFeedback.bookmark_id` is a foreign
+        # key. SQLite does not enforce those by default and Postgres always
+        # does, so a made-up id passed here on SQLite and silently recorded
+        # nothing on Postgres — which is how the swallowed-exception bug in
+        # `record_feedback` stayed hidden.
+        bookmark = make_bookmark(db, user.id, url="https://example.com/feedback-dedup")
         for _ in range(3):
-            coll_svc.record_feedback(db, user.id, "tag:x", "remove_item", 7)
+            coll_svc.record_feedback(db, user.id, "tag:x", "remove_item", bookmark.id)
         assert db.query(CollectionFeedback).filter(
             CollectionFeedback.user_id == user.id).count() == 1
 

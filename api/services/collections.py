@@ -370,8 +370,19 @@ def record_feedback(db, user_id: int, signature: str, action: str,
                               action=action, bookmark_id=bookmark_id))
     try:
         db.commit()
-    except Exception:
+    except Exception as e:
+        # Logged, not silently discarded.
+        #
+        # This was a bare `except: rollback()`, which is invisible on SQLite and
+        # actively misleading on Postgres. `bookmark_id` carries a foreign key
+        # that SQLite does not enforce by default and Postgres always does — so a
+        # stale id made the insert fail, the failure was swallowed, and the user's
+        # correction was silently forgotten. The next rebuild then undid the very
+        # change they had just made, with nothing anywhere to explain why.
         db.rollback()
+        logger.warning("could not record collection feedback "
+                       "(user=%s action=%s bookmark=%s): %s",
+                       user_id, action, bookmark_id, type(e).__name__)
 
 
 def _cluster_candidates(db, user_id: int, covered: set, library, *,

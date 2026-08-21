@@ -50,6 +50,11 @@ else:
         return PackedVector()
 
 
+def _pgvector_literal(vec) -> str:
+    """pgvector's text input format: `[0.1,0.2,...]`."""
+    return "[" + ",".join(f"{float(x):.7g}" for x in vec) + "]"
+
+
 def normalize(vec: Sequence[float]) -> Optional[np.ndarray]:
     """L2-normalize so cosine similarity reduces to a dot product.
 
@@ -86,6 +91,19 @@ def from_storage(value) -> Optional[np.ndarray]:
         return None
     if isinstance(value, (bytes, bytearray, memoryview)):
         return np.frombuffer(bytes(value), dtype=np.float32)
+    if isinstance(value, str):
+        # pgvector's text output form, `[0.1,0.2,...]`, which is what comes back
+        # when a column is read through raw SQL instead of the ORM type — the
+        # path `related_saves` takes. Without this the whole bracketed string was
+        # handed to numpy as a single value and raised ValueError, so every
+        # related-saves lookup failed on Postgres.
+        text_value = value.strip()
+        if text_value.startswith("[") and text_value.endswith("]"):
+            inner = text_value[1:-1].strip()
+            if not inner:
+                return np.empty(0, dtype=np.float32)
+            return np.fromstring(inner, dtype=np.float32, sep=",")
+        raise ValueError(f"unrecognised embedding text form: {text_value[:32]!r}")
     return np.asarray(value, dtype=np.float32)
 
 
@@ -113,15 +131,25 @@ def knn(
         return []
     params = dict(params or {})
 
-    if IS_POSTGRES:  # pragma: no cover
+    if IS_POSTGRES:
+        # The parameter is bound as *text* and cast, not passed as a Python list.
+        #
+        # psycopg2 adapts a list to a Postgres array, so `embedding <=> :qvec`
+        # became `vector <=> numeric[]` — an operator that does not exist. Every
+        # semantic search on Postgres raised UndefinedFunction, and nothing
+        # caught it because this branch was only reachable on Postgres and the
+        # suite ran on SQLite. (It carried a `# pragma: no cover` marker saying
+        # exactly that.) pgvector's own text form, '[1,2,3]'::vector, is the
+        # documented way to bind one.
         clause = f"WHERE {where_sql}" if where_sql else ""
         sql = text(
-            f"SELECT {id_column} AS id, 1 - ({vector_column} <=> :qvec) AS sim "
+            f"SELECT {id_column} AS id, "
+            f"1 - ({vector_column} <=> CAST(:qvec AS vector)) AS sim "
             f"FROM {table} {clause} "
             f"{'AND' if where_sql else 'WHERE'} {vector_column} IS NOT NULL "
-            f"ORDER BY {vector_column} <=> :qvec LIMIT :k"
+            f"ORDER BY {vector_column} <=> CAST(:qvec AS vector) LIMIT :k"
         )
-        params.update({"qvec": q.tolist(), "k": k})
+        params.update({"qvec": _pgvector_literal(q), "k": k})
         return [(int(r.id), float(r.sim)) for r in db.execute(sql, params)]
 
     clause = f"WHERE {where_sql} AND" if where_sql else "WHERE"
@@ -137,8 +165,9 @@ def knn(
     mat = np.empty((len(rows), q.shape[0]), dtype=np.float32)
     n = 0
     for r in rows:
-        v = np.frombuffer(r.vec, dtype=np.float32) if isinstance(r.vec, (bytes, bytearray)) \
-            else np.asarray(r.vec, dtype=np.float32)
+        v = from_storage(r.vec)
+        if v is None:
+            continue
         if v.shape[0] != q.shape[0]:
             continue  # stale dimension from an older embedding model
         ids[n] = r.id
