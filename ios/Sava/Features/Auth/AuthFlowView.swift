@@ -61,10 +61,7 @@ struct AuthFlowView: View {
 
     private var masthead: some View {
         VStack(alignment: .leading, spacing: Space.l) {
-            Text("Sava")
-                .font(SavaType.wordmark)
-                .tracking(-1.2)
-                .foregroundStyle(SavaColor.primary)
+            SavaLockup(markSize: 46)
 
             VStack(alignment: .leading, spacing: 1) {
                 Text("Save what matters.")

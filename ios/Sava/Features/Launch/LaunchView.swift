@@ -1,7 +1,7 @@
 import SwiftUI
 
 /// Shown for the moment it takes to restore the session from the Keychain.
-/// Just the wordmark on the app's own ground — no spinner, no animation to sit
+/// Just the mark on the app's own ground — no spinner, no animation to sit
 /// through.
 struct LaunchView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -10,10 +10,7 @@ struct LaunchView: View {
     var body: some View {
         ZStack {
             SavaColor.ground.ignoresSafeArea()
-            Text("Sava")
-                .font(.system(size: 34, weight: .bold))
-                .tracking(-1)
-                .foregroundStyle(SavaColor.primary)
+            SavaMark(size: 72)
                 .opacity(appeared || reduceMotion ? 1 : 0)
         }
         .onAppear {
