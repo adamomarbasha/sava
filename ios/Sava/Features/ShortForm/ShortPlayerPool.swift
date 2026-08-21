@@ -109,11 +109,20 @@ final class ShortPlayerPool: ObservableObject {
         entry.endObserver = NotificationCenter.default.addObserver(
             forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main
         ) { [weak self, weak player] _ in
-            player?.seek(to: .zero) { _ in
+            guard let self, let player else { return }
+            player.seek(to: .zero) { _ in
                 // Only the page the user is on loops. A neighbour that reached
                 // its end while buffering must stay stopped.
-                guard let self, self.activeID == id else { return }
-                player?.play()
+                //
+                // The seek completion runs off the main actor, so `activeID` is
+                // hopped onto it rather than read across the isolation
+                // boundary. Both values are bound to constants before the hop:
+                // capturing the optionals directly would capture the *vars*,
+                // which is an error under the Swift 6 language mode.
+                Task { @MainActor [weak self, weak player] in
+                    guard let self, let player, self.activeID == id else { return }
+                    player.play()
+                }
             }
         }
     }
