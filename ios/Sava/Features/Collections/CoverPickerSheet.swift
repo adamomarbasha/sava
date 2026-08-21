@@ -200,7 +200,7 @@ struct CoverPickerSheet: View {
     private func resetToAutomatic() async {
         applying = "automatic"
         defer { applying = nil }
-        try? await intelligence.resetCover(collectionID: collection.id)
+        _ = try? await intelligence.resetCover(collectionID: collection.id)
         Haptics.tap()
         onChanged()
         dismiss()

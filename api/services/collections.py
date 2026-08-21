@@ -85,6 +85,12 @@ def create_collection(db, user_id: int, name: str, *,
     except Exception as e:
         logger.warning("collection embedding failed: %s", e)
 
+    # A brand-new collection has no members, so there is no member thumbnail to
+    # fall back to and the card would show a bare name plate — which is exactly
+    # what "I made a collection and it just says Music" was. Its *name* is
+    # enough to find a cover for, so selection is queued the moment it exists.
+    _queue_cover_selection(db, [coll.id])
+
     return coll
 
 

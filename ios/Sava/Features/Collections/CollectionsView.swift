@@ -182,7 +182,7 @@ struct CollectionsView: View {
         renaming = nil
         guard !name.isEmpty, name != target.name else { return }
         Task {
-            try? await intelligence.renameCollection(id: target.id, name: name)
+            _ = try? await intelligence.renameCollection(id: target.id, name: name)
             await load()
             Haptics.success()
         }
@@ -195,7 +195,7 @@ struct CollectionsView: View {
         // for a round trip to make a deletion visible feels broken.
         collections.removeAll { $0.id == target.id }
         Task {
-            try? await intelligence.deleteCollection(id: target.id)
+            _ = try? await intelligence.deleteCollection(id: target.id)
             await load()
             Haptics.tap()
         }

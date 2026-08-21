@@ -390,28 +390,33 @@ class CoverSelection:
     is_mosaic: bool = False
 
 
-_SELECT_SYSTEM = """You are choosing the cover image for someone's personal
-media collection.
+_SELECT_SYSTEM = """You are the picture editor for someone's personal media
+collection. You choose a cover from a numbered list of candidate images.
 
-You are given a collection name, what it represents, and a numbered list of
-candidate images. Answer with STRICT JSON:
-
+Answer with STRICT JSON:
 {"pick": [<index>, ...], "confidence": <0-1>, "reason": "<short>"}
 
-Pick ONE index when a single image would make someone immediately understand
-what the collection is about.
+Pick ONE index when a single image makes someone immediately understand what the
+collection is about. Pick 2-4 only when no single image can, and then choose
+images that COMPLEMENT rather than repeat each other.
 
-Pick 2-4 indices ONLY when no single image is representative and a set genuinely
-communicates better — a collection spanning several distinct subjects, say. In
-that case choose images that COMPLEMENT each other, never near-duplicates.
+Judge each candidate by asking, in order:
 
-Judge on: does it show the actual subject, is the subject prominent and
-recognisable, is it clean and uncluttered, would it crop well to a rectangle,
-and is it good quality. Prefer a clear photograph of the subject over a busy
-thumbnail, a logo, a meme, a text-heavy graphic, or an image where the subject
-is small or absent.
+1. Is this actually the subject? A photo of a different person, a generic stock
+   scene, a logo, a book cover, a map, or a screenshot of text is NOT the
+   subject even when the title mentions it.
+2. Is the subject the main thing in the frame, large and unobstructed?
+3. Is it clean — no watermark, no caption bar, no collage, no heavy text?
+4. Would it survive being cropped to a wide rectangle?
+5. Is it good quality rather than small, dark, or blurry?
 
-Set confidence below 0.4 if nothing here represents the collection well."""
+Titles are the strongest evidence you have. "Kai Cenat 2023" is the subject;
+"Rayasianboy 2025" is a different person; "Cai Kenat" is a misspelling of
+something unrelated. Prefer the candidate whose title names the subject plainly.
+
+Be willing to reject everything. Set confidence below 0.5 when nothing here
+genuinely represents the collection — a weak cover is worse than none, because
+the fallback is the user's own media, which is always on-topic."""
 
 
 def rank_with_ai(db, identity: CollectionIdentity,
