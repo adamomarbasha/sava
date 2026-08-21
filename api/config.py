@@ -20,6 +20,56 @@ API_DIR = Path(__file__).resolve().parent
 load_dotenv(dotenv_path=API_DIR / ".env")
 
 
+class ConfigurationError(RuntimeError):
+    """A deployment is misconfigured in a way that must stop the process."""
+
+
+# ─── Environment ─────────────────────────────────────────────────────────────
+#
+# Production is the default, and development must be asked for by name.
+#
+# It used to be the other way round, and that was the single most dangerous line
+# in the codebase. Every production protection — the refusal to boot without a
+# real `SECRET_KEY`, the strict CORS allowlist, the hidden API docs — was gated on
+# `ENVIRONMENT != development`, while `ENVIRONMENT` itself defaulted to
+# `development`. A deploy that set `SECRET_KEY` and `DATABASE_URL` but forgot
+# `ENVIRONMENT` therefore came up serving traffic, passing its health check, and
+# signing every token with a fallback secret printed in this repository. Nothing
+# failed; one warning went into a log nobody was watching.
+#
+# Inverting it makes the unconfigured state the safe state. Forgetting the
+# variable now costs a loud startup failure on a laptop instead of a silent
+# authentication bypass in production.
+_DEV_NAMES = {"development", "dev", "local"}
+_TEST_NAMES = {"test", "testing", "ci"}
+_PROD_NAMES = {"production", "prod", "staging"}
+
+
+def _resolve_environment() -> str:
+    raw = (os.getenv("ENVIRONMENT") or "").strip().lower()
+    if not raw:
+        # Unset means production. See the note above.
+        return "production"
+    if raw in _DEV_NAMES or raw in _TEST_NAMES or raw in _PROD_NAMES:
+        return raw
+    raise ConfigurationError(
+        f"ENVIRONMENT={raw!r} is not a recognised environment. Use one of: "
+        f"{', '.join(sorted(_DEV_NAMES | _TEST_NAMES | _PROD_NAMES))}. "
+        "Refusing to guess, because guessing wrong means guessing 'development'.")
+
+
+ENVIRONMENT = _resolve_environment()
+IS_DEVELOPMENT = ENVIRONMENT in _DEV_NAMES
+IS_TEST = ENVIRONMENT in _TEST_NAMES
+IS_PRODUCTION = ENVIRONMENT in _PROD_NAMES
+
+# Interactive API documentation. Off in production unless deliberately switched
+# on: it is a complete, machine-readable map of the attack surface, and there is
+# no browser client that needs it.
+DOCS_ENABLED = (not IS_PRODUCTION) or os.getenv(
+    "SAVA_ENABLE_DOCS", "").lower() in ("1", "true", "yes")
+
+
 def _resolve_database_url() -> str:
     raw = os.getenv("DATABASE_URL", "sqlite:///./bookmarks.db")
     if not raw.startswith("sqlite"):
@@ -38,7 +88,6 @@ def _resolve_database_url() -> str:
 DATABASE_URL = _resolve_database_url()
 IS_POSTGRES = DATABASE_URL.startswith("postgres")
 
-ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
 
 # ─── AI providers ────────────────────────────────────────────────────────────
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -161,3 +210,66 @@ COLLECTION_COVER_PROVIDERS = [
     p.strip() for p in
     os.getenv("SAVA_COVER_PROVIDERS", "openverse,wikimedia").split(",") if p.strip()
 ]
+
+
+# ─── Production startup gate ─────────────────────────────────────────────────
+
+def production_config_errors() -> list:
+    """Everything wrong with this deployment, as a list of sentences.
+
+    Returned rather than raised so a caller can report *all* of the problems at
+    once. Discovering a missing variable, fixing it, redeploying, and finding the
+    next one is how a ten-minute configuration job becomes an afternoon.
+
+    Only meaningful when `IS_PRODUCTION`; development is allowed to be sloppy on
+    purpose, which is the whole reason development has to be requested by name.
+    """
+    if not IS_PRODUCTION:
+        return []
+
+    problems = []
+
+    secret = os.getenv("SECRET_KEY") or ""
+    if not secret:
+        problems.append(
+            "SECRET_KEY is not set. Every issued token would be forgeable. "
+            "Generate one with: python -c 'import secrets; print(secrets.token_urlsafe(64))'")
+    elif secret == "your-secret-key-change-in-production":
+        problems.append(
+            "SECRET_KEY is still the development placeholder, which is published "
+            "in this repository. Generate a real one.")
+    elif len(secret) < 32:
+        problems.append(
+            f"SECRET_KEY is {len(secret)} characters; at least 32 are required.")
+
+    if DATABASE_URL.startswith("sqlite"):
+        problems.append(
+            "DATABASE_URL points at SQLite. Production requires PostgreSQL: the "
+            "hosts Sava targets have ephemeral filesystems, so a SQLite file is "
+            "deleted on every deploy, and pgvector and FOR UPDATE SKIP LOCKED "
+            "are both unavailable.")
+
+    if not (os.getenv("SAVA_S3_BUCKET") and os.getenv("SAVA_S3_ACCESS_KEY_ID")
+            and os.getenv("SAVA_S3_SECRET_ACCESS_KEY")):
+        problems.append(
+            "Object storage is not configured (SAVA_S3_BUCKET, "
+            "SAVA_S3_ACCESS_KEY_ID, SAVA_S3_SECRET_ACCESS_KEY). Production must "
+            "not fall back to local disk — stored thumbnails and covers would be "
+            "lost on every deploy.")
+
+    if not GEMINI_API_KEY:
+        problems.append(
+            "GEMINI_API_KEY is not set. Saves would be stored but never "
+            "understood, which looks like silent breakage to a user.")
+
+    return problems
+
+
+def require_production_config() -> None:
+    """Raise unless this process is safe to serve production traffic."""
+    problems = production_config_errors()
+    if not problems:
+        return
+    raise ConfigurationError(
+        "Refusing to start in ENVIRONMENT=%s:\n  - %s"
+        % (ENVIRONMENT, "\n  - ".join(problems)))

@@ -25,7 +25,8 @@ from .transcript_service import get_youtube_transcript, get_available_transcript
 from .comment_service import youtube_comment_service
 from .tiktok_comment_service import tiktok_service
 from .rate_limiter import rate_limiter
-from .config import API_DIR, ASYNC_SAVE, ENVIRONMENT, PIPELINE_VERSION
+from .config import (API_DIR, ASYNC_SAVE, DOCS_ENABLED, ENVIRONMENT,
+                     IS_PRODUCTION, PIPELINE_VERSION, require_production_config)
 from .migrations import run_migrations
 from .routes_intelligence import router as intelligence_router
 from .routes_playback import router as playback_router
@@ -45,13 +46,18 @@ from .auth import (
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Interactive documentation is development-only unless deliberately enabled.
+#
+# It is not a vulnerability by itself; it is a complete, machine-readable map of
+# every route, parameter and schema, handed to anyone who asks. There is no
+# browser client that needs it, and the iOS app certainly does not.
 app = FastAPI(
-    title="Sava Bookmark API", 
+    title="Sava Bookmark API",
     version="2.0.0",
     description="A powerful bookmark management API for saving and organizing links from various social media platforms",
-    docs_url="/docs",  
-    redoc_url="/redoc",  
-    openapi_url="/openapi.json"  
+    docs_url="/docs" if DOCS_ENABLED else None,
+    redoc_url="/redoc" if DOCS_ENABLED else None,
+    openapi_url="/openapi.json" if DOCS_ENABLED else None,
 )
 
 # Anchored to the package directory, not the working directory. `run_api.py`
@@ -79,7 +85,7 @@ _cors_origins = [
     for origin in os.getenv("SAVA_CORS_ORIGINS", "").split(",")
     if origin.strip()
 ]
-_is_production = ENVIRONMENT.lower() not in ("development", "dev", "test", "testing")
+_is_production = IS_PRODUCTION
 
 if _is_production:
     app.add_middleware(
@@ -125,6 +131,15 @@ class BookmarkUpdate(BaseModel):
 
 @app.on_event("startup")
 def on_startup():
+    # Fail closed, and fail loudly, before serving a single request.
+    #
+    # Deliberately the very first thing: a process that is misconfigured for
+    # production must not bind a port, answer a health check, or issue a token.
+    # The whole class of bug this prevents is the one where everything *looks*
+    # fine — the container is green, logins succeed — and the authentication
+    # system is forgeable because one variable was missing.
+    require_production_config()
+
     init_db()
     # Additive, idempotent schema upgrade for the intelligence layer.
     try:

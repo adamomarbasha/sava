@@ -1,21 +1,28 @@
 import os
-from pathlib import Path
 import logging
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.exc import OperationalError
-from dotenv import load_dotenv
 from .models import Base
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-ENV_PATH = Path(__file__).with_name(".env")
-load_dotenv(dotenv_path=ENV_PATH)
+# One source of truth for the database URL.
+#
+# This module used to read `DATABASE_URL` itself with its *own* default —
+# `sqlite:///./api/bookmarks.db` — while `api/config.py` defaulted to
+# `sqlite:///./bookmarks.db` and additionally resolved relative paths against
+# the repository root. With the variable set they agreed; with it unset they
+# opened two different files depending on which module you asked, and on the
+# working directory the process happened to start in.
+#
+# That is almost certainly why two separate SQLite databases ended up committed
+# to this repository. `api.config` already loads `.env`, resolves the path, and
+# decides `IS_POSTGRES`; there is no reason for a second opinion.
+from .config import DATABASE_URL, IS_POSTGRES
 
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./api/bookmarks.db")
-
-if DATABASE_URL.startswith("postgresql"):
+if IS_POSTGRES:
     engine = create_engine(
         DATABASE_URL,
         pool_pre_ping=True,
