@@ -582,16 +582,99 @@ struct RelatedSave: Decodable, Equatable, Identifiable, Hashable {
 
 // MARK: - Collections
 
+/// A save brought back by "Worth revisiting", with the factual reason it was.
+///
+/// The reason is a statement about the *content* — "From penguinz0", "Never
+/// opened", "Saved 11 months ago" — and never about the person's habits. It
+/// arrives from the server already written, because the signals that justify it
+/// (open history, collection views, recent questions) live there.
+struct ResurfacedSave: Decodable, Identifiable, Equatable, Hashable {
+    let bookmark: Bookmark
+    let reason: String
+
+    var id: Int { bookmark.id }
+
+    init(from decoder: Decoder) throws {
+        bookmark = try Bookmark(from: decoder)
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        reason = ((try? c.decodeIfPresent(String.self, forKey: .reason)) ?? nil) ?? ""
+    }
+
+    private enum CodingKeys: String, CodingKey { case reason }
+}
+
+
+/// One option in the Change Cover picker.
+///
+/// Carries its provenance because the picker shows where an image came from —
+/// a cover is published inside someone's library, and "which site is this from
+/// and under what licence" is not a detail to drop on the way to the UI.
+struct CoverCandidate: Decodable, Identifiable, Equatable, Hashable {
+    let candidateID: String
+    let imageURL: String
+    let sourceDomain: String?
+    let title: String?
+    let license: String?
+    let bookmarkID: Int?
+
+    var id: String { candidateID }
+    var url: URL? { ThumbnailURL.resolve(imageURL) }
+
+    enum CodingKeys: String, CodingKey {
+        case candidateID = "candidate_id"
+        case imageURL = "image_url"
+        case sourceDomain = "source_domain"
+        case bookmarkID = "bookmark_id"
+        case title, license
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        candidateID = (try? c.decode(String.self, forKey: .candidateID)) ?? UUID().uuidString
+        imageURL = (try? c.decode(String.self, forKey: .imageURL)) ?? ""
+        sourceDomain = (try? c.decodeIfPresent(String.self, forKey: .sourceDomain)) ?? nil
+        title = (try? c.decodeIfPresent(String.self, forKey: .title)) ?? nil
+        license = (try? c.decodeIfPresent(String.self, forKey: .license)) ?? nil
+        bookmarkID = (try? c.decodeIfPresent(Int.self, forKey: .bookmarkID)) ?? nil
+    }
+}
+
+struct CoverSuggestions: Decodable {
+    let suggested: [CoverCandidate]
+    let fromCollection: [CoverCandidate]
+
+    enum CodingKeys: String, CodingKey {
+        case suggested
+        case fromCollection = "from_collection"
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        suggested = ((try? c.decodeIfPresent([CoverCandidate].self, forKey: .suggested)) ?? nil) ?? []
+        fromCollection = ((try? c.decodeIfPresent([CoverCandidate].self, forKey: .fromCollection)) ?? nil) ?? []
+    }
+}
+
+
 struct SavaCollection: Decodable, Equatable, Identifiable, Hashable {
     let id: Int
     let name: String
     let kind: String            // "manual" | "auto"
     let description: String?
     let count: Int
+    /// What the grouping *is*, for automatic collections — "creator:penguinz0".
+    /// Null for manual ones, which are defined by the user rather than a signal.
+    let signature: String?
+    /// Who chose the cover: automatic | suggested | collection_media | user_upload.
+    /// Anything other than automatic is the user's and Sava never replaces it.
+    let coverSource: String
     let coverThumbnailURL: String?
     let coverThumbnails: [String]
 
     var isAutomatic: Bool { kind == "auto" }
+
+    /// True when the user picked this cover themselves.
+    var hasManualCover: Bool { coverSource != "automatic" }
 
     /// Cover imagery, resolved and ready to load. Falls back to the single
     /// designated cover for servers that predate the mosaic field.
@@ -605,7 +688,8 @@ struct SavaCollection: Decodable, Equatable, Identifiable, Hashable {
     var countLabel: String { "\(count) item\(count == 1 ? "" : "s")" }
 
     enum CodingKeys: String, CodingKey {
-        case id, name, kind, description, count
+        case id, name, kind, description, count, signature
+        case coverSource = "cover_source"
         case coverThumbnailURL = "cover_thumbnail_url"
         case coverThumbnails = "cover_thumbnails"
     }
@@ -617,6 +701,9 @@ struct SavaCollection: Decodable, Equatable, Identifiable, Hashable {
         kind = (try? c.decode(String.self, forKey: .kind)) ?? "manual"
         description = try? c.decodeIfPresent(String.self, forKey: .description)
         count = (try? c.decodeIfPresent(Int.self, forKey: .count)) ?? 0
+        signature = (try? c.decodeIfPresent(String.self, forKey: .signature)) ?? nil
+        coverSource = ((try? c.decodeIfPresent(String.self, forKey: .coverSource)) ?? nil)
+            ?? "automatic"
         coverThumbnailURL = try? c.decodeIfPresent(String.self, forKey: .coverThumbnailURL)
         coverThumbnails = (try? c.decodeIfPresent([String].self, forKey: .coverThumbnails)) ?? []
     }

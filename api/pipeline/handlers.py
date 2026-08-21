@@ -113,3 +113,26 @@ def _sync_bookmark_states(db, canonical_id: int) -> None:
        .update({Bookmark.processing_state: cc.processing_state},
                synchronize_session=False))
     db.commit()
+
+
+@handler("collection.cover")
+def handle_collection_cover(payload, db):
+    """Choose a Collection's cover.
+
+    A background job on purpose. Selection makes external image-search requests
+    and one model call, which is exactly the kind of work that must never
+    happen while somebody is waiting for a screen to draw. Reading collections
+    performs neither; this runs after a rebuild and writes the result.
+
+    Idempotent: `select_cover` re-checks `needs_reselection` itself, so a
+    duplicate or replayed job is a no-op rather than a second search.
+    """
+    from ..models import Collection
+    from ..services import collection_covers as cover_svc
+
+    collection_id = int(payload.get("collection_id") or 0)
+    coll = db.query(Collection).filter(Collection.id == collection_id).first()
+    if coll is None:
+        return {"status": "gone"}
+    return cover_svc.select_cover(db, coll, user_id=coll.user_id,
+                                  force=bool(payload.get("force")))

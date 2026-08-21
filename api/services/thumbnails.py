@@ -105,13 +105,25 @@ def cached_path_for(source_url: str, *, platform: Optional[str] = None) -> Optio
     return None
 
 
-def fetch(url: str, *, platform: Optional[str] = None, timeout: float = 12.0
+def fetch(url: str, *, platform: Optional[str] = None, timeout: float = 12.0,
+          allowed_hosts: Optional[tuple] = None,
+          user_agent: Optional[str] = None
           ) -> Tuple[Optional[bytes], Optional[str]]:
     """Download an image. Returns (bytes, content_type) or (None, None).
 
     Never raises: a dead thumbnail is an expected, ordinary outcome.
+
+    `allowed_hosts` narrows or redirects the SSRF allowlist — Collection covers
+    come from licensed image sources rather than social CDNs, so they pass their
+    own list rather than widening the platform one for everybody.
     """
     headers = dict(_HEADERS)
+    if user_agent:
+        # Wikimedia's policy requires a descriptive, identifying agent and
+        # rate-limits generic browser strings with a 429. Sending a real one is
+        # both the documented requirement and simple good manners toward a
+        # free service.
+        headers["User-Agent"] = user_agent
     referer = _REFERERS.get((platform or "").lower())
     if referer:
         headers["Referer"] = referer
@@ -121,8 +133,9 @@ def fetch(url: str, *, platform: Optional[str] = None, timeout: float = 12.0
         # public IP only, redirects re-validated at every hop.
         from ..net_guard import PLATFORM_IMAGE_HOSTS, UnsafeURL, safe_get
 
+        hosts = allowed_hosts if allowed_hosts is not None else PLATFORM_IMAGE_HOSTS
         try:
-            response, _final = safe_get(url, allowed_hosts=PLATFORM_IMAGE_HOSTS,
+            response, _final = safe_get(url, allowed_hosts=hosts,
                                         headers=headers, timeout=timeout, stream=True)
         except UnsafeURL as e:
             logger.warning("refused image fetch: %s (%s)", e, url[:96])
@@ -160,7 +173,9 @@ def store(data: bytes, *, source_url: str, platform: Optional[str],
 
 
 def mirror_to_storage(url: Optional[str], *, namespace: str = "thumbnails",
-                      platform: Optional[str] = None) -> Optional[tuple]:
+                      platform: Optional[str] = None,
+                      allowed_hosts: Optional[tuple] = None,
+                      user_agent: Optional[str] = None) -> Optional[tuple]:
     """Fetch an image and put it in durable object storage.
 
     Returns `(storage_key, public_url)` or None.
@@ -183,7 +198,9 @@ def mirror_to_storage(url: Optional[str], *, namespace: str = "thumbnails",
     if storage.exists(probe):
         return probe, storage.url(probe)
 
-    data, content_type = fetch(url, platform=platform)
+    data, content_type = fetch(url, platform=platform,
+                               allowed_hosts=allowed_hosts,
+                               user_agent=user_agent)
     if not data:
         return None
 
@@ -205,7 +222,9 @@ def mirror(url: Optional[str], *, platform: Optional[str] = None) -> Optional[st
     """
     if not url or is_local(url):
         return None
-    data, content_type = fetch(url, platform=platform)
+    data, content_type = fetch(url, platform=platform,
+                               allowed_hosts=allowed_hosts,
+                               user_agent=user_agent)
     if not data:
         return None
     try:

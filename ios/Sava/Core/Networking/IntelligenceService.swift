@@ -177,6 +177,94 @@ struct IntelligenceService {
             body: Body(bookmark_ids: bookmarkIDs)))
     }
 
+    /// `PATCH /api/collections/{id}` — rename.
+    ///
+    /// Renaming an automatic collection makes it the user's: the server flips
+    /// it to manual so no later rebuild can rename it back.
+    @discardableResult
+    func renameCollection(id: Int, name: String) async throws -> Data {
+        try await client.send(Endpoint.json(
+            "api/collections/\(id)", method: .patch, body: ["name": name]))
+    }
+
+    /// `DELETE /api/collections/{id}`
+    ///
+    /// For an automatic collection the server also records the rejection, so
+    /// the grouping is not rediscovered and recreated on the next rebuild.
+    @discardableResult
+    func deleteCollection(id: Int) async throws -> Data {
+        try await client.send(Endpoint(path: "api/collections/\(id)", method: .delete))
+    }
+
+    /// `DELETE /api/collections/{id}/items/{bookmarkID}` — remove one item, and
+    /// remember the removal when the collection is automatic.
+    @discardableResult
+    func removeFromCollection(collectionID: Int, bookmarkID: Int) async throws -> Data {
+        try await client.send(Endpoint(
+            path: "api/collections/\(collectionID)/items/\(bookmarkID)", method: .delete))
+    }
+
+    /// `GET /api/collections/{id}/cover/suggestions`
+    ///
+    /// The only collection call that performs image search, and it runs only
+    /// when the user opens Change Cover. Listing and opening collections stay
+    /// free of search and inference.
+    func coverSuggestions(collectionID: Int) async throws -> CoverSuggestions {
+        try await client.send(Endpoint(
+            path: "api/collections/\(collectionID)/cover/suggestions",
+            method: .get, timeout: 45))
+    }
+
+    /// `PUT /api/collections/{id}/cover` — install a cover the user picked.
+    @discardableResult
+    func setCover(collectionID: Int, imageURL: String? = nil,
+                  bookmarkID: Int? = nil, source: String) async throws -> Data {
+        struct Body: Encodable {
+            let image_url: String?
+            let bookmark_id: Int?
+            let source: String
+        }
+        return try await client.send(Endpoint.json(
+            "api/collections/\(collectionID)/cover", method: .put,
+            body: Body(image_url: imageURL, bookmark_id: bookmarkID, source: source)))
+    }
+
+    /// `POST /api/collections/{id}/cover/upload` — a photo from the user's device.
+    @discardableResult
+    func uploadCover(collectionID: Int, jpeg: Data) async throws -> Data {
+        let (endpoint, contentType) = Endpoint.multipart(
+            "api/collections/\(collectionID)/cover/upload",
+            fileField: "file", fileName: "cover.jpg", mimeType: "image/jpeg",
+            fileData: jpeg)
+        var request = endpoint
+        request.contentTypeOverride = contentType
+        request.timeout = 60
+        return try await client.send(request)
+    }
+
+    /// `DELETE /api/collections/{id}/cover` — hand choice back to Sava.
+    @discardableResult
+    func resetCover(collectionID: Int) async throws -> Data {
+        try await client.send(Endpoint(
+            path: "api/collections/\(collectionID)/cover", method: .delete,
+            timeout: 60))
+    }
+
+    /// `GET /api/resurfacing` — older saves worth another look.
+    func resurfacing(limit: Int = 8) async throws -> [ResurfacedSave] {
+        struct Wrapper: Decodable { let items: [ResurfacedSave] }
+        let wrapper: Wrapper = try await client.send(Endpoint(
+            path: "api/resurfacing", method: .get,
+            query: [URLQueryItem(name: "limit", value: String(limit))]))
+        return wrapper.items
+    }
+
+    /// `POST /api/bookmarks/{id}/opened` — fire-and-forget; feeds resurfacing.
+    func markOpened(bookmarkID: Int) async {
+        _ = try? await client.send(Endpoint(
+            path: "api/bookmarks/\(bookmarkID)/opened", method: .post))
+    }
+
     /// Rebuilds automatic collections from the user's own save patterns.
     @discardableResult
     func rebuildCollections() async throws -> Data {

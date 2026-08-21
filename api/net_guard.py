@@ -45,6 +45,21 @@ PLATFORM_IMAGE_HOSTS: Tuple[str, ...] = (
     "licdn.com", "twimg.com", "redd.it", "redditmedia.com", "pinimg.com",
 )
 
+# Hosts that serve rights-cleared editorial imagery for Collection covers.
+#
+# Deliberately separate from `PLATFORM_IMAGE_HOSTS` rather than merged into it.
+# These two lists authorise different things for different reasons — one is
+# "social CDNs whose thumbnails we mirror", the other is "licensed image
+# sources we may publish a cover from" — and collapsing them would silently
+# widen both. Every host here publishes machine-readable licence metadata.
+COVER_IMAGE_HOSTS: Tuple[str, ...] = (
+    "wikimedia.org", "wikipedia.org", "wikimedia.commons",
+    "openverse.org", "openverse.engineering",
+    "flickr.com", "staticflickr.com",
+    "stocksnap.io", "rawpixel.com", "nappy.co",
+    "smithsonianmag.com", "si.edu",
+)
+
 SHORT_LINK_HOSTS: Tuple[str, ...] = (
     "tiktok.com", "vm.tiktok.com", "vt.tiktok.com",
     "youtu.be", "youtube.com",
