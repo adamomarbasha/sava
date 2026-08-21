@@ -26,6 +26,7 @@ from .models import (
     CollectionItem, ContentTranscript, ContentUnderstanding,
 )
 from .services import collections as coll_svc
+from .services import account as account_svc
 from .services import ask_suggestions as ask_suggest
 from .services import intelligence, retrieval
 
@@ -822,6 +823,49 @@ async def resolve_screenshot(
 
 
 # ─── Ops / cost telemetry ────────────────────────────────────────────────────
+
+class DeleteAccountIn(BaseModel):
+    """Deletion is irreversible, so it asks for the password again.
+
+    Not security theatre: the token is long-lived and stored in the Keychain, so
+    an unlocked phone is enough to use the app. Re-entering the password is the
+    difference between "someone picked up your phone" and "you meant this".
+    """
+    password: str
+    confirm: str = ""
+
+
+@router.delete("/api/account")
+def delete_account(body: DeleteAccountIn,
+                   current_user: dict = Depends(get_current_user),
+                   db: Session = Depends(get_db)):
+    """Erase this account. Required by App Store Guideline 5.1.1(v).
+
+    Content shared with other users survives; see `api/services/account.py` for
+    where that boundary sits and why.
+    """
+    from .auth import verify_password
+
+    if not verify_password(body.password, current_user.get("password_hash") or ""):
+        raise HTTPException(status_code=401, detail="Incorrect password")
+    if body.confirm and body.confirm.strip().upper() != "DELETE":
+        raise HTTPException(status_code=400, detail="Confirmation text did not match")
+
+    report = account_svc.delete_account(db, current_user["id"])
+    return {
+        "deleted": True,
+        "rows_removed": report.deleted,
+        "shared_content_removed": report.canonical_deleted,
+        "shared_content_kept_for_others": report.canonical_retained,
+    }
+
+
+@router.get("/api/account/export")
+def export_account(current_user: dict = Depends(get_current_user),
+                   db: Session = Depends(get_db)):
+    """Everything Sava holds about this user, as JSON."""
+    return account_svc.export_account(db, current_user["id"])
+
 
 @router.get("/api/me/usage")
 def my_usage(current_user: dict = Depends(get_current_user),
