@@ -58,17 +58,20 @@ final class LibraryViewModel: ObservableObject {
         }
     }
 
-    /// Pull-to-refresh, with a floor on how fast it may finish.
+    /// Pull-to-refresh.
     ///
-    /// A local API answers in ~40ms, and a refresh control that is dismissed
-    /// that quickly does not get a chance to animate closed — it snaps, and on
-    /// a `ScrollView` it can leave its own height behind as a band of empty
-    /// space above the content. Holding it open briefly is both the fix and the
-    /// better feel: the gesture reads as having done something.
+    /// Deliberately just the load. An earlier version held the refresh control
+    /// open for a 650ms floor, on the theory that a control dismissed too
+    /// quickly "snaps and leaves its own height behind" — that was treating the
+    /// symptom. The height was left behind because the scroll view's content
+    /// height was an estimate, not because the control closed too fast; see the
+    /// note on the VStack in `LibraryView`. Holding the spinner open only
+    /// widened the window in which a layout change could race the retraction.
+    ///
+    /// `load` already refuses to clear an on-screen library when a refresh
+    /// fails, so nothing here can collapse the content height mid-gesture.
     func refresh(_ service: BookmarkService) async {
-        async let work: Void = load(service)
-        async let floor: Void = Task.sleep(for: .milliseconds(650))
-        _ = await (work, try? floor)
+        await load(service)
     }
 
     func setFilter(_ platform: Platform?) {

@@ -48,10 +48,18 @@ enum DevFlags {
     /// player activation, release, prefetch — follow from it.
     static var shortFormAdvance: Int { Int(env["SAVA_DEV_SHORTFORM_ADVANCE"] ?? "") ?? 0 }
 
+    /// SAVA_DEV_REFRESH = n — runs the Library's refresh action n times in a
+    /// row. There is no way to synthesise a pull gesture against a simulator
+    /// from the command line, so this exercises the half that *can* be driven:
+    /// whether repeated refresh completions disturb the scroll container's
+    /// resting position.
+    static var refreshRuns: Int { Int(env["SAVA_DEV_REFRESH"] ?? "") ?? 0 }
+
     /// SAVA_DEV_SCROLL = bottom — opens long screens scrolled to the end, so the
     /// lower half of a design can be captured without driving the UI.
     static var scrollToBottom: Bool { env["SAVA_DEV_SCROLL"] == "bottom" }
     #else
+    static var refreshRuns: Int { 0 }
     static var shortFormAdvance: Int { 0 }
     static var initialTab: String? { nil }
     static var searchQuery: String? { nil }

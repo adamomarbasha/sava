@@ -19,24 +19,8 @@ struct LibraryView: View {
 
     var body: some View {
         ScrollView {
-            // Nothing in here may animate its own height.
-            //
-            // This is the root of the pull-to-refresh gap. `refreshable` owns
-            // the scroll view's content offset while the refresh control
-            // retracts; if the content's height *animates* during that
-            // retraction — which is exactly when it did, because the state
-            // switch, the filter row and the grid all changed at the moment the
-            // refresh finished — the scroll view is settling against a target
-            // that is still moving, and it stops short, leaving a band of empty
-            // space at the top.
-            //
-            // The fix is to make the content height a pure function of the
-            // data: it still changes when items arrive, but instantaneously, so
-            // retraction always has a stable target to settle against. An
-            // earlier attempt moved the filter row out into a `safeAreaInset`,
-            // which fixed the height but displaced the large navigation title —
-            // the row belongs in the scroll content, it just must not animate.
-            LazyVStack(alignment: .leading, spacing: Space.l) {
+            VStack(alignment: .leading, spacing: Space.l) {
+                masthead
                 filterRow
                 content
             }
@@ -45,9 +29,55 @@ struct LibraryView: View {
         }
         .devScrollAnchor()
         .background(SavaColor.ground)
-        .navigationTitle("Library")
-        .navigationBarTitleDisplayMode(.large)
+        // ── The pull-to-refresh gap, fixed at the mechanism ──────────────
+        //
+        // The title is drawn in the scroll content, and the navigation bar is
+        // given nothing to lay out. That is the fix, and it is deliberately
+        // blunt.
+        //
+        // Every earlier attempt treated the *content*: dropping implicit
+        // animations, swapping LazyVStack for VStack, removing an artificial
+        // delay. Each helped and none of them held, because the gap was never
+        // in the content. It was in the large title. `refreshable` owns the
+        // scroll view's top inset while the control retracts, and a large title
+        // derives its own height from that same offset; when the two disagree
+        // mid-retraction the bar keeps the extra height and nothing ever takes
+        // it back. That is the band of empty space above "Library".
+        //
+        // A large title cannot desync from a scroll offset it is not reading.
+        // With `.inline` and an empty title the bar has no height of its own to
+        // get wrong, and the masthead is just text in a VStack — it scrolls
+        // because the content scrolls, which is the only behaviour there is.
+        //
+        // Cost: the system's title-collapse animation is gone. Worth it. It was
+        // the source of a bug that came back three times.
+        .navigationTitle("")
+        .navigationBarTitleDisplayMode(.inline)
         .toolbar {
+            // Scroll lives in the bar's leading slot: it is a mode change for
+            // the whole screen, which is what a leading bar item is for, and it
+            // no longer competes with the filters for the same row.
+            ToolbarItem(placement: .topBarLeading) {
+                if let label = scrollEntryLabel {
+                    Button {
+                        Haptics.tap()
+                        openScrollFeed()
+                    } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: "play.fill")
+                                .font(.system(size: 10, weight: .black))
+                            Text("Scroll")
+                                .font(.system(size: 14, weight: .semibold))
+                        }
+                        .foregroundStyle(SavaColor.onAccent)
+                        .padding(.horizontal, 11)
+                        .padding(.vertical, 6)
+                        .background(SavaColor.accent, in: Capsule())
+                    }
+                    .buttonStyle(.pressable)
+                    .accessibilityLabel(label)
+                }
+            }
             ToolbarItem(placement: .topBarTrailing) {
                 Button {
                     Haptics.tap()
@@ -72,6 +102,7 @@ struct LibraryView: View {
         .tint(SavaColor.primary)
         .refreshable { await model.refresh(service) }
         .task { await model.loadIfNeeded(service) }
+        .task { await devHammerRefresh() }
         // The swipe feed is whatever the library is showing right now, filter
         // included — so opening a video from a filtered view swipes through
         // that filter, not through everything.
@@ -90,6 +121,18 @@ struct LibraryView: View {
         }
     }
 
+    /// The screen's title, drawn as content rather than as a navigation bar
+    /// large title. See the note on `navigationBarTitleDisplayMode` above.
+    private var masthead: some View {
+        Text("Library")
+            .font(.system(size: 34, weight: .heavy))
+            .tracking(Tracking.tight)
+            .foregroundStyle(SavaColor.primary)
+            .screenPadding()
+            .padding(.top, Space.xs)
+            .accessibilityAddTraits(.isHeader)
+    }
+
     // MARK: Filters
 
     /// Only shown when the library actually spans more than one platform. A
@@ -98,18 +141,6 @@ struct LibraryView: View {
         if model.availablePlatforms.count > 1 {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: Space.s) {
-                    // The short-form entry point lives here rather than as its
-                    // own button or a new section, because the filter row is
-                    // already the place where "which part of my library am I
-                    // looking at" is decided — and that is exactly what choosing
-                    // a feed is. It names what it will open, so there is no
-                    // separate "Scroll TikToks" and "Scroll Shorts" control to
-                    // find, and it is simply absent when the current selection
-                    // has nothing that plays.
-                    if let label = scrollEntryLabel {
-                        ScrollEntryChip(title: label) { openScrollFeed() }
-                    }
-
                     SavaChip(title: "All", count: model.all.count,
                              selected: model.selectedPlatform == nil) {
                         model.setFilter(nil)
@@ -117,7 +148,8 @@ struct LibraryView: View {
                     ForEach(model.availablePlatforms) { platform in
                         SavaChip(title: platform.displayName,
                                  count: model.count(for: platform),
-                                 selected: model.selectedPlatform == platform) {
+                                 selected: model.selectedPlatform == platform,
+                                 platform: platform) {
                             model.setFilter(platform)
                         }
                     }
@@ -150,6 +182,21 @@ struct LibraryView: View {
         shortForm.openFeed(scrollable, source: source)
     }
 
+    /// DEBUG-only. Compiled to nothing in Release.
+    private func devHammerRefresh() async {
+        #if DEBUG
+        let runs = DevFlags.refreshRuns
+        guard runs > 0 else { return }
+        for i in 1...runs {
+            await model.refresh(service)
+            NSLog("[sava refresh] run %d/%d items=%d state=%@",
+                  i, runs, model.visible.count, String(describing: model.state))
+            try? await Task.sleep(nanoseconds: 400_000_000)
+        }
+        NSLog("[sava refresh] done")
+        #endif
+    }
+
     // MARK: States
 
     @ViewBuilder private var content: some View {
@@ -177,9 +224,15 @@ struct LibraryView: View {
                     message: "Clear the filter to see your whole library.",
                     actionTitle: "Show all") { model.setFilter(nil) }
             } else {
-                MediaGrid(bookmarks: model.visible) { bookmark in
-                    Task { await model.delete(bookmark, using: service) }
-                }
+                // Labelled, not trailing. `MediaGrid` gained an `onRemove`
+                // parameter after `onDelete`, and an unlabelled trailing
+                // closure binds to the *last* closure parameter — so this had
+                // silently become the collection-removal handler, and the
+                // library's Delete action was showing "Remove from collection".
+                MediaGrid(bookmarks: model.visible,
+                          onDelete: { bookmark in
+                              Task { await model.delete(bookmark, using: service) }
+                          })
                 .screenPadding()
             }
         }

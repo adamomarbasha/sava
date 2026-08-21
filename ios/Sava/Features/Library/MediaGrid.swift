@@ -1,13 +1,36 @@
 import SwiftUI
 
-/// The two-column masonry every media surface uses — library, search, inside a
-/// collection.
+/// The two-column media grid every media surface uses — library, search, inside
+/// a collection.
 ///
 /// Cards have no border, no shadow and no container. The image *is* the card and
-/// the caption sits directly on the page beneath it, so the only structure on
-/// screen comes from the grid's rhythm. That rhythm is what makes deterministic
-/// aspect ratios matter: with them, two columns of mixed TikTok and YouTube read
-/// as a designed page; without them, as a pile.
+/// the caption sits directly on the page beneath it.
+///
+/// **The problem this layout exists to solve.** The library is roughly 60%
+/// landscape YouTube and 40% vertical short-form, and at the same width those
+/// two shapes differ in height by more than 2x. Put one of each in a row and the
+/// row must size to the taller, leaving a hole about 120pt deep under the
+/// shorter — which is what made the grid look full of ugly gaps.
+///
+/// Two obvious fixes were tried and rejected:
+///
+///   * **Crop everything to one ratio.** Removes the gaps, but a 16:9 YouTube
+///     thumbnail cropped to 4:5 loses a third of the frame.
+///   * **Pack the columns independently (masonry).** Removes the gaps by
+///     construction, but each column has to be its own `LazyVStack`, and two
+///     lazy stacks estimate the height of their unrealised content separately.
+///     Scrolling to the end left one column rendered and the other blank.
+///
+/// What actually works is to stop mixing shapes *within a row*. Items are
+/// grouped so each row holds two cards of the same shape: a vertical row is two
+/// 4:5 cards, a landscape row is two 16:9 cards. Every row is then exactly as
+/// tall as its contents, so there is no dead space anywhere, both cards in a row
+/// share a baseline, and each platform keeps its natural proportions.
+///
+/// The cost, stated plainly: order becomes *near*-chronological rather than
+/// strictly chronological. An item waits only until the next item of the same
+/// shape arrives — usually one or two positions — so recency still reads
+/// correctly while the page stops looking broken.
 struct MediaGrid: View {
     let bookmarks: [Bookmark]
     var onDelete: ((Bookmark) -> Void)? = nil
@@ -18,24 +41,39 @@ struct MediaGrid: View {
 
     @EnvironmentObject private var shortForm: ShortFormContext
 
-    /// Column assignment is computed from *relative* card heights — aspect ratio
-    /// plus a caption allowance, both expressed in column widths. Because the
-    /// ratio is fixed by us, this needs no measurement, no `GeometryReader`, and
-    /// no second layout pass. That is what keeps the two `LazyVStack`s lazy, so
-    /// a library of thousands only builds the rows on screen.
-    private var columns: [[Bookmark]] {
-        var columns: [[Bookmark]] = [[], []]
-        var heights: [CGFloat] = [0, 0]
-        for bookmark in bookmarks {
-            let index = heights[0] <= heights[1] ? 0 : 1
-            columns[index].append(bookmark)
-            heights[index] += 1 / MediaRatio.forPlatform(bookmark.platform) + captionAllowance
-        }
-        return columns
+    /// Two equal columns, one gutter, cells pinned to the top of their row.
+    private var columns: [GridItem] {
+        [GridItem(.flexible(), spacing: Space.gutter, alignment: .top),
+         GridItem(.flexible(), spacing: Space.gutter, alignment: .top)]
     }
 
-    /// Title, meta line and the gap below, as a fraction of column width.
-    private let captionAllowance: CGFloat = 0.34
+    /// Reordered so that each row holds two cards of the same shape.
+    ///
+    /// Items are emitted as soon as they can be paired with the previous item of
+    /// their own shape, which keeps the sequence as close to the original order
+    /// as pairing allows. Any odd one out at the end is emitted last rather than
+    /// dropped.
+    private var paired: [Bookmark] {
+        var vertical: [Bookmark] = []
+        var landscape: [Bookmark] = []
+        var out: [Bookmark] = []
+        out.reserveCapacity(bookmarks.count)
+
+        for bookmark in bookmarks {
+            if MediaRatio.forItem(bookmark) < 1 {
+                vertical.append(bookmark)
+                if vertical.count == 2 { out.append(contentsOf: vertical); vertical.removeAll() }
+            } else {
+                landscape.append(bookmark)
+                if landscape.count == 2 { out.append(contentsOf: landscape); landscape.removeAll() }
+            }
+        }
+        // At most one of each can be left over. They go last, and are the only
+        // place a mixed row can occur.
+        out.append(contentsOf: vertical)
+        out.append(contentsOf: landscape)
+        return out
+    }
 
     /// A card, plus — for anything that plays — a small affordance that opens
     /// the viewer directly.
@@ -54,9 +92,10 @@ struct MediaGrid: View {
             .buttonStyle(.pressable)
 
             if bookmark.isShortForm {
+                // Mirrors the thumbnail's box exactly, so the glyph always
+                // lands on the image rather than drifting onto the caption.
                 Color.clear
-                    .aspectRatio(MediaRatio.forPlatform(bookmark.platform),
-                                 contentMode: .fit)
+                    .aspectRatio(MediaRatio.forItem(bookmark), contentMode: .fit)
                     .allowsHitTesting(false)
                     .overlay(alignment: .bottomLeading) {
                         PlayAffordance { shortForm.open(bookmark) }
@@ -84,14 +123,9 @@ struct MediaGrid: View {
     }
 
     var body: some View {
-        HStack(alignment: .top, spacing: Space.gutter) {
-            ForEach(Array(columns.enumerated()), id: \.offset) { _, column in
-                LazyVStack(spacing: Space.row) {
-                    ForEach(column) { bookmark in
-                        cell(for: bookmark)
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .top)
+        LazyVGrid(columns: columns, alignment: .leading, spacing: Space.row) {
+            ForEach(paired) { bookmark in
+                cell(for: bookmark)
             }
         }
     }
@@ -103,21 +137,30 @@ struct SaveCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: Space.s) {
-            MediaThumbnail(bookmark: bookmark)
+            // Vertical media (TikTok, Instagram, Shorts) all share 4:5;
+            // ordinary YouTube keeps its natural 16:9. The picture is cropped
+            // to fill its box, never stretched — `MediaImage`'s grid fit is
+            // already `.fill`, which scales to fill and clips.
+            MediaThumbnail(bookmark: bookmark, ratio: MediaRatio.forItem(bookmark))
 
             VStack(alignment: .leading, spacing: 3) {
                 Text(bookmark.displayTitle)
                     .font(SavaType.mediaTitle)
                     .foregroundStyle(SavaColor.primary)
-                    .lineLimit(2)
+                    // Reserves two lines whether or not the title needs them,
+                    // so a one-line and a two-line card are the same height and
+                    // every row in the grid has the same rhythm. Reserving
+                    // lines rather than hardcoding a height keeps this correct
+                    // under Dynamic Type.
+                    .lineLimit(2, reservesSpace: true)
                     .multilineTextAlignment(.leading)
-                    .fixedSize(horizontal: false, vertical: true)
 
                 Text(bookmark.gridMetaLine)
                     .font(SavaType.meta)
                     .foregroundStyle(SavaColor.tertiary)
                     .lineLimit(1)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
         .contentShape(Rectangle())
         .accessibilityElement(children: .combine)
@@ -131,26 +174,27 @@ struct SaveCard: View {
 struct MediaGridSkeleton: View {
     var rows: Int = 3
 
-    private let ratios: [CGFloat] = [
-        MediaRatio.portrait, MediaRatio.landscape, MediaRatio.landscape,
-        MediaRatio.portrait, MediaRatio.portrait, MediaRatio.landscape,
-    ]
+    private var columns: [GridItem] {
+        [GridItem(.flexible(), spacing: Space.gutter, alignment: .top),
+         GridItem(.flexible(), spacing: Space.gutter, alignment: .top)]
+    }
 
     var body: some View {
-        HStack(alignment: .top, spacing: Space.gutter) {
-            ForEach(0..<2, id: \.self) { column in
-                VStack(spacing: Space.row) {
-                    ForEach(0..<rows, id: \.self) { row in
-                        VStack(alignment: .leading, spacing: Space.s) {
-                            Skeleton()
-                                .aspectRatio(ratios[(column * rows + row) % ratios.count],
-                                             contentMode: .fit)
-                            Skeleton(cornerRadius: 4).frame(height: 12)
-                            Skeleton(cornerRadius: 4).frame(width: 90, height: 10)
-                        }
+        // Same shape-paired rhythm as the real grid: rows are homogeneous, so
+        // the placeholder occupies the geometry the content will.
+        LazyVGrid(columns: columns, alignment: .leading, spacing: Space.row) {
+            ForEach(0..<(rows * 2), id: \.self) { index in
+                VStack(alignment: .leading, spacing: Space.s) {
+                    Skeleton()
+                        .aspectRatio((index / 2) % 2 == 0 ? MediaRatio.portrait
+                                                          : MediaRatio.landscape,
+                                     contentMode: .fit)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Skeleton(cornerRadius: 4).frame(height: 12)
+                        Skeleton(cornerRadius: 4).frame(height: 12)
+                        Skeleton(cornerRadius: 4).frame(width: 90, height: 10)
                     }
                 }
-                .frame(maxWidth: .infinity, alignment: .top)
             }
         }
         .accessibilityHidden(true)
