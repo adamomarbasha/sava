@@ -91,6 +91,8 @@ struct AskView: View {
     /// bubble immediately so the conversation never appears to swallow input.
     @State private var pending: String?
     @State private var showHistory = false
+    @State private var suggestions: [AskSuggestion] = []
+    @State private var loadingSuggestions = false
     /// A stable id for the pending block so the scroll view can follow it.
     private let pendingAnchor = "pending"
 
@@ -154,6 +156,7 @@ struct AskView: View {
             .environmentObject(session)
         }
         .task {
+            await loadSuggestions()
             guard turns.isEmpty, let seed = DevFlags.askQuestion else { return }
             ask(seed)
         }
@@ -420,72 +423,33 @@ struct AskView: View {
     // MARK: Opening state
 
     private var opening: some View {
-        VStack(alignment: .leading, spacing: Space.l) {
-            Text(scope.prompt)
-                .font(SavaType.lede)
-                .foregroundStyle(SavaColor.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-
-            VStack(spacing: 0) {
-                ForEach(suggestions, id: \.self) { suggestion in
-                    Button {
-                        Haptics.tap()
-                        ask(suggestion)
-                    } label: {
-                        HStack(spacing: Space.m) {
-                            Text(suggestion)
-                                .font(SavaType.callout)
-                                .foregroundStyle(SavaColor.primary)
-                                .multilineTextAlignment(.leading)
-                                .fixedSize(horizontal: false, vertical: true)
-                            Spacer(minLength: Space.s)
-                            Image(systemName: "arrow.up.right")
-                                .font(.system(size: 11, weight: .semibold))
-                                .foregroundStyle(SavaColor.tertiary)
-                        }
-                        .frame(minHeight: 48)
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .hairline()
-                }
-            }
-        }
-        .padding(.top, Space.s)
+        AskOpeningView(lede: scope.prompt,
+                       suggestions: suggestions,
+                       isLoading: loadingSuggestions,
+                       onPick: { ask($0) },
+                       onShuffle: { Task { await loadSuggestions() } })
     }
 
-    /// A few short openers, in the language a person would actually use.
+    /// Opening questions, fetched per open from the server.
     ///
-    /// For an item they are drawn from what Sava managed to extract, so a recipe
-    /// offers recipe questions rather than a fixed list. They disappear the
-    /// moment the conversation starts — suggestions are a way in, not furniture.
-    private var suggestions: [String] {
-        switch scope {
-        case .library:
-            return ["What did I add this week?",
-                    "Find that video about…",
-                    "What restaurants do I have?"]
-
-        case .collection(let collection):
-            return ["What's in \(collection.name)?",
-                    "Summarise this",
-                    "What should I try first?"]
-
-        case .save:
-            switch understanding?.contentType {
-            case "recipe":
-                return ["What are the ingredients?", "Walk me through it"]
-            case "restaurant", "travel":
-                return ["Where is this?", "What did they recommend?"]
-            case "product", "shopping", "fashion", "beauty":
-                return ["What's in this?", "What's the verdict?"]
-            case "tutorial", "educational", "coding":
-                return ["Summarise this", "Explain this more deeply"]
-            case "fitness":
-                return ["What's the workout?", "What do I need for it?"]
-            default:
-                return ["Summarise this", "What are they talking about?"]
-            }
+    /// They are generated from this user's actual saves — creators they return
+    /// to, topics that recur, collections they named — so a suggestion is a
+    /// question the library can genuinely answer, and a different set is offered
+    /// each time. See `api/services/ask_suggestions.py` for how the candidates
+    /// are built and why an empty library correctly yields none.
+    private func loadSuggestions() async {
+        guard turns.isEmpty, pending == nil else { return }
+        loadingSuggestions = true
+        defer { loadingSuggestions = false }
+        do {
+            suggestions = try await intelligence.askSuggestions(
+                scope: scope.threadScope,
+                collectionID: { if case .collection(let c) = scope { return c.id }; return nil }(),
+                bookmarkID: scope.threadBookmarkID)
+        } catch {
+            // Silent by design: suggestions are an optional way in, and an
+            // error where an invitation should be is worse than a bare field.
+            suggestions = []
         }
     }
 

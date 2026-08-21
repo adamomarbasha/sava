@@ -113,6 +113,28 @@ struct IntelligenceService {
         return response.results
     }
 
+    /// `GET /api/ask/suggestions` — opening questions built from this user's own
+    /// library, so they are answerable and differ between opens.
+    ///
+    /// Failure is not surfaced: suggestions are an optional way in, and an error
+    /// banner over an empty conversation would be worse than simply not offering
+    /// any. The caller treats an empty array and a thrown error identically.
+    func askSuggestions(scope: String, collectionID: Int? = nil,
+                        bookmarkID: Int? = nil, limit: Int = 4) async throws -> [AskSuggestion] {
+        struct Response: Decodable { let suggestions: [AskSuggestion] }
+        var query = [URLQueryItem(name: "scope", value: scope),
+                     URLQueryItem(name: "limit", value: String(limit))]
+        if let collectionID {
+            query.append(URLQueryItem(name: "collection_id", value: String(collectionID)))
+        }
+        if let bookmarkID {
+            query.append(URLQueryItem(name: "bookmark_id", value: String(bookmarkID)))
+        }
+        let response: Response = try await client.send(
+            Endpoint(path: "api/ask/suggestions", method: .get, query: query))
+        return response.suggestions
+    }
+
     // MARK: Collections
 
     func collections() async throws -> [SavaCollection] {

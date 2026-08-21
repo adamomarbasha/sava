@@ -24,6 +24,7 @@ from .models import (
     CollectionItem, ContentTranscript, ContentUnderstanding,
 )
 from .services import collections as coll_svc
+from .services import ask_suggestions as ask_suggest
 from .services import intelligence, retrieval
 
 logger = logging.getLogger(__name__)
@@ -215,6 +216,27 @@ class AskSavaIn(BaseModel):
     thread_id: Optional[int] = None
     # When present, the question is answered from this collection alone.
     collection_id: Optional[int] = None
+
+
+@router.get("/api/ask/suggestions")
+def ask_suggestions(scope: str = Query("library"),
+                    collection_id: Optional[int] = Query(None),
+                    bookmark_id: Optional[int] = Query(None),
+                    limit: int = Query(4, ge=1, le=6),
+                    current_user: dict = Depends(get_current_user),
+                    db: Session = Depends(get_db)):
+    """Opening questions for Ask, generated from this user's own library.
+
+    Deliberately unseeded, so reopening Ask offers different ways in. Ownership
+    is enforced inside the service — a collection or bookmark id belonging to
+    someone else yields no suggestions rather than an error, since this is a
+    hint endpoint and a 404 here would leak which ids exist.
+    """
+    if scope not in ("library", "collection", "save"):
+        scope = "library"
+    return ask_suggest.suggest(db, user_id=current_user["id"], scope=scope,
+                               collection_id=collection_id, bookmark_id=bookmark_id,
+                               limit=limit)
 
 
 @router.post("/api/ask")
