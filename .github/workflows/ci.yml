@@ -1,0 +1,140 @@
+name: CI
+
+# Deliberately one workflow with three jobs rather than several overlapping
+# tools. The point is that a red result blocks a merge, not that every possible
+# check runs.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  # A new push supersedes an in-flight run on the same ref.
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  hygiene:
+    name: Repository hygiene
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Refuse databases, env files and user media
+        run: |
+          # These have all reached this repository before. A rule in .gitignore
+          # does not untrack what is already tracked, so this checks the actual
+          # index rather than trusting the ignore file.
+          fail=0
+          check() {
+            found=$(git ls-files | grep -E "$1" || true)
+            if [ -n "$found" ]; then
+              echo "::error::$2"
+              echo "$found" | sed 's/^/    /'
+              fail=1
+            fi
+          }
+          check '\.(db|sqlite|sqlite3)$'          "Database files must never be committed"
+          check '(^|/)\.env$'                     ".env must never be committed"
+          check 'static/thumbnails/.*\.(jpg|jpeg|png|webp|heic)$' \
+                                                  "User-derived media must never be committed"
+          check '(^|/)\.DS_Store$'                ".DS_Store must never be committed"
+          exit $fail
+
+      - name: Scan the diff for secrets
+        run: |
+          # Cheap and specific: provider key shapes and private keys. Not a
+          # replacement for a real scanner, but it catches the paste-accident.
+          base="${{ github.event.pull_request.base.sha || github.event.before }}"
+          range="HEAD"
+          if [ -n "$base" ] && git cat-file -e "$base" 2>/dev/null; then range="$base..HEAD"; fi
+          if git diff "$range" -- . ':!*.lock' ':!*.png' \
+             | grep -nE '^\+.*(AIza[A-Za-z0-9_-]{25,}|sk-[A-Za-z0-9]{20,}|-----BEGIN [A-Z ]*PRIVATE KEY-----)'; then
+            echo "::error::A secret-shaped string was added"
+            exit 1
+          fi
+          echo "no secret-shaped strings added"
+
+  backend:
+    name: Backend tests (PostgreSQL + pgvector)
+    runs-on: ubuntu-latest
+
+    services:
+      # pgvector is required, not optional: ContentEmbedding declares a `vector`
+      # column, so the schema cannot even be created without it. Running CI on
+      # SQLite would be green about the wrong database — which is exactly how
+      # three pgvector bugs survived in this repository.
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: sava
+          POSTGRES_PASSWORD: sava
+          POSTGRES_DB: sava_suite
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      ENVIRONMENT: test
+      # The whole suite against Postgres, plus a second database for the
+      # Postgres-only tests: they build their own schema, and sharing one
+      # database makes create_all(checkfirst=True) skip creating it.
+      SAVA_TEST_DATABASE_URL: postgresql://sava:sava@localhost:5432/sava_suite
+      SAVA_TEST_POSTGRES_URL: postgresql://sava:sava@localhost:5432/sava_pgtest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: Create the second test database
+        run: |
+          PGPASSWORD=sava psql -h localhost -U sava -d sava_suite \
+            -c 'CREATE DATABASE sava_pgtest;'
+
+      - name: Compile check
+        run: python -m compileall -q api
+
+      - name: Tests
+        run: python -m pytest tests/ -q
+
+      - name: Postgres tests must not have been skipped
+        run: |
+          # The failure mode this guards: SAVA_TEST_POSTGRES_URL goes missing,
+          # tests/test_postgres.py quietly skips, and CI stays green while the
+          # concurrency and pgvector paths are never exercised.
+          out=$(python -m pytest tests/test_postgres.py -q 2>&1 | tail -3)
+          echo "$out"
+          echo "$out" | grep -q "skipped" && { echo "::error::Postgres tests skipped"; exit 1; }
+          echo "$out" | grep -q "passed" || { echo "::error::Postgres tests did not run"; exit 1; }
+
+      - name: Security tests must exist and pass
+        run: python -m pytest tests/test_security.py tests/test_config.py -q
+
+  ios:
+    name: iOS build
+    runs-on: macos-15
+    # Not required to merge: an Xcode/runtime image change on GitHub's side
+    # should not block a backend fix. It still tells us when the app stops
+    # compiling.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build for simulator
+        run: |
+          xcodebuild -project ios/Sava.xcodeproj -scheme Sava \
+            -sdk iphonesimulator -configuration Debug \
+            -destination 'generic/platform=iOS Simulator' \
+            build CODE_SIGNING_ALLOWED=NO | tail -20
