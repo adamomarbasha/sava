@@ -6,6 +6,7 @@ import SwiftUI
 /// not a page of cards. The one thing worth explaining — how to put Sava on the
 /// Action Button — gets a sentence, and everything else is a row.
 struct ProfileView: View {
+    @AppStorage(AppTheme.storageKey) private var themeRaw = AppTheme.dark.rawValue
     let user: User
 
     @EnvironmentObject private var session: SessionStore
@@ -19,6 +20,7 @@ struct ProfileView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: Space.xxl) {
                 identity
+                appearance
                 libraryStats
                 captureSection
                 #if DEBUG
@@ -48,7 +50,23 @@ struct ProfileView: View {
         }
     }
 
+    private var appearance: some View {
+        VStack(alignment: .leading, spacing: Space.m) {
+            SectionHeader(text: "Appearance")
+            AppearancePicker(selection: Binding(
+                get: { AppTheme(rawValue: themeRaw) ?? .dark },
+                set: { themeRaw = $0.rawValue }))
+        }
+    }
+
     private var identity: some View {
+        HStack(alignment: .top, spacing: Space.l) {
+            SavaMark(size: 52)
+            identityText
+        }
+    }
+
+    private var identityText: some View {
         VStack(alignment: .leading, spacing: Space.xs) {
             Text(user.email)
                 .font(SavaType.title)

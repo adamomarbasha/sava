@@ -10,6 +10,22 @@ import SwiftUI
 struct RootView: View {
     @EnvironmentObject private var session: SessionStore
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @AppStorage(AppTheme.storageKey) private var themeRaw = AppTheme.dark.rawValue
+
+    /// Dark remains the default — the palette and every contrast ratio were
+    /// authored against ink — but it is now a default rather than a lock.
+    private var theme: AppTheme {
+        #if DEBUG
+        // A launch-environment override, so a screenshot pass can pin the
+        // appearance without driving Settings by hand. Same seam as
+        // SAVA_DEV_TAB, and it is compiled out of Release.
+        if let forced = ProcessInfo.processInfo.environment["SAVA_DEV_APPEARANCE"],
+           let theme = AppTheme(rawValue: forced) {
+            return theme
+        }
+        #endif
+        return AppTheme(rawValue: themeRaw) ?? .dark
+    }
 
     var body: some View {
         ZStack {
@@ -35,6 +51,9 @@ struct RootView: View {
                 }
             }
         }
+        // The user's appearance preference. `nil` for Automatic, which hands
+        // the decision back to iOS — see the note in AppTheme.
+        .preferredColorScheme(theme.colorScheme)
         .animation(Motion.respecting(Motion.standard, reduceMotion), value: session.phase)
         .task { await session.restore() }
     }
