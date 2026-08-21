@@ -18,9 +18,11 @@ enum SavaAppearance {
         let standard = UINavigationBarAppearance()
         standard.configureWithTransparentBackground()
         standard.largeTitleTextAttributes = [
-            .font: UIFont.systemFont(ofSize: 33, weight: .bold),
-            // Tight, the way the wordmark is set. Stock large titles are looser.
-            .kern: -0.9,
+            // Heavier and tighter than stock. On a dark ground a semibold
+            // large title looks thin; heavy plus negative tracking is what
+            // makes it read as a masthead rather than as a heading.
+            .font: UIFont.systemFont(ofSize: 34, weight: .heavy),
+            .kern: -1.1,
             .foregroundColor: UIColor.label,
         ]
         standard.titleTextAttributes = [
