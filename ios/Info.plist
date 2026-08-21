@@ -2,10 +2,26 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<!-- DEBUG BUILDS ONLY. Release uses Info-Release.plist, which has no ATS
+	     exception and no local address. See ios/Sava/Core/Networking/AppConfig.swift. -->
+
+	<!-- Where a development build talks to. Override per-machine with the
+	     SAVA_API_BASE environment variable in the scheme, or edit this line.
+	     A LAN IP such as http://192.168.1.227:8000 is valid here and is the
+	     right way to test against a Mac from a physical phone. -->
+	<key>SAVA_API_BASE_URL</key>
+	<string>http://localhost:8000</string>
+
+	<!-- Permits http to local-network hosts only. It does NOT allow arbitrary
+	     cleartext to the public internet, and it is absent from the Release
+	     plist entirely. -->
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
+
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Sava uses photos you choose to set a collection cover.</string>
 </dict>
 </plist>

@@ -2,7 +2,9 @@ version: '3.8'
 
 services:
   db:
-    image: postgres:16-alpine
+    # pgvector, not plain postgres: search stores embeddings in a vector
+    # column and `CREATE EXTENSION vector` fails on the stock image.
+    image: pgvector/pgvector:pg16
     environment:
       POSTGRES_DB: sava
       POSTGRES_USER: sava_user

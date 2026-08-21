@@ -23,7 +23,7 @@ from .transcript_service import get_youtube_transcript, get_available_transcript
 from .comment_service import youtube_comment_service
 from .tiktok_comment_service import tiktok_service
 from .rate_limiter import rate_limiter
-from .config import API_DIR, ASYNC_SAVE, PIPELINE_VERSION
+from .config import API_DIR, ASYNC_SAVE, ENVIRONMENT, PIPELINE_VERSION
 from .migrations import run_migrations
 from .routes_intelligence import router as intelligence_router
 from .routes_playback import router as playback_router
@@ -59,23 +59,42 @@ STATIC_DIR = API_DIR / "static"
 
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000", 
-        "http://127.0.0.1:3000", 
-        "http://localhost:3001", 
-        "http://127.0.0.1:3001", 
-        "http://localhost:3002", 
-        "http://127.0.0.1:3002",
-        "http://localhost:3003", 
-        "http://127.0.0.1:3003"
-    ],
-    allow_origin_regex=r"http://(localhost|127\.0\.0\.1):\d+",
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# CORS.
+#
+# The iOS app is unaffected either way — native apps do not send Origin and
+# browsers are the only thing CORS governs — so this exists for the web client
+# and for anything else that runs in a browser later.
+#
+# In development the loopback regex stays, because that is what a local Next.js
+# dev server needs. In production the wildcard regex is dropped entirely and
+# only origins named in SAVA_CORS_ORIGINS are allowed: shipping
+# `http://localhost:*` to a public server means any page on any developer's
+# machine can make credentialed requests against real accounts.
+_cors_origins = [
+    origin.strip()
+    for origin in os.getenv("SAVA_CORS_ORIGINS", "").split(",")
+    if origin.strip()
+]
+_is_production = ENVIRONMENT.lower() not in ("development", "dev", "test", "testing")
+
+if _is_production:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_cors_origins,          # empty is valid: no browser client yet
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+        allow_headers=["Authorization", "Content-Type"],
+    )
+    logger.info("CORS: production mode, %d allowed origin(s)", len(_cors_origins))
+else:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_cors_origins or ["http://localhost:3000"],
+        allow_origin_regex=r"http://(localhost|127\.0\.0\.1):\d+",
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
 class BookmarkIn(BaseModel):
     url: HttpUrl
@@ -340,12 +359,18 @@ async def create_bookmark(
         # Fast path: no network I/O in the request handler. Expensive work is
         # queued and shared across every user who saves the same content.
         if ASYNC_SAVE:
-            from .services.save import DuplicateSave, create_save
+            from .services.save import (
+                DuplicateSave, UnsupportedURL, create_save,
+            )
             try:
                 return create_save(db, url=url, user_id=current_user["id"],
                                    note=b.note, title=_clean_title(b.title))
             except DuplicateSave as e:
                 raise HTTPException(status_code=409, detail=str(e))
+            except UnsupportedURL as e:
+                # 422, not 500: the request was well-formed and the answer is
+                # "that is not a post", which the client can act on.
+                raise HTTPException(status_code=422, detail=str(e))
 
         result = await add_bookmark(url, current_user["id"], db)
         
@@ -400,7 +425,17 @@ def serialize_bookmark(bookmark, cc=None):
         "title": bookmark.title or (cc.title if cc else None),
         "author": bookmark.author or (
             (cc.creator_name or cc.creator_handle) if cc else None),
-        "thumbnail_url": bookmark.thumbnail_url or (cc.thumbnail_url if cc else None),
+        # The canonical's mirrored copy wins whenever there is one.
+        #
+        # The bookmark row caches a thumbnail from whenever that user saved the
+        # item, which may be a long-dead CDN URL or a path written by a since
+        # removed ingestor. Once the canonical has been mirrored into object
+        # storage that copy is the durable one, and preferring the per-user
+        # cache means every user keeps seeing the broken image the mirror was
+        # created to fix.
+        "thumbnail_url": ((cc.thumbnail_url if (cc and cc.thumbnail_stored_key) else None)
+                          or bookmark.thumbnail_url
+                          or (cc.thumbnail_url if cc else None)),
         # The caption. For TikTok/Instagram the title *is* the caption, so the
         # client shows this only when it adds something.
         "description": bookmark.description or (cc.description if cc else None),

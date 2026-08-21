@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- ══════════════════════════════════════════════════════════════════════
+	     THE ONE LINE TO CHANGE BEFORE SHIPPING.
+
+	     Replace the sentinel below with Sava's deployed HTTPS API origin, e.g.
+	         <string>https://api.sava.app</string>
+
+	     It must be https and must not be a local or private address. The
+	     "Validate API configuration" build phase fails the Release build while
+	     the sentinel is still here, so a build pointing at a LAN address cannot
+	     be produced by accident.
+	     ══════════════════════════════════════════════════════════════════════ -->
+	<key>SAVA_API_BASE_URL</key>
+	<string>REPLACE_WITH_PRODUCTION_API_URL</string>
+
+	<!-- No NSAppTransportSecurity key at all.
+	     ATS therefore applies in full: TLS 1.2+, forward secrecy, no cleartext,
+	     no local-networking exception. Adding any exception here needs an App
+	     Store justification, and Sava has no reason to need one. -->
+
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Sava uses photos you choose to set a collection cover.</string>
+</dict>
+</plist>

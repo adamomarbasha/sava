@@ -33,8 +33,19 @@ final class APIClient {
     init(baseURL: URL = AppConfig.apiBaseURL) {
         self.baseURL = baseURL
         let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 20
-        config.waitsForConnectivity = false
+        // Tuned for a remote backend rather than a Mac on the same desk.
+        //
+        // 20s with `waitsForConnectivity = false` is fine over LAN and wrong
+        // over the internet: a managed host that has scaled to zero can take
+        // 20-40s to answer its first request, and a phone moving between cell
+        // and Wi-Fi is briefly offline rather than permanently so. Both showed
+        // up as "login times out" with no way for the user to tell a cold start
+        // apart from a real outage.
+        config.timeoutIntervalForRequest = 45
+        // Queue the request through a short connectivity gap instead of failing
+        // it. Bounded by the resource timeout so nothing hangs indefinitely.
+        config.waitsForConnectivity = true
+        config.timeoutIntervalForResource = 90
         config.requestCachePolicy = .reloadIgnoringLocalCacheData
         self.session = URLSession(configuration: config)
     }

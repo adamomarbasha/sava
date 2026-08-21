@@ -231,3 +231,15 @@ api/bookmarks.db
 *.sqlite3
 *.db-wal
 *.db-shm
+
+# Mirrored media. Generated at runtime from platform CDNs and rebuildable, so
+# it is cache rather than source — and it is other people's imagery.
+api/static/objects/
+api/static/thumbnails/*.jpg
+api/static/thumbnails/*.jpeg
+api/static/thumbnails/*.png
+api/static/media/
+
+# Xcode per-user state: window layout, breakpoints, scheme selection.
+xcuserdata/
+*.xcuserdatad

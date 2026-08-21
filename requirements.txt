@@ -1,0 +1,38 @@
+# Sava API — runtime dependencies.
+#
+# Generated from the packages the API actually imports, pinned to the versions
+# this code was developed and tested against. Without this file nothing can
+# install Sava: there was no manifest of any kind before, which meant the
+# backend could run on exactly one machine.
+#
+# `orjson` and `aiocache` are NOT here on purpose: the only files importing
+# them are api/ingestors/*_optimized.py, which nothing imports. Adding a
+# dependency to satisfy dead code would be a permanent tax for no behaviour.
+#
+# Optional extras deliberately excluded — they are heavy, platform-specific, or
+# only used by paths that are off by default:
+#   faster-whisper / openai-whisper   local ASR (SAVA_ASR_PROVIDER=local)
+#   playwright, instagrapi, TikTokApi  legacy/experimental ingestion paths
+bcrypt==4.3.0
+beautifulsoup4==4.13.5
+email-validator==2.3.0
+google-generativeai==0.8.5
+boto3>=1.34
+fastapi==0.116.1
+httpx==0.28.1
+numpy==2.2.6
+passlib==1.7.4
+pgvector==0.4.1
+Pillow==11.3.0
+psycopg2-binary==2.9.10
+pydantic==2.11.7
+python-dotenv==1.1.1
+python-jose==3.5.0
+python-multipart==0.0.20
+requests==2.32.4
+SQLAlchemy==2.0.43
+starlette==0.47.3
+uvicorn==0.35.0
+youtube-comment-downloader==0.1.78
+youtube-transcript-api==1.2.2
+yt-dlp==2025.9.26
