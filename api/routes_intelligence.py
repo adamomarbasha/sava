@@ -17,6 +17,7 @@ from .ai import telemetry
 from .ai.base import Mode
 from .ai.router import describe_modes, get_router
 from .auth import get_current_user
+from . import quota
 from .authz import owned_bookmark, require_admin
 from .db import get_db
 from .jobs import enqueue, queue_stats
@@ -82,6 +83,7 @@ def processing_status(bookmark_id: int,
 def reprocess(bookmark_id: int, force: bool = Query(False),
               current_user: dict = Depends(get_current_user),
               db: Session = Depends(get_db)):
+    quota.check(db, current_user["id"], "reprocess")
     bm = _owned_bookmark(db, bookmark_id, current_user["id"])
     if not bm.canonical_content_id:
         from .pipeline.ingest import resolve_or_create_canonical
@@ -189,6 +191,7 @@ class AskIn(BaseModel):
 def ask_this(bookmark_id: int, body: AskIn,
              current_user: dict = Depends(get_current_user),
              db: Session = Depends(get_db)):
+    quota.check(db, current_user["id"], "ask")
     bm = _owned_bookmark(db, bookmark_id, current_user["id"])
     if not (body.question or "").strip():
         raise HTTPException(status_code=422, detail="A question is required")
@@ -242,6 +245,7 @@ def ask_suggestions(scope: str = Query("library"),
 def ask_sava(body: AskSavaIn,
              current_user: dict = Depends(get_current_user),
              db: Session = Depends(get_db)):
+    quota.check(db, current_user["id"], "ask")
     if not (body.question or "").strip():
         raise HTTPException(status_code=422, detail="A question is required")
 
@@ -818,6 +822,18 @@ async def resolve_screenshot(
 
 
 # ─── Ops / cost telemetry ────────────────────────────────────────────────────
+
+@router.get("/api/me/usage")
+def my_usage(current_user: dict = Depends(get_current_user),
+             db: Session = Depends(get_db)):
+    """What this user has used against their own limits.
+
+    Deliberately per-user and not admin-gated: someone who hits a ceiling should
+    be able to see why. It reports their own counts and nothing about the
+    installation.
+    """
+    return quota.status_for(db, current_user["id"])
+
 
 @router.get("/api/ops/usage")
 def usage(days: int = Query(30, ge=1, le=365), mine: bool = Query(True),

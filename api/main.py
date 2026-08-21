@@ -32,7 +32,7 @@ from .migrations import run_migrations
 from .routes_intelligence import router as intelligence_router
 from .routes_playback import router as playback_router
 from .pipeline import handlers as _job_handlers  # noqa: F401 (registers job handlers)
-from . import auth_guard
+from . import auth_guard, quota
 from .authz import owned_bookmark
 from .health import health_report
 from .observability import (RequestContextMiddleware, configure_logging,
@@ -454,6 +454,7 @@ async def create_bookmark(
     current_user: dict = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
+    quota.check(db, current_user["id"], "save")
     try:
         url = str(b.url)
 
