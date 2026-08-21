@@ -33,7 +33,24 @@ _IG_HOSTS = {"instagram.com", "www.instagram.com", "m.instagram.com", "instagr.a
 
 _YT_ID = re.compile(r"^[A-Za-z0-9_-]{11}$")
 _TT_NUMERIC = re.compile(r"^\d{6,25}$")
-_IG_CODE = re.compile(r"^[A-Za-z0-9_-]{5,20}$")
+_IG_CODE = re.compile(r"^[A-Za-z0-9_-]{5,30}$")
+
+# Instagram paths that are never a piece of content.
+#
+# This list is load-bearing rather than defensive. Without it `resolve_identity`
+# falls through to hashing the normalized URL, which happily manufactures a
+# canonical row for `instagram.com/explore/` or for somebody's profile — and
+# once that row exists it is indistinguishable from a real post. Clipboard
+# capture makes this a live risk, because whatever the user last copied is very
+# often a profile link.
+_IG_NON_CONTENT_PREFIXES = (
+    "/explore", "/accounts", "/directory", "/developer", "/about", "/legal",
+    "/privacy", "/terms", "/press", "/api", "/challenge", "/oauth", "/ads",
+    "/business", "/creators", "/shop", "/lite", "/emails", "/session",
+    "/web", "/graphql", "/topics", "/locations", "/direct", "/stories",
+)
+_IG_NON_CONTENT_EXACT = {"", "/", "/feed", "/explore", "/reels", "/inbox",
+                         "/notifications", "/your_activity"}
 
 
 @dataclass(frozen=True)
@@ -144,22 +161,81 @@ def _tiktok_media_kind(url: str) -> Optional[str]:
 
 
 def instagram_shortcode(url: str) -> Optional[str]:
+    """The post shortcode, or None when the URL is not a post at all.
+
+    Handles `/p/`, `/reel/`, `/reels/`, `/tv/`, the `/<user>/p/<code>` form
+    Instagram uses in some share sheets, and `/share/...` links.
+    """
     try:
         p = urlparse(url)
     except Exception:
         return None
-    m = re.search(r"/(?:p|reel|reels|tv)/([A-Za-z0-9_-]+)", p.path or "")
+    path = p.path or ""
+
+    # `/share/p/<code>`, `/share/reel/<code>`, and the bare `/share/<token>`
+    # form. The bare token is an opaque redirect key, not a shortcode, so it is
+    # deliberately *not* accepted here — it has to be followed first.
+    m = re.search(r"/share/(?:p|reel|reels|tv)/([A-Za-z0-9_-]+)", path)
+    if m and _IG_CODE.match(m.group(1)):
+        return m.group(1)
+
+    # `/p/<code>`, `/reel/<code>`, `/tv/<code>`, optionally under a username.
+    m = re.search(r"/(?:p|reel|reels|tv)/([A-Za-z0-9_-]+)", path)
     if m and _IG_CODE.match(m.group(1)):
         return m.group(1)
     return None
 
 
+def is_instagram_share_link(url: str) -> bool:
+    """A `/share/...` URL whose real post id is only knowable after a redirect."""
+    try:
+        path = (urlparse(url).path or "").lower()
+    except Exception:
+        return False
+    if not path.startswith("/share"):
+        return False
+    return instagram_shortcode(url) is None
+
+
+def is_instagram_content_url(url: str) -> bool:
+    """Whether this URL names a specific Instagram post.
+
+    False for profiles, the feed, explore, login, and every other page that is
+    not a piece of content. Used by capture to decide whether a clipboard URL is
+    worth sending at all.
+    """
+    if instagram_shortcode(url):
+        return True
+    return is_instagram_share_link(url)
+
+
+def _instagram_is_non_content(url: str) -> bool:
+    try:
+        path = (urlparse(url).path or "").lower().rstrip("/")
+    except Exception:
+        return True
+    if (path or "/") in _IG_NON_CONTENT_EXACT or path == "":
+        return True
+    if any(path.startswith(prefix) for prefix in _IG_NON_CONTENT_PREFIXES):
+        return True
+    # A single path segment is a username: `instagram.com/zendaya`.
+    segments = [seg for seg in path.split("/") if seg]
+    return len(segments) <= 1
+
+
 def _instagram_media_kind(url: str) -> str:
+    """What we know from the URL alone — which is less than it looks.
+
+    A `/reel/` is a video; that much the URL guarantees. A `/p/` may be a single
+    image, a video, or a carousel, and Instagram uses the same path for all
+    three. Previously this returned "carousel" for every `/p/`, which meant a
+    plain photo was routed down the carousel path and a video post was mislabelled
+    from the moment it was saved. "unknown" is the honest answer until a provider
+    says otherwise.
+    """
     path = (urlparse(url).path or "").lower()
     if "/reel" in path or "/tv/" in path:
         return "video"
-    if "/p/" in path:
-        return "carousel"   # may be a single image; ingestion narrows it
     return "unknown"
 
 
@@ -214,11 +290,32 @@ def resolve_identity(url: str, platform_hint: Optional[str] = None) -> Optional[
         code = instagram_shortcode(raw) or instagram_shortcode(normalized)
         if code:
             kind = _instagram_media_kind(raw)
+            # One canonical URL shape for every way of reaching the post, so
+            # `/reel/x`, `/p/x`, `/tv/x` and `/user/p/x` are one row. The path
+            # segment is normalized to `/p/` because Instagram itself serves the
+            # post under `/p/` regardless of how it was reached.
             return ContentIdentity(
                 platform="instagram", platform_content_id=code,
                 canonical_url=f"https://instagram.com/p/{code}",
                 content_key=f"instagram:{code}", media_kind=kind, is_resolvable=True,
             )
+
+        if is_instagram_share_link(raw) or is_instagram_share_link(normalized):
+            # The post id lives behind a redirect. Keyed on the share URL for
+            # now and upgraded by `upgrade_identity` once followed, exactly as
+            # TikTok short links already are.
+            return ContentIdentity(
+                platform="instagram", platform_content_id=None,
+                canonical_url=normalized,
+                content_key=_url_fallback_key("instagram", normalized),
+                media_kind="unknown", is_resolvable=False,
+            )
+
+        # A profile, the feed, explore, a login page. Refusing here is what
+        # stops a stale clipboard entry from becoming a library item that looks
+        # like a post but can never be processed.
+        if _instagram_is_non_content(raw):
+            return None
 
     return ContentIdentity(
         platform=platform, platform_content_id=None, canonical_url=normalized,

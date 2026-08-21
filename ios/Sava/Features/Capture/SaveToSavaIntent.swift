@@ -41,19 +41,34 @@ private enum CaptureRunner {
         let hint = selected.map { PlatformDetector.detect($0) }
         trace.detectedPlatform = (hint ?? .other).rawValue
 
-        // Clipboard is an emergency fallback only, and never touched when the
-        // Shortcut supplied evidence — reading it shows a system paste banner.
+        // Clipboard: the Instagram journey, and only when the on-screen path
+        // did not already produce a *supported content* URL.
+        //
+        // Instagram does not put the post URL on screen, so "Get What's On
+        // Screen" comes back with a profile link, an app-store link, or nothing
+        // — which is why the previous condition (no URL *and* no screenshot)
+        // never fired for Instagram: a screenshot had been taken, so the
+        // clipboard was skipped and the save went down the screenshot path
+        // that cannot establish identity. Whether a screenshot exists is
+        // irrelevant to whether the clipboard holds the real link.
+        //
+        // Whatever is read is validated before use. A clipboard entry has no
+        // provenance: it may be hours old and about something else entirely, so
+        // anything that is not unmistakably a supported post is discarded.
         var clipboard: String?
-        if selected == nil && (screenshot?.isEmpty ?? true) {
+        if !SupportedContentURL.isContent(selected) {
             trace.clipboardChecked = true
+            var raw: String?
             if UIPasteboard.general.hasURLs, let u = UIPasteboard.general.url {
-                clipboard = u.absoluteString
+                raw = u.absoluteString
                 trace.clipboardType = "URL"
             } else if UIPasteboard.general.hasStrings, let s = UIPasteboard.general.string {
-                clipboard = s
+                raw = s
                 trace.clipboardType = "String"
             }
-            trace.clipboardValue = clipboard.map { String($0.prefix(120)) }
+            clipboard = SupportedContentURL.fromClipboard(raw)
+            trace.clipboardValue = (clipboard ?? raw).map { String($0.prefix(120)) }
+            trace.clipboardAccepted = clipboard != nil
         }
 
         let (client, _) = SavaClient.authenticated()

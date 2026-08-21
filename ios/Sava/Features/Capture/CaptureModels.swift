@@ -125,6 +125,85 @@ enum URLSelector {
     }
 }
 
+/// Whether a URL names a specific piece of content Sava can actually ingest.
+///
+/// This is the gate that makes clipboard capture safe. The Instagram journey is
+/// "Copy Link, then press the button", which means Sava reads whatever the user
+/// last copied — and that is very often a profile they were looking at, a story
+/// link, or a URL from an hour ago that has nothing to do with anything. Sending
+/// those to the server would create library items for pages that are not posts.
+///
+/// The rules mirror `api/content/identity.py`. The server still decides; this
+/// only avoids asking it about things that are obviously not content.
+enum SupportedContentURL {
+
+    /// Path prefixes on Instagram that are never a post.
+    private static let instagramNonContent = [
+        "/explore", "/accounts", "/direct", "/stories", "/reels/audio",
+        "/directory", "/about", "/legal", "/privacy", "/terms", "/api",
+        "/challenge", "/oauth", "/ads", "/business", "/shop", "/session",
+    ]
+
+    /// True when this URL identifies one post/video on a supported platform.
+    static func isContent(_ raw: String?) -> Bool {
+        guard let raw, let components = URLComponents(string: raw.trimmingCharacters(
+            in: .whitespacesAndNewlines)),
+            let scheme = components.scheme?.lowercased(),
+            scheme == "http" || scheme == "https",
+            let host = components.host?.lowercased()
+        else { return false }
+
+        let path = components.path.lowercased()
+
+        if host.contains("instagram.com") {
+            if instagramNonContent.contains(where: { path.hasPrefix($0) }) { return false }
+            // `/p/<code>`, `/reel/<code>`, `/tv/<code>`, `/share/p/<code>`,
+            // and the `/<user>/p/<code>` form. A bare `/reels/` with no code is
+            // the feed, not a post.
+            for marker in ["/p/", "/reel/", "/reels/", "/tv/", "/share/"] {
+                guard let range = path.range(of: marker) else { continue }
+                let tail = path[range.upperBound...]
+                    .split(separator: "/", omittingEmptySubsequences: true)
+                if let code = tail.first, code.count >= 5 { return true }
+            }
+            return false
+        }
+
+        if host.contains("tiktok.com") {
+            if host.hasPrefix("vm.") || host.hasPrefix("vt.") { return true }
+            return path.contains("/video/") || path.contains("/photo/")
+        }
+
+        if host.contains("youtube.com") || host.contains("youtu.be") {
+            if host.contains("youtu.be") { return path.count > 1 }
+            if path.hasPrefix("/watch") {
+                return components.queryItems?.contains { $0.name == "v" } ?? false
+            }
+            return path.hasPrefix("/shorts/") || path.hasPrefix("/live/")
+                || path.hasPrefix("/embed/")
+        }
+
+        return false
+    }
+
+    /// A clipboard value worth sending, or nil.
+    ///
+    /// Deliberately strict: a clipboard entry has no provenance at all, so
+    /// anything that is not unmistakably a supported post is discarded rather
+    /// than hopefully forwarded.
+    static func fromClipboard(_ raw: String?) -> String? {
+        guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty else { return nil }
+        // A copied share sheet often carries a caption plus the link.
+        let candidates = raw.split(whereSeparator: { $0.isWhitespace || $0.isNewline })
+            .map(String.init)
+        for candidate in candidates where isContent(candidate) {
+            return candidate
+        }
+        return isContent(raw) ? raw : nil
+    }
+}
+
 enum CaptureError: LocalizedError {
     case notSignedIn
     case saveFailed(String, CapturePipeline.Outcome?)

@@ -178,9 +178,39 @@ class TikTokCommentsProvider(CommentsProvider):
                                 wall_ms=int((time.monotonic() - started) * 1000))
 
 
+class InstagramCommentsProvider(CommentsProvider):
+    """Instagram comments, which in practice means: not without an account.
+
+    The audit found no unauthenticated path. Open Graph carries a comment
+    *count* and no comment text; the endpoints that return threads all require
+    a logged-in session, which is the operator-account dependency this
+    architecture exists to avoid.
+
+    So the provider is real, registered, and reports itself unavailable. That is
+    deliberately not the same as omitting it: `ensure_comments` already treats an
+    unavailable provider as "skip, state = disabled", so the intelligence
+    pipeline runs to completion on caption, OCR and carousel imagery without
+    ever waiting on comments. Registering an honest "no" also means the slot is
+    there the day a licensed provider can fill it, with no other code changing.
+    """
+
+    platform = "instagram"
+
+    @property
+    def available(self) -> bool:
+        from ..config import COMMENTS_INSTAGRAM_ENABLED
+        return COMMENTS_INSTAGRAM_ENABLED
+
+    def fetch(self, content: CanonicalContent, *, limit: int) -> CommentFetch:
+        return CommentFetch(
+            False,
+            error="Instagram exposes no unauthenticated comment source")
+
+
 _PROVIDERS: Dict[str, CommentsProvider] = {
     "youtube": YouTubeCommentsProvider(),
     "tiktok": TikTokCommentsProvider(),
+    "instagram": InstagramCommentsProvider(),
 }
 
 

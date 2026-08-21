@@ -6,11 +6,14 @@ import Foundation
 /// ("Get What's On Screen" → "Get URLs" → count) and passes it in. This decides
 /// what to do with it:
 ///
-///   1. DIRECT URL         — the Shortcut found URLs on screen. Always wins.
-///                           No screenshot is uploaded and no resolver runs.
-///   2. SCREENSHOT RESOLVE — only when the Shortcut found no URL and fell into
-///                           its Otherwise branch.
-///   3. CLIPBOARD          — emergency fallback, not part of the normal journey.
+///   1. DIRECT URL         — the Shortcut found a supported content URL on
+///                           screen. Always wins. YouTube and TikTok.
+///   2. CLIPBOARD LINK     — a validated supported URL the user copied. This is
+///                           the Instagram journey, not an emergency: Instagram
+///                           does not expose the post URL on screen, so Copy
+///                           Link is the only path to real identity.
+///   3. SCREENSHOT RESOLVE — last, and only when no URL exists anywhere. It can
+///                           support enrichment but never establishes identity.
 ///   4. HONEST FAILURE     — describes a Shortcut misconfiguration; never tells
 ///                           the user to go and copy a link.
 ///
@@ -48,7 +51,19 @@ struct CapturePipeline {
                            resolverConfidence: nil, failureMessage: nil)
         }
 
-        // ── 2. Screenshot resolution, only when there is no direct URL.
+        // ── 2. A validated clipboard link.
+        //
+        // Ahead of the screenshot, deliberately. This is the Instagram contract:
+        // the user copied the link, so the clipboard holds *authoritative*
+        // identity, while a screenshot can only ever support a guess. Running
+        // the resolver first would spend a vision call to produce something
+        // weaker than what is already in hand.
+        if let link = CapturedLink(rawURL: clipboard, source: .clipboard) {
+            return Outcome(link: link, path: .clipboardFallback, resolverReason: nil,
+                           resolverConfidence: nil, failureMessage: nil)
+        }
+
+        // ── 3. Screenshot resolution, only when no URL is available anywhere.
         var resolverReason: String?
         var resolverRead: String?
         if let screenshot = input.screenshot, !screenshot.isEmpty {
@@ -71,13 +86,6 @@ struct CapturePipeline {
             case .unavailable(let reason):
                 resolverReason = reason
             }
-        }
-
-        // ── 3. Clipboard fallback.
-        if let link = CapturedLink(rawURL: clipboard, source: .clipboard) {
-            return Outcome(link: link, path: .clipboardFallback,
-                           resolverReason: resolverReason, resolverConfidence: nil,
-                           failureMessage: nil)
         }
 
         // ── 4. Honest, platform-specific failure.

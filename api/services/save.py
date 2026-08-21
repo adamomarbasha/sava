@@ -32,6 +32,16 @@ from ..models import Bookmark, CanonicalContent, ProcessingState, YouTubeDetails
 logger = logging.getLogger(__name__)
 
 
+# Platforms where a canonical identity is mandatory. A generic web link is
+# still a perfectly good bookmark; an Instagram profile masquerading as a post
+# is not.
+_IDENTITY_REQUIRED_PLATFORMS = {"instagram"}
+
+
+class UnsupportedURL(ValueError):
+    """The URL is on a supported platform but does not name a piece of content."""
+
+
 class DuplicateSave(ValueError):
     """The user already saved this URL."""
 
@@ -108,6 +118,17 @@ def create_save(db, *, url: str, user_id: int, note: Optional[str] = None,
         )
 
     cc, created = resolve_or_create_canonical(db, url, platform)
+
+    # A supported platform that yields no identity means the URL is not content
+    # on that platform — an Instagram profile, the explore page, a login screen.
+    # The client filters these before sending, but the server refuses too:
+    # accepting one creates a library item with no canonical row, which can
+    # never be processed, never shows media, and cannot be told apart from a
+    # post whose extraction is merely pending.
+    if cc is None and platform in _IDENTITY_REQUIRED_PLATFORMS:
+        raise UnsupportedURL(
+            "That link doesn't point to a specific post. Open the post, tap "
+            "Share, then Copy Link.")
 
     bookmark = Bookmark(
         user_id=user_id, url=url, platform=platform, raw="{}",
@@ -236,7 +257,13 @@ def create_partial_capture(db, *, user_id: int, platform: str,
     if cc is None:
         cc = CanonicalContent(
             content_key=content_key, platform=platform, canonical_url=url,
-            media_kind="video", title=title, creator_handle=creator or None,
+            # NOT "video". Nothing here observed a video — a screenshot shows a
+            # frame, and calling it a video is the same class of invention the
+            # rest of this architecture refuses. "capture" says what it is: an
+            # unidentified visual record. The `partial:` key namespace already
+            # guarantees it can never merge with a real `instagram:<shortcode>`
+            # row, so a screenshot cannot masquerade as canonical identity.
+            media_kind="capture", title=title, creator_handle=creator or None,
             description=(on_screen or None),
             # PARTIAL, never READY: this record is genuinely incomplete, and
             # marking it ready would hide that from the rest of the system.
@@ -246,7 +273,8 @@ def create_partial_capture(db, *, user_id: int, platform: str,
                 "metadata": {"status": "ok", "detail": "read from screenshot"},
                 "transcript": {"status": "skipped", "detail": "no canonical URL"},
             }),
-            last_error="exact post URL not recoverable from a screenshot",
+            last_error=("unidentified visual capture: a screenshot cannot "
+                        "establish the canonical post URL"),
         )
         db.add(cc)
         db.commit()

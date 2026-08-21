@@ -311,3 +311,91 @@ def run_shortform(db, *, limit: int = 5000) -> Dict[str, Any]:
 
     db.commit()
     return stats
+
+
+# ─── Instagram legacy repair ─────────────────────────────────────────────────
+
+# Titles the removed instaloader ingestor wrote when it had nothing. They look
+# like content and are not, which is worse than an empty title.
+_IG_PLACEHOLDER_TITLES = {
+    "instagram post", "instagram video", "instagram reel", "instagram photo",
+    "untitled", "post", "reel",
+}
+
+
+def run_instagram_repair(db, *, limit: int = 5000) -> Dict[str, Any]:
+    """Undo what the old Instagram ingestor asserted but never knew.
+
+    Three specific kinds of damage, all of which look like real data to
+    everything downstream:
+
+      * placeholder titles ("Instagram Post") written on every failure,
+      * thumbnails stored as bare `/static/thumbnails/...` paths, which no
+        object-storage backend can serve and no mirror job can rescue,
+      * `media_kind="carousel"` inferred from the URL alone, because the old
+        identity rule called every `/p/` a carousel — including plain photos
+        and videos.
+
+    Clearing them is what allows the provider chain to repopulate honestly;
+    leaving them means the gap-filling writes never fire, because the gaps are
+    already full of fiction.
+    """
+    import json as _json
+
+    from ..models import CanonicalContent, ContentAsset
+
+    rows = (db.query(CanonicalContent)
+            .filter(CanonicalContent.platform == "instagram")
+            .limit(limit).all())
+    stats = {"examined": len(rows), "titles_cleared": 0, "thumbnails_cleared": 0,
+             "media_kind_reset": 0, "captures_relabelled": 0}
+
+    for cc in rows:
+        # Screenshot captures are not Instagram posts and must never be
+        # mistakable for one. The key namespace already keeps them apart; this
+        # stops the *record* claiming to be a video it never saw.
+        if (cc.content_key or "").startswith("instagram:partial:"):
+            if cc.media_kind != "capture":
+                cc.media_kind = "capture"
+                stats["captures_relabelled"] += 1
+            continue
+
+        if cc.title and cc.title.strip().lower() in _IG_PLACEHOLDER_TITLES:
+            cc.title = None
+            stats["titles_cleared"] += 1
+
+        thumb = cc.thumbnail_url or ""
+        if thumb.startswith("/static/thumbnails/") and not cc.thumbnail_stored_key:
+            cc.thumbnail_url = None
+            stats["thumbnails_cleared"] += 1
+
+        # The same dead path is cached on every bookmark that pointed here, and
+        # a per-user copy shadows the canonical one when it is served.
+        from ..models import Bookmark as _Bookmark
+        stale = (db.query(_Bookmark)
+                 .filter(_Bookmark.canonical_content_id == cc.id,
+                         _Bookmark.thumbnail_url.like("/static/thumbnails/%"))
+                 .all())
+        for bm in stale:
+            bm.thumbnail_url = None
+            stats["bookmark_thumbnails_cleared"] = \
+                stats.get("bookmark_thumbnails_cleared", 0) + 1
+
+        if cc.media_kind == "carousel":
+            has_children = (db.query(ContentAsset)
+                            .filter(ContentAsset.canonical_content_id == cc.id)
+                            .count())
+            if not has_children:
+                # Asserted from the URL, never verified. "unknown" until a
+                # provider says otherwise.
+                cc.media_kind = "unknown"
+                stats["media_kind_reset"] += 1
+                try:
+                    meta = _json.loads(cc.metadata_json or "{}")
+                except Exception:
+                    meta = {}
+                meta.pop("carousel_count", None)
+                cc.metadata_json = _json.dumps(meta, default=str)[:60000]
+
+    db.commit()
+    return stats

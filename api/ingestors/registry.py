@@ -10,7 +10,6 @@ from .base import BaseIngestor
 from .youtube import YouTubeIngestor
 from .tiktok_api import TikTokApiIngestor 
 from .tiktok import TikTokIngestor 
-from .instagram_api import InstagramApiIngestor
 from .social import (
     InstagramIngestor, 
     TwitterIngestor,
@@ -30,7 +29,8 @@ INGESTORS = [
     YouTubeIngestor(),
     TikTokApiIngestor(), 
     TikTokIngestor(),   
-    InstagramApiIngestor(username=os.getenv("IG_USERNAME"), password=os.getenv("IG_PASSWORD"), session_id=os.getenv("INSTAGRAM_SESSIONID")),
+    # Instagram is handled by api/services/instagram.py, behind a provider
+    # interface, and deliberately not by an operator-account ingestor.
     InstagramIngestor(), 
     TwitterIngestor(),
     LinkedInIngestor(),

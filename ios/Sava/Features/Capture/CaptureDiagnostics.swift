@@ -25,6 +25,9 @@ struct CaptureTrace: Codable, Identifiable {
     var clipboardChecked: Bool = false
     var clipboardType: String?
     var clipboardValue: String?
+    /// Whether the clipboard value survived content-URL validation.
+    /// A checked-but-rejected clipboard is the normal case, not a fault.
+    var clipboardAccepted: Bool = false
 
     // What we decided
     var detectedPlatform: String = "unknown"
