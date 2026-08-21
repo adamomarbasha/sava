@@ -162,8 +162,11 @@ struct SaveDetailView: View {
                 if !understanding.displayKeyPoints.isEmpty && (summaryRevealed || !revealsSummary) {
                     VStack(alignment: .leading, spacing: Space.m) {
                         SectionHeader(text: "Key points")
-                        VStack(alignment: .leading, spacing: Space.s) {
-                            ForEach(understanding.displayKeyPoints, id: \.self) { BulletLine(text: $0) }
+                        VStack(alignment: .leading, spacing: Space.m) {
+                            ForEach(Array(understanding.displayKeyPoints.enumerated()),
+                                    id: \.element) { position, point in
+                                BulletLine(text: point, index: position)
+                            }
                         }
                     }
                     .padding(.top, Space.s)

@@ -84,13 +84,21 @@ struct StructuredSectionView: View {
 /// baseline so long lines still hang correctly.
 struct BulletLine: View {
     let text: String
+    /// Kept so existing call sites compile. It no longer changes the drawing:
+    /// numbered accent tiles were tried here and were simply worse — a column
+    /// of coloured squares beside four short lines reads as decoration, and it
+    /// pulled the eye away from the words, which are the point.
+    var index: Int? = nil
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: Space.m) {
-            Circle()
+            // A hairline rule rather than a dot or a tile. It sits on the text
+            // baseline, takes no colour, and disappears the moment you start
+            // reading — which is what a bullet is for.
+            Rectangle()
                 .fill(SavaColor.tertiary)
-                .frame(width: 3, height: 3)
-                .offset(y: -4)
+                .frame(width: 10, height: 1)
+                .offset(y: -5)
             Text(text)
                 .font(SavaType.callout)
                 .foregroundStyle(SavaColor.secondary)
