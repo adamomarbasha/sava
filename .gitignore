@@ -227,10 +227,17 @@ fast_youtube_endpoint.py
 # checkout/stash/branch-switch silently reverts real user data and schema.
 bookmarks.db
 api/bookmarks.db
+# Catch-all. The two names above were added after those exact files had already
+# been committed; a rule that only lists known filenames does not stop the next
+# one. Any *.db is a local artifact by definition here.
+*.db
 *.sqlite
 *.sqlite3
 *.db-wal
 *.db-shm
+*.db-journal
+*.sql.gz
+*.dump
 
 # Mirrored media. Generated at runtime from platform CDNs and rebuildable, so
 # it is cache rather than source — and it is other people's imagery.

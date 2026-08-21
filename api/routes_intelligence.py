@@ -17,6 +17,7 @@ from .ai import telemetry
 from .ai.base import Mode
 from .ai.router import describe_modes, get_router
 from .auth import get_current_user
+from .authz import owned_bookmark, require_admin
 from .db import get_db
 from .jobs import enqueue, queue_stats
 from .models import (
@@ -38,12 +39,10 @@ def _mode(value: Optional[str]) -> Mode:
         return Mode.AUTO
 
 
-def _owned_bookmark(db: Session, bookmark_id: int, user_id: int) -> Bookmark:
-    bm = (db.query(Bookmark)
-          .filter(Bookmark.id == bookmark_id, Bookmark.user_id == user_id).first())
-    if bm is None:
-        raise HTTPException(status_code=404, detail="Bookmark not found")
-    return bm
+# One definition, in `api/authz.py`. There were two copies of this function and
+# they had already drifted in their error text; a third would have been the one
+# that forgot the filter.
+_owned_bookmark = owned_bookmark
 
 
 # ─── Model picker (provider-neutral) ─────────────────────────────────────────
@@ -822,21 +821,27 @@ async def resolve_screenshot(
 
 @router.get("/api/ops/usage")
 def usage(days: int = Query(30, ge=1, le=365), mine: bool = Query(True),
-          current_user: dict = Depends(get_current_user),
+          current_user: dict = Depends(require_admin),
           db: Session = Depends(get_db)):
+    """Usage telemetry. Admin-only.
+
+    `mine=false` returns installation-wide figures — every user's save volume
+    and spend. It used to be reachable by any authenticated account, which made
+    it a cross-tenant reporting API.
+    """
     return telemetry.summarize(db, user_id=current_user["id"] if mine else None,
                                days=days)
 
 
 @router.get("/api/ops/queue")
-def queue(current_user: dict = Depends(get_current_user),
+def queue(current_user: dict = Depends(require_admin),
           db: Session = Depends(get_db)):
     return telemetry.queue_health(db)
 
 
 @router.get("/api/ops/platforms")
 def platforms(days: int = Query(1, ge=1, le=30),
-              current_user: dict = Depends(get_current_user),
+              current_user: dict = Depends(require_admin),
               db: Session = Depends(get_db)):
     """Per-platform request health, throttle state, and circuit status."""
     return telemetry.platform_health(db, days=days)
@@ -844,7 +849,7 @@ def platforms(days: int = Query(1, ge=1, le=30),
 
 @router.get("/api/ops/extraction")
 def extraction(platform: str = Query("youtube"), days: int = Query(7, ge=1, le=90),
-               current_user: dict = Depends(get_current_user),
+               current_user: dict = Depends(require_admin),
                db: Session = Depends(get_db)):
     """Per-platform extraction health: what each stage actually yields."""
     return telemetry.extraction_health(db, platform=platform, days=days)
@@ -852,7 +857,7 @@ def extraction(platform: str = Query("youtube"), days: int = Query(7, ge=1, le=9
 
 @router.get("/api/ops/economics")
 def economics(days: int = Query(30, ge=1, le=365),
-              current_user: dict = Depends(get_current_user),
+              current_user: dict = Depends(require_admin),
               db: Session = Depends(get_db)):
     """User saves vs unique content processed — the ratio that decides margin."""
     return telemetry.dedup_economics(db, days=days)
@@ -860,7 +865,7 @@ def economics(days: int = Query(30, ge=1, le=365),
 
 @router.get("/api/ops/latency")
 def latency(days: int = Query(7, ge=1, le=90),
-            current_user: dict = Depends(get_current_user),
+            current_user: dict = Depends(require_admin),
             db: Session = Depends(get_db)):
     return telemetry.processing_latency(db, days=days)
 
@@ -869,7 +874,7 @@ def latency(days: int = Query(7, ge=1, le=90),
 def upgrade_pipeline(limit: int = Query(50, ge=1, le=500),
                      target_version: Optional[int] = Query(None),
                      dry_run: bool = Query(True),
-                     current_user: dict = Depends(get_current_user),
+                     current_user: dict = Depends(require_admin),
                      db: Session = Depends(get_db)):
     """Controlled, batched reprocessing of content stuck on an older pipeline.
 
@@ -898,7 +903,7 @@ def upgrade_pipeline(limit: int = Query(50, ge=1, le=500),
 def backfill_canonical(limit: int = Query(200, ge=1, le=1000),
                        dry_run: bool = Query(True),
                        mine: bool = Query(True),
-                       current_user: dict = Depends(get_current_user),
+                       current_user: dict = Depends(require_admin),
                        db: Session = Depends(get_db)):
     """Attach legacy saves to canonical content.
 
@@ -917,7 +922,7 @@ def backfill_canonical(limit: int = Query(200, ge=1, le=1000),
 def backfill_thumbnails(limit: int = Query(200, ge=1, le=1000),
                         dry_run: bool = Query(True),
                         mine: bool = Query(True),
-                        current_user: dict = Depends(get_current_user),
+                        current_user: dict = Depends(require_admin),
                         db: Session = Depends(get_db)):
     """Mirror expiring CDN thumbnails into local storage so they stop vanishing."""
     from .content.backfill import plan_thumbnails, run_thumbnails

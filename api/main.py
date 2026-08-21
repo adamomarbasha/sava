@@ -1,3 +1,5 @@
+import secrets
+
 from fastapi import FastAPI, HTTPException, Depends, status, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -28,6 +30,8 @@ from .migrations import run_migrations
 from .routes_intelligence import router as intelligence_router
 from .routes_playback import router as playback_router
 from .pipeline import handlers as _job_handlers  # noqa: F401 (registers job handlers)
+from . import auth_guard
+from .authz import owned_bookmark
 from .auth import (
     authenticate_user, 
     create_access_token, 
@@ -173,7 +177,10 @@ def health():
     return {"message": "Sava API is running 🚀", "version": "2.0.0"}
 
 @app.post("/auth/register", response_model=dict)
-def register(user: UserRegister, db: Session = Depends(get_db)):
+def register(user: UserRegister, request: Request, db: Session = Depends(get_db)):
+    auth_guard.guard_register(request)
+    auth_guard.record_register(request)
+
     normalized_email = user.email.strip().lower()
     
     is_valid, error_message = validate_email_comprehensive(user.email)
@@ -199,22 +206,54 @@ def register(user: UserRegister, db: Session = Depends(get_db)):
     
     return {"id": new_user.id, "email": new_user.email, "message": "User created successfully"}
 
+# One message for every authentication failure.
+#
+# The previous pair — 404 "Email not found" and 401 "Incorrect password" —
+# turned this endpoint into an account-existence oracle: an attacker could
+# confirm which addresses have Sava accounts without ever guessing a password,
+# which is useful on its own and is the first half of a credential-stuffing run.
+_AUTH_FAILED = "Incorrect email or password"
+
+# A real bcrypt hash of a value nobody can supply, used only to burn the same
+# amount of CPU for an unknown account as for a known one. Computed once at
+# import: hashing per request would itself be a timing difference.
+_DUMMY_PASSWORD_HASH = get_password_hash(secrets.token_urlsafe(32))
+
+
 @app.post("/auth/login", response_model=Token)
-async def login(user: UserLogin):
+async def login(user: UserLogin, request: Request):
     try:
+        # Before any password work, so an attacker over the limit cannot even
+        # make us spend bcrypt time.
+        auth_guard.guard_login(request, user.email)
+
         existing_user = get_user_by_email(user.email)
+
+        # Verify against a real hash even when the account does not exist.
+        #
+        # Identical wording is not enough on its own: returning immediately for
+        # an unknown address answers in about a millisecond while a known one
+        # spends bcrypt's ~100ms, so the *timing* still discloses existence.
+        # Hashing the supplied password against a throwaway hash equalises it.
         if not existing_user:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Email not found"
-            )
-        
-        if not verify_password(user.password, existing_user["password_hash"]):
+            verify_password(user.password, _DUMMY_PASSWORD_HASH)
+            auth_guard.record_login_failure(request, user.email)
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Incorrect password",
+                detail=_AUTH_FAILED,
                 headers={"WWW-Authenticate": "Bearer"},
             )
+
+        if not verify_password(user.password, existing_user["password_hash"]):
+            auth_guard.record_login_failure(request, user.email)
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail=_AUTH_FAILED,
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
+        # Clears the account bucket, so a failed attack cannot strand the owner.
+        auth_guard.record_login_success(request, user.email)
 
         access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
         access_token = create_access_token(
@@ -226,7 +265,9 @@ async def login(user: UserLogin):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Login error: {str(e)}")
+        # No email, no password, no request body — a login exception is exactly
+        # where credentials end up in logs by accident.
+        logger.error("Login error: %s", type(e).__name__)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Internal server error during login"
@@ -240,10 +281,16 @@ def get_me(current_user: dict = Depends(get_current_user)):
         "created_at": current_user["created_at"]
     }
 
-@app.get("/users")
-def list_users(db: Session = Depends(get_db)):
-    users = db.query(User).order_by(User.created_at.desc()).all()
-    return [{"id": u.id, "email": u.email, "created_at": u.created_at} for u in users]
+# `GET /users` was removed here.
+#
+# It returned the id, email and signup date of every account, to anyone, with no
+# authentication — the single largest live data exposure in the codebase. It had
+# no caller: not the iOS app (whose full endpoint list is auth/me, api/bookmarks,
+# api/collections, api/search, api/threads, api/ask, api/resurfacing) and not the
+# web client.
+#
+# It is deleted rather than gated because there is no admin tier to gate it to.
+# When one exists, an admin user listing can be written against it deliberately.
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Intelligence hook
@@ -645,15 +692,6 @@ async def refresh_bookmark_endpoint(
         logger.error(f"Error refreshing bookmark {bookmark_id}: {e}")
         raise HTTPException(status_code=500, detail="Failed to refresh bookmark")
 
-@app.get("/test/instagram-thumbnail")
-async def test_instagram_thumbnail(url: str):
-    return {
-        "url": url,
-        "message": "Instagram URL received",
-        "success": True,
-        "note": "Use POST /bookmarks to actually extract metadata"
-    }
-
 @app.get("/api/thumbnail")
 async def proxy_thumbnail(url: str, platform: Optional[str] = None):
     """Fetch a referer-gated thumbnail on the client's behalf — and keep a copy.
@@ -715,7 +753,8 @@ class TranscriptResponse(BaseModel):
 async def get_transcript_get(
     video_url_or_id: str,
     languages: Optional[str] = None,
-    preserve_formatting: bool = False
+    preserve_formatting: bool = False,
+    current_user: dict = Depends(get_current_user),
 ):
     try:
         logger.info(f"[GET] Fetching transcript for: {video_url_or_id}")
@@ -745,7 +784,8 @@ async def get_transcript_get(
         )
 
 @app.post("/api/transcript", response_model=TranscriptResponse)
-async def get_transcript_post(request: TranscriptRequest):
+async def get_transcript_post(request: TranscriptRequest,
+                              current_user: dict = Depends(get_current_user)):
     try:
         logger.info(f"[POST] Fetching transcript for: {request.video_url_or_id}")
         
@@ -770,7 +810,8 @@ async def get_transcript_post(request: TranscriptRequest):
         )
 
 @app.get("/api/transcript/languages")
-async def get_transcript_languages(video_url_or_id: str):
+async def get_transcript_languages(video_url_or_id: str,
+                                   current_user: dict = Depends(get_current_user)):
     try:
         logger.info(f"Getting available languages for: {video_url_or_id}")
         
@@ -791,7 +832,7 @@ async def get_transcript_languages(video_url_or_id: str):
         )
 
 @app.get("/api/transcript/status")
-async def get_transcript_status():
+async def get_transcript_status(current_user: dict = Depends(get_current_user)):
     try:
         status = rate_limiter.get_status()
         return {
@@ -809,7 +850,8 @@ async def get_transcript_status():
 async def get_transcript_by_id(
     video_id: str,
     languages: Optional[str] = Query(None, description="Comma-separated list of language codes (e.g., 'en,es,fr')"),
-    preserve_formatting: bool = Query(False, description="Whether to preserve original formatting")
+    preserve_formatting: bool = Query(False, description="Whether to preserve original formatting"),
+    current_user: dict = Depends(get_current_user),
 ):
     try:
         lang_list = None
@@ -852,7 +894,15 @@ class CommentResponse(BaseModel):
     total_fetched: Optional[int] = None
 
 @app.post("/api/comments", response_model=CommentResponse)
-async def get_youtube_comments(request: CommentRequest):
+async def get_youtube_comments(request: CommentRequest,
+                               current_user: dict = Depends(get_current_user)):
+    """Fetch comments for a video.
+
+    Authenticated because it spends Sava's YouTube quota and Sava's egress on a
+    caller-supplied video id. There is no ownership check to make — the argument
+    is a YouTube id, not one of our rows — but anonymous access made this a free
+    comment-scraping API pointed at our credentials.
+    """
     try:
         logger.info(f"Fetching comments for: {request.video_url_or_id}")
         
@@ -880,8 +930,15 @@ async def get_youtube_comments(request: CommentRequest):
 async def get_bookmark_comments(
     bookmark_id: int,
     limit: Optional[int] = Query(50, description="Maximum number of comments to return"),
+    current_user: dict = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
+    """Comments stored against one of *your* saves.
+
+    Previously took a raw bookmark id with no authentication and no ownership
+    check, so walking the integers returned other people's saved content.
+    """
+    owned_bookmark(db, bookmark_id, current_user["id"])
     try:
         logger.info(f"Fetching comments for bookmark: {bookmark_id}")
         
@@ -911,8 +968,16 @@ async def save_comments_to_bookmark(
     video_url_or_id: str,
     limit: Optional[int] = Query(50, description="Maximum number of comments to fetch"),
     sort_by: Optional[str] = Query('popular', description="Sort order: 'popular' or 'recent'"),
+    current_user: dict = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
+    """Attach fetched comments to one of *your* saves.
+
+    The worst of the three: unauthenticated, unowned, and a write. Any caller
+    could attach arbitrary text to any user's save, and spend our YouTube quota
+    doing it.
+    """
+    owned_bookmark(db, bookmark_id, current_user["id"])
     try:
         logger.info(f"Saving comments for bookmark {bookmark_id}")
         
