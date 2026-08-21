@@ -3,8 +3,14 @@ import SwiftUI
 /// The signed-in container.
 ///
 /// Four destinations, because the product has four ideas: your saves, the way
-/// they group, finding one, and asking across all of them. Profile lives in the
-/// Library's top bar rather than taking a fifth slot it has not earned.
+/// they group, watching them full screen, and asking across all of them.
+///
+/// Search is deliberately *not* one of them. A tab is for a place you go; search
+/// is something you do to the place you are already in, and it was the only tab
+/// whose screen was empty until you typed. It now lives as a button in the
+/// Library's top bar and opens over whatever you were looking at. Scroll took
+/// the slot it left, which is the better fit for a tab: it is a genuine
+/// destination with its own contents.
 ///
 /// The tab bar is the system's, so every screen inside gets the right bottom
 /// safe area, the right scroll insets and the right scroll-edge behaviour for
@@ -22,7 +28,7 @@ struct AppShell: View {
     @State private var tab: Destination = .library
     @State private var libraryPath = NavigationPath()
     @State private var collectionsPath = NavigationPath()
-    @State private var searchPath = NavigationPath()
+    @State private var scrollPath = NavigationPath()
     @State private var askPath = NavigationPath()
     @State private var devShowProfile = false
     @State private var devShowSave = false
@@ -30,15 +36,16 @@ struct AppShell: View {
     @State private var devAddToBookmark: Bookmark?
     @State private var devTranscriptBookmark: Bookmark?
     @State private var devShowHistory = false
+    @State private var devShowSearch = false
 
     enum Destination: String, CaseIterable, Hashable {
-        case library, collections, search, ask
+        case library, collections, scroll, ask
 
         var title: String {
             switch self {
             case .library:     return "Library"
             case .collections: return "Collections"
-            case .search:      return "Search"
+            case .scroll:      return "Scroll"
             case .ask:         return "Ask"
             }
         }
@@ -47,7 +54,7 @@ struct AppShell: View {
             switch self {
             case .library:     return "square.grid.2x2"
             case .collections: return "rectangle.stack"
-            case .search:      return "magnifyingglass"
+            case .scroll:      return "play.square.stack"
             case .ask:         return "text.bubble"
             }
         }
@@ -77,11 +84,11 @@ struct AppShell: View {
             .tabItem { Label(Destination.collections.title, systemImage: Destination.collections.icon) }
             .tag(Destination.collections)
 
-            NavigationStack(path: $searchPath) {
-                SearchView().savaDestinations()
+            NavigationStack(path: $scrollPath) {
+                ScrollHomeView().savaDestinations()
             }
-            .tabItem { Label(Destination.search.title, systemImage: Destination.search.icon) }
-            .tag(Destination.search)
+            .tabItem { Label(Destination.scroll.title, systemImage: Destination.scroll.icon) }
+            .tag(Destination.scroll)
 
             NavigationStack(path: $askPath) {
                 AskView(scope: .library).savaDestinations()
@@ -118,6 +125,11 @@ struct AppShell: View {
         .sheet(isPresented: $devShowHistory) {
             ChatHistorySheet(scope: "library", bookmarkID: nil) { _ in }
         }
+        .sheet(isPresented: $devShowSearch) {
+            NavigationStack { SearchView() }
+                .environmentObject(library)
+                .environmentObject(shortForm)
+        }
     }
 
     /// Selecting the tab you are already on returns it to its root, the way
@@ -143,7 +155,7 @@ struct AppShell: View {
         switch tab {
         case .library:     libraryPath = NavigationPath()
         case .collections: collectionsPath = NavigationPath()
-        case .search:      searchPath = NavigationPath()
+        case .scroll:      scrollPath = NavigationPath()
         case .ask:         askPath = NavigationPath()
         }
     }
@@ -193,6 +205,9 @@ struct AppShell: View {
         case .history:
             tab = .ask
             devShowHistory = true
+
+        case .search:
+            devShowSearch = true
 
         case .shortForm(let id):
             // Publish a real feed first, so the viewer under test is the same

@@ -20,10 +20,23 @@ import SwiftUI
 @MainActor
 final class ShortPlayerPool: ObservableObject {
 
-    /// Current, next, previous. Three is what paging actually needs: one
-    /// playing, one warmed for the swipe the user is most likely to make, and
-    /// one still holding the page they can flick back to.
-    static let capacity = 3
+    /// Previous, current, and two warmed ahead — plus one slot of headroom so
+    /// arriving at a new page never has to evict before it can create.
+    ///
+    /// Three was the old number and it only warmed a single swipe ahead, which
+    /// left a fast second swipe waiting on a player that did not exist yet.
+    /// Five is still a small, bounded number of decoder sessions; the property
+    /// that matters — exactly one player is ever *playing* — is unchanged.
+    static let capacity = 5
+
+    /// Seconds of video a player reads ahead.
+    ///
+    /// The item being watched is allowed a deeper buffer than one being warmed
+    /// on spec: the first is certain to be needed, and the second is a guess
+    /// paid for in proxied bytes. Enough on a warmed item to start instantly,
+    /// not enough to have downloaded a video the user skips past.
+    static let activeBufferSeconds: Double = 10
+    static let warmBufferSeconds: Double = 4
 
     /// Sound follows the user across items and across sessions, the way it does
     /// in every video app. Muting each new item would be a new decision every
@@ -97,10 +110,15 @@ final class ShortPlayerPool: ObservableObject {
 
         let asset = AVURLAsset(url: url)
         let item = AVPlayerItem(asset: asset)
-        // Short-form is watched start to finish, so a large read-ahead buys
-        // nothing and costs proxied bytes for a swipe that may never happen.
-        item.preferredForwardBufferDuration = 6
+        // Created warm by default. `activate` promotes whichever item the user
+        // actually lands on — a player created for a page two swipes away has
+        // no business reading as far ahead as the one on screen.
+        item.preferredForwardBufferDuration = Self.warmBufferSeconds
         player.replaceCurrentItem(with: item)
+        // A paused player still fills its buffer, which is the whole point of
+        // creating it early: by the time the user swipes here, the first frames
+        // are already in memory and playback starts without a spinner.
+        player.pause()
         player.isMuted = isMuted
         player.actionAtItemEnd = .none
 
@@ -137,9 +155,17 @@ final class ShortPlayerPool: ObservableObject {
             if key == id {
                 entry.lastUsed = .now
                 entry.player.isMuted = isMuted
+                // Promoted: the item on screen is certain to be watched, so it
+                // is allowed to read further ahead than it did while warming.
+                entry.player.currentItem?.preferredForwardBufferDuration =
+                    Self.activeBufferSeconds
                 if entry.player.rate == 0 { entry.player.play() }
-            } else if entry.player.rate != 0 {
-                entry.player.pause()
+            } else {
+                // Demoted back to a warm buffer, so a page the user swiped past
+                // stops pulling bytes it no longer needs.
+                entry.player.currentItem?.preferredForwardBufferDuration =
+                    Self.warmBufferSeconds
+                if entry.player.rate != 0 { entry.player.pause() }
             }
         }
     }

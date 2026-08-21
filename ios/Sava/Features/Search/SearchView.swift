@@ -8,6 +8,7 @@ struct SearchView: View {
     @EnvironmentObject private var library: LibraryViewModel
     @EnvironmentObject private var shortForm: ShortFormContext
     @StateObject private var model = SearchViewModel()
+    @State private var fieldFocused = false
 
     private var bookmarks: BookmarkService { BookmarkService(client: session.api) }
     private var intelligence: IntelligenceService { IntelligenceService(client: session.api) }
@@ -27,9 +28,15 @@ struct SearchView: View {
         .background(SavaColor.ground)
         .navigationTitle("Search")
         .navigationBarTitleDisplayMode(.large)
+        // Focused on appear. Search is now reached by deliberately tapping a
+        // search button, so the intent is already unambiguous — making someone
+        // tap the field as well is a second tap for a decision they made before
+        // the screen existed.
         .searchable(text: $model.query,
+                    isPresented: $fieldFocused,
                     placement: .navigationBarDrawer(displayMode: .always),
                     prompt: "Search your library")
+        .onAppear { fieldFocused = true }
         .onChange(of: model.query) { _, _ in
             model.queryChanged(bookmarks: bookmarks, intelligence: intelligence)
         }

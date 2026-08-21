@@ -23,14 +23,16 @@ struct ShortFormOverlay: View {
 
     var onAsk: () -> Void
     var onMore: () -> Void
-    var onClose: () -> Void
+    /// Nil when the feed is a tab rather than a presented viewer — there is
+    /// nothing to close, and a chevron that dismissed a tab would be a lie.
+    var onClose: (() -> Void)?
     var onToggleMute: () -> Void
 
     var body: some View {
         VStack(spacing: 0) {
             topBar
             Spacer(minLength: 0)
-            bottomBlock
+            bottomRow
         }
         .padding(.top, safeArea.top)
         .padding(.bottom, max(safeArea.bottom, Space.m))
@@ -54,22 +56,33 @@ struct ShortFormOverlay: View {
 
     // MARK: Top
 
+    /// Close only.
+    ///
+    /// Mute and More used to live up here, which put three controls and — in the
+    /// Scroll tab — the lane switcher all in the same strip. They have moved to
+    /// the bottom right, where the thumb already is on a phone this size and
+    /// where they no longer compete with the row that says which feed you are
+    /// looking at.
     private var topBar: some View {
         HStack(alignment: .center, spacing: Space.l) {
-            glyphButton("chevron.down", label: "Close", action: onClose)
-
-            Spacer(minLength: 0)
-
-            HStack(spacing: Space.m) {
-                if showsMute {
-                    glyphButton(isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill",
-                                label: isMuted ? "Unmute" : "Mute", action: onToggleMute)
-                }
-                glyphButton("ellipsis", label: "More", action: onMore)
+            if let onClose {
+                glyphButton("chevron.down", label: "Close", action: onClose)
             }
+            Spacer(minLength: 0)
         }
         .padding(.horizontal, Space.screen)
         .padding(.top, safeArea.top > 0 ? Space.xs : Space.m)
+    }
+
+    /// Mute and More, stacked at the bottom right against the caption.
+    private var sideControls: some View {
+        VStack(spacing: Space.xs) {
+            if showsMute {
+                glyphButton(isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill",
+                            label: isMuted ? "Unmute" : "Mute", action: onToggleMute)
+            }
+            glyphButton("ellipsis", label: "More", action: onMore)
+        }
     }
 
     /// No pill, no circle, no blurred capsule. A white glyph with a shadow is
@@ -149,6 +162,20 @@ struct ShortFormOverlay: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, Space.screen)
         .padding(.bottom, Space.l)
+    }
+
+    /// The caption and the controls share the bottom, aligned on their baseline
+    /// rather than stacked: the caption is variable height, and anchoring the
+    /// buttons to the bottom keeps them in the same place no matter how long the
+    /// title runs.
+    private var bottomRow: some View {
+        HStack(alignment: .bottom, spacing: Space.m) {
+            bottomBlock
+            sideControls
+                .padding(.trailing, Space.screen)
+                // Clear of the progress line, which spans the full width.
+                .padding(.bottom, Space.xl)
+        }
     }
 
     /// A hairline, not a scrubber. The app draws separators at this weight

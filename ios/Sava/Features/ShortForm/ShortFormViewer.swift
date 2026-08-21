@@ -18,6 +18,22 @@ import SwiftUI
 /// whole feed, so opening this on a library of five hundred items costs the
 /// same as opening it on three.
 struct ShortFormViewer: View {
+    /// How this feed is being shown.
+    ///
+    /// The same feed serves two containers now: presented over the library as a
+    /// viewer you close, and hosted directly in the Scroll tab as a place you
+    /// simply are. The difference is small and entirely chrome — a close
+    /// affordance, the status bar, and whether the tab bar is allowed to keep
+    /// its inset — so it is a parameter rather than a second view that would
+    /// have to be kept in sync.
+    enum Chrome {
+        /// Presented full-screen. Has a close control and hides system overlays.
+        case presented
+        /// Lives inside a tab. No close control; the tab bar stays.
+        case embedded
+    }
+
+    var chrome: Chrome = .presented
     @StateObject private var feed: ShortFormFeedModel
     @StateObject private var pool = ShortPlayerPool()
 
@@ -31,7 +47,8 @@ struct ShortFormViewer: View {
     @State private var addToBookmark: Bookmark?
 
     init(bookmarks: [Bookmark], start: Bookmark, source: ShortFormSource,
-         service: PlaybackService) {
+         service: PlaybackService, chrome: Chrome = .presented) {
+        self.chrome = chrome
         _feed = StateObject(wrappedValue: ShortFormFeedModel(
             bookmarks: bookmarks, start: start, source: source, service: service))
     }
@@ -60,7 +77,7 @@ struct ShortFormViewer: View {
                                 pool: pool,
                                 onAsk: { askBookmark = bookmark },
                                 onMore: { moreBookmark = bookmark },
-                                onClose: { finish() }
+                                onClose: chrome == .presented ? { finish() } : nil
                             )
                             .frame(width: geo.size.width, height: geo.size.height)
                             .id(bookmark.id)
@@ -75,9 +92,24 @@ struct ShortFormViewer: View {
             .ignoresSafeArea()
         }
         .background(Color.black.ignoresSafeArea())
-        .statusBarHidden()
-        .preferredColorScheme(.dark)
-        .persistentSystemOverlays(.hidden)
+        // A presented viewer takes the whole screen and hides everything the
+        // system would otherwise draw over it. A tab must not: hiding the
+        // status bar and the home indicator on a screen the user can simply
+        // swipe away from reads as the app having crashed into full screen.
+        .statusBarHidden(chrome == .presented)
+        // Only when presented. `preferredColorScheme` is a *preference*: it
+        // walks up the view tree to the nearest presentation context. Inside a
+        // fullScreenCover that context is the cover, so it dressed the viewer
+        // and nothing else. As a tab, the nearest context is the window — so
+        // once the Scroll tab had been visited it pinned the entire app to
+        // dark and the appearance setting silently stopped working.
+        //
+        // Nothing is lost by dropping it here: the feed paints its own black
+        // ground and its chrome is explicitly white, so it looks identical in
+        // either appearance.
+        .preferredColorScheme(chrome == .presented ? .dark : nil)
+        .persistentSystemOverlays(chrome == .presented ? .hidden : .automatic)
+        .toolbar(.hidden, for: .navigationBar)
         .task { syncToCurrent() }
         .task { await devAdvanceIfRequested() }
         .onChange(of: feed.currentID) { _, _ in syncToCurrent() }
@@ -159,8 +191,12 @@ struct ShortFormViewer: View {
         // But only *fetch* forwards. Creating a player for the previous item
         // when it is not already loaded would spend proxied bandwidth on the
         // less likely gesture; keeping one that already exists costs nothing.
+        //
+        // Forwards now goes two deep rather than one, so a second swipe arriving
+        // straight after the first still finds a player with video already in
+        // its buffer instead of building one from scratch.
         var ensure: [(id: Int, url: URL)] = []
-        for offset in 0...1 {
+        for offset in 0...ShortFormFeedModel.playerLookahead {
             guard let item = feed.bookmark(at: index + offset),
                   let descriptor = feed.descriptor(for: item.id),
                   descriptor.kind == .video, let url = descriptor.url

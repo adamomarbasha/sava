@@ -15,7 +15,7 @@ struct ShortFormPage: View {
 
     var onAsk: () -> Void
     var onMore: () -> Void
-    var onClose: () -> Void
+    var onClose: (() -> Void)?
 
     @State private var progress: Double = 0
     @State private var showPlayGlyph = false

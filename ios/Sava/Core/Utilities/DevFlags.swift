@@ -12,7 +12,7 @@ enum DevFlags {
     #if DEBUG
     private static let env = ProcessInfo.processInfo.environment
 
-    /// SAVA_DEV_TAB = library | collections | search | ask
+    /// SAVA_DEV_TAB = library | collections | scroll | ask
     static var initialTab: String? { env["SAVA_DEV_TAB"] }
 
     /// SAVA_DEV_SEARCH = a query to run automatically on the Search tab.
@@ -27,6 +27,7 @@ enum DevFlags {
     ///   `askThis`           Ask, scoped to the first item
     ///   `transcript`        the transcript sheet for a processed item
     ///   `history`           the Ask conversation history
+    ///   `search`            the search sheet over the library
     ///   `addTo`             the add-to-collection sheet for the first save
     ///   `shortform`         the swipe viewer on the first playable save
     ///   `shortform:<id>`    the swipe viewer opened on a specific save
@@ -92,6 +93,8 @@ enum DevScreen: Equatable {
     case history
     case shortForm(Int?)
     case shortFormInCollection(Int)
+    /// The search sheet, which is no longer a tab.
+    case search
 
     init?(_ raw: String?) {
         guard let raw, !raw.isEmpty else { return nil }
@@ -108,6 +111,7 @@ enum DevScreen: Equatable {
         case "addTo":      self = .addTo
         case "transcript": self = .transcript(argument)
         case "history":    self = .history
+        case "search":     self = .search
         case "shortform":  self = .shortForm(argument)
         case "shortformIn":
             guard let argument else { return nil }

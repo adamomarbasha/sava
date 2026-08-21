@@ -14,6 +14,9 @@ struct LibraryView: View {
     @EnvironmentObject private var shortForm: ShortFormContext
     @State private var showProfile = false
     @State private var showSave = false
+    @State private var showSearch = false
+    @State private var showNewCollection = false
+    @State private var newCollectionName = ""
 
     private var service: BookmarkService { BookmarkService(client: session.api) }
 
@@ -54,41 +57,10 @@ struct LibraryView: View {
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            // Scroll lives in the bar's leading slot: it is a mode change for
-            // the whole screen, which is what a leading bar item is for, and it
-            // no longer competes with the filters for the same row.
+            // Who you are on the left, what you can do on the right — the
+            // arrangement almost every app on the phone already uses, so it
+            // needs no learning.
             ToolbarItem(placement: .topBarLeading) {
-                if let label = scrollEntryLabel {
-                    Button {
-                        Haptics.tap()
-                        openScrollFeed()
-                    } label: {
-                        HStack(spacing: 5) {
-                            Image(systemName: "play.fill")
-                                .font(.system(size: 10, weight: .black))
-                            Text("Scroll")
-                                .font(.system(size: 14, weight: .semibold))
-                        }
-                        .foregroundStyle(SavaColor.onAccent)
-                        .padding(.horizontal, 11)
-                        .padding(.vertical, 6)
-                        .background(SavaColor.accent, in: Capsule())
-                    }
-                    .buttonStyle(.pressable)
-                    .accessibilityLabel(label)
-                }
-            }
-            ToolbarItem(placement: .topBarTrailing) {
-                Button {
-                    Haptics.tap()
-                    showSave = true
-                } label: {
-                    Image(systemName: "plus")
-                        .font(.system(size: 16, weight: .semibold))
-                }
-                .accessibilityLabel("Add a link")
-            }
-            ToolbarItem(placement: .topBarTrailing) {
                 Button {
                     Haptics.tap()
                     showProfile = true
@@ -98,6 +70,18 @@ struct LibraryView: View {
                 }
                 .accessibilityLabel("Profile")
             }
+            ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    Haptics.tap()
+                    showSearch = true
+                } label: {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 16, weight: .semibold))
+                }
+                .accessibilityLabel("Search your library")
+            }
+            // Declared last, so it is the rightmost item in the bar.
+            ToolbarItem(placement: .topBarTrailing) { overflowMenu }
         }
         .tint(SavaColor.primary)
         .refreshable { await model.refresh(service) }
@@ -118,6 +102,30 @@ struct LibraryView: View {
         .sheet(isPresented: $showSave) {
             QuickSaveSheet { bookmark in model.insertSaved(bookmark, service: service) }
                 .environmentObject(session)
+        }
+        // The same screen search always was, now presented over the library
+        // instead of owning a tab. It keeps its own navigation stack so results
+        // can still push a save, and `savaDestinations` is attached inside.
+        .sheet(isPresented: $showSearch) {
+            NavigationStack { SearchView() }
+                .environmentObject(session)
+                .environmentObject(model)
+                .environmentObject(shortForm)
+        }
+        .alert("New collection", isPresented: $showNewCollection) {
+            TextField("Name", text: $newCollectionName)
+            Button("Cancel", role: .cancel) { }
+            Button("Create") { createCollection() }
+        } message: {
+            Text("Sava will suggest saves to put in it.")
+        }
+    }
+
+    private func createCollection() {
+        let name = newCollectionName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return }
+        Task {
+            _ = try? await IntelligenceService(client: session.api).createCollection(name: name)
         }
     }
 
@@ -161,6 +169,58 @@ struct LibraryView: View {
     }
 
     // MARK: Short-form entry
+
+    /// The library's actions, gathered behind one control.
+    ///
+    /// Everything here acts on the library as a whole, which is the test for
+    /// belonging in it — the per-save actions live on the save. Saving a link is
+    /// listed first and given the only filled icon because it is the one thing
+    /// people come to this menu to do; the rest are things they do occasionally
+    /// and should not have to remember a gesture for.
+    private var overflowMenu: some View {
+        Menu {
+            Button {
+                Haptics.tap()
+                showSave = true
+            } label: {
+                Label("Add a link", systemImage: "plus.circle.fill")
+            }
+
+            Button {
+                Haptics.tap()
+                newCollectionName = ""
+                showNewCollection = true
+            } label: {
+                Label("New collection", systemImage: "folder.badge.plus")
+            }
+
+            // Only offered when it would do something. The Scroll tab is the
+            // front door to the viewer; this is the shortcut that keeps the
+            // filter you are already looking at.
+            if scrollable.count >= 2 {
+                Divider()
+                Button {
+                    Haptics.tap()
+                    openScrollFeed()
+                } label: {
+                    Label(scrollEntryLabel ?? "Scroll", systemImage: "play.rectangle.on.rectangle")
+                }
+            }
+
+            Divider()
+
+            Button {
+                Haptics.tap()
+                Task { await model.refresh(service) }
+            } label: {
+                Label("Refresh", systemImage: "arrow.clockwise")
+            }
+        } label: {
+            Image(systemName: "line.3.horizontal")
+                .font(.system(size: 16, weight: .semibold))
+        }
+        .accessibilityLabel("Library menu")
+    }
 
     /// Items in the current selection that can actually play.
     private var scrollable: [Bookmark] { model.visible.filter(\.isShortForm) }

@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 /// Light, dark, or whatever the phone is doing.
 ///
@@ -33,10 +34,10 @@ enum AppTheme: String, CaseIterable, Identifiable {
         }
     }
 
-    /// Nil hands the decision back to the system.
-    var colorScheme: ColorScheme? {
+    /// `.unspecified` hands the decision back to the system.
+    var interfaceStyle: UIUserInterfaceStyle {
         switch self {
-        case .automatic: return nil
+        case .automatic: return .unspecified
         case .light:     return .light
         case .dark:      return .dark
         }
@@ -45,6 +46,46 @@ enum AppTheme: String, CaseIterable, Identifiable {
     /// The stored preference. Read wherever it is needed; written only by the
     /// picker in Profile.
     static let storageKey = "sava.appearance"
+
+    /// Apply the appearance to the whole app, not just the SwiftUI tree.
+    ///
+    /// This used to be `.preferredColorScheme` on the root view, and that was
+    /// the bug behind "it doesn't switch all of the UI". That modifier sets a
+    /// SwiftUI *environment* value, so it reaches SwiftUI views and nothing
+    /// else: the navigation and tab bars, the keyboard, share sheets, context
+    /// menus, alerts, scroll indicators and anything presented in its own
+    /// hosting controller all kept the old appearance until the app was
+    /// relaunched.
+    ///
+    /// `overrideUserInterfaceStyle` on the window sets the *trait collection*
+    /// instead. Every one of those surfaces derives from it, and so does
+    /// SwiftUI's `\.colorScheme` — so this is strictly more coverage through one
+    /// mechanism rather than two mechanisms that can disagree.
+    ///
+    /// The crossfade is the other half of the complaint. Re-resolving every
+    /// dynamic colour in a live tree is not free, and switching without a
+    /// transition shows that work as a visible stutter. Handing the change to
+    /// Core Animation renders both states into one snapshot and dissolves
+    /// between them, which is both smoother and cheaper than animating each
+    /// view.
+    @MainActor
+    static func apply(_ theme: AppTheme, animated: Bool = true) {
+        let windows = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .flatMap(\.windows)
+
+        for window in windows where window.overrideUserInterfaceStyle != theme.interfaceStyle {
+            guard animated, !UIAccessibility.isReduceMotionEnabled else {
+                window.overrideUserInterfaceStyle = theme.interfaceStyle
+                continue
+            }
+            UIView.transition(with: window, duration: 0.28,
+                              options: [.transitionCrossDissolve, .allowAnimatedContent],
+                              animations: {
+                window.overrideUserInterfaceStyle = theme.interfaceStyle
+            })
+        }
+    }
 }
 
 /// The appearance picker.

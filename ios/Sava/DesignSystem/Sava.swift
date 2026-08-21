@@ -119,6 +119,15 @@ enum SavaColor {
     static let accentTint = Color(uiColor: .dynamic(
         light: UIColor(hex: 0x6B7A00), dark: UIColor(hex: 0xD6FF00)))
 
+    /// What sits on an `accentTint` fill.
+    ///
+    /// The inverse of `onAccent`, because `accentTint` is the inverse fill: on
+    /// paper the tint is the darkened citron, so its glyph is white (4.6:1); on
+    /// ink the tint is full citron, so its glyph is ink (17.1:1). Both readable,
+    /// and the mark stays citron-family in both appearances.
+    static let onAccentTint = Color(uiColor: .dynamic(
+        light: UIColor(hex: 0xFFFFFF), dark: UIColor(hex: 0x0A0A0B)))
+
     /// 6.8:1 on paper, 8.7:1 on ink. Exists so that categorical tints have
     /// enough distinct hues not to collapse into each other.
     static let violet = Color(uiColor: .dynamic(
