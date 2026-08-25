@@ -65,19 +65,25 @@ class PlatformStrategy:
         # Capability first, preference second.
         #
         # `vision_mode` answers "would vision help this item?"; the capability
-        # answers "may this deployment read this platform's media at all?".
+        # answers "may this deployment download this platform's media?".
         # Conflating them is what made turning extraction down also turn the
-        # product down. A deployment with media analysis off still gets
-        # transcripts from captions, understanding from text, embeddings, Ask
-        # and Scroll — it just does not open the media itself.
+        # product down. With media analysis off a deployment still gets captions,
+        # understanding from text, embeddings, Ask and Scroll — it just does not
+        # fetch the video.
+        #
+        # The gate is scoped to *video* deliberately. Vision on an image or a
+        # carousel reads frames Sava already mirrored, which involves no platform
+        # access at all — so gating it would remove Instagram understanding for
+        # no safety benefit whatsoever.
         from .. import providers
-        if not providers.media_analysis_allowed(self.name):
-            return False
 
         if self.vision_mode == "never":
             return False
         if media_kind in ("image", "carousel"):
-            return True          # nothing else to go on
+            return True          # already-stored imagery; nothing else to go on
+
+        if not providers.media_analysis_allowed(self.name):
+            return False
         if self.vision_mode == "always":
             return True
         # conditional

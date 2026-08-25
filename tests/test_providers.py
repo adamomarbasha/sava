@@ -124,6 +124,16 @@ class TestWiring:
         assert strategy.wants_vision(visual_dependency=1.0, has_transcript=False,
                                      media_kind="video") is False
 
+    def test_stored_imagery_is_never_gated(self, monkeypatch):
+        """Carousels analyse frames Sava already holds — no platform access."""
+        from api.pipeline.ingest import PlatformStrategy
+        strategy = PlatformStrategy(name="instagram", try_native_captions=False,
+                                    allow_asr=False, vision_mode="conditional",
+                                    asr_max_seconds=900)
+        monkeypatch.setattr(providers, "media_analysis_allowed", lambda p: False)
+        assert strategy.wants_vision(visual_dependency=0.0, has_transcript=False,
+                                     media_kind="carousel") is True
+
     def test_the_vision_stage_still_works_when_allowed(self, monkeypatch):
         from api.pipeline.ingest import PlatformStrategy
         strategy = PlatformStrategy(name="tiktok", try_native_captions=True,
