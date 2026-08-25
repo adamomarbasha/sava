@@ -55,6 +55,20 @@ jobs:
           fi
           echo "no secret-shaped strings added"
 
+  ios-release-config:
+    name: iOS Release configuration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # A standalone script rather than inline heredocs. An indented heredoc
+      # inside a YAML `run:` block does not terminate — the interpreter receives
+      # indented source, raises, and the surrounding `$(...)` yields an empty
+      # string that then passes every check. A silently-passing gate is worse
+      # than no gate.
+      - name: Validate Release configuration
+        run: python3 scripts/check_ios_release.py
+
   backend:
     name: Backend tests (PostgreSQL + pgvector)
     runs-on: ubuntu-latest
