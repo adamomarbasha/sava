@@ -62,6 +62,18 @@ class PlatformStrategy:
 
     def wants_vision(self, *, visual_dependency: float, has_transcript: bool,
                      media_kind: str) -> bool:
+        # Capability first, preference second.
+        #
+        # `vision_mode` answers "would vision help this item?"; the capability
+        # answers "may this deployment read this platform's media at all?".
+        # Conflating them is what made turning extraction down also turn the
+        # product down. A deployment with media analysis off still gets
+        # transcripts from captions, understanding from text, embeddings, Ask
+        # and Scroll — it just does not open the media itself.
+        from .. import providers
+        if not providers.media_analysis_allowed(self.name):
+            return False
+
         if self.vision_mode == "never":
             return False
         if media_kind in ("image", "carousel"):

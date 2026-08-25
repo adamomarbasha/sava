@@ -47,6 +47,8 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Optional, Tuple
 from urllib.parse import urlparse
 
+from .. import providers
+
 logger = logging.getLogger(__name__)
 
 # How long a resolved CDN URL is assumed good for. TikTok's signed URLs last
@@ -465,6 +467,16 @@ def descriptor_for(db, cc, *, user_id: int, base_url: str = "") -> PlaybackDescr
                                   duration_seconds=duration)
 
     if platform == "tiktok":
+        # Proxied playback is a capability, not a constant. It is the one path
+        # that streams platform media through Sava's own infrastructure, so a
+        # deployment must be able to switch it off without losing the rest of
+        # the product — the library, understanding, Ask and collections are all
+        # unaffected, and the page simply says the video opens in TikTok.
+        if not providers.playback_allowed("tiktok", providers.Playback.PROXY):
+            return PlaybackDescriptor(
+                kind="unavailable", poster=poster,
+                reason="Open this in TikTok to watch it.")
+
         expires = int(time.time()) + TOKEN_TTL_SECONDS
         token = sign_token(cc.id, user_id, expires)
         url = f"{base_url.rstrip('/')}/api/playback/{cc.id}/stream?t={token}"
