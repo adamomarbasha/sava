@@ -37,6 +37,7 @@ struct AppShell: View {
     @State private var devTranscriptBookmark: Bookmark?
     @State private var devShowHistory = false
     @State private var devShowSearch = false
+    @State private var devShowDeleteAccount = false
 
     enum Destination: String, CaseIterable, Hashable {
         case library, collections, scroll, ask
@@ -125,6 +126,10 @@ struct AppShell: View {
         .sheet(isPresented: $devShowHistory) {
             ChatHistorySheet(scope: "library", bookmarkID: nil) { _ in }
         }
+        .sheet(isPresented: $devShowDeleteAccount) {
+            NavigationStack { DeleteAccountView() }
+                .environmentObject(session)
+        }
         .sheet(isPresented: $devShowSearch) {
             NavigationStack { SearchView() }
                 .environmentObject(library)
@@ -208,6 +213,9 @@ struct AppShell: View {
 
         case .search:
             devShowSearch = true
+
+        case .deleteAccount:
+            devShowDeleteAccount = true
 
         case .shortForm(let id):
             // Publish a real feed first, so the viewer under test is the same

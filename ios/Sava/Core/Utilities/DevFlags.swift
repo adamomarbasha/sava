@@ -28,6 +28,7 @@ enum DevFlags {
     ///   `transcript`        the transcript sheet for a processed item
     ///   `history`           the Ask conversation history
     ///   `search`            the search sheet over the library
+    ///   `deleteAccount`     the account-deletion screen
     ///   `addTo`             the add-to-collection sheet for the first save
     ///   `shortform`         the swipe viewer on the first playable save
     ///   `shortform:<id>`    the swipe viewer opened on a specific save
@@ -95,6 +96,8 @@ enum DevScreen: Equatable {
     case shortFormInCollection(Int)
     /// The search sheet, which is no longer a tab.
     case search
+    /// The account-deletion screen (App Store 5.1.1(v)).
+    case deleteAccount
 
     init?(_ raw: String?) {
         guard let raw, !raw.isEmpty else { return nil }
@@ -112,6 +115,7 @@ enum DevScreen: Equatable {
         case "transcript": self = .transcript(argument)
         case "history":    self = .history
         case "search":     self = .search
+        case "deleteAccount": self = .deleteAccount
         case "shortform":  self = .shortForm(argument)
         case "shortformIn":
             guard let argument else { return nil }

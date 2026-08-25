@@ -15,6 +15,8 @@ struct ProfileView: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var confirmSignOut = false
+    @State private var exporting = false
+    @State private var exportPayload: SharePayload?
 
     var body: some View {
         ScrollView {
@@ -27,6 +29,7 @@ struct ProfileView: View {
                 debugSection
                 #endif
                 signOut
+                accountSection
             }
             .screenPadding()
             .padding(.top, Space.l)
@@ -42,6 +45,9 @@ struct ProfileView: View {
             }
         }
         .tint(SavaColor.primary)
+        .sheet(item: $exportPayload) { payload in
+            ShareSheet(items: [payload.url])
+        }
         .confirmationDialog("Sign out of Sava?", isPresented: $confirmSignOut) {
             Button("Sign out", role: .destructive) {
                 Haptics.press()
@@ -169,8 +175,71 @@ struct ProfileView: View {
     #endif
 
     private var signOut: some View {
-        SavaButton(title: "Sign out", role: .destructive) {
+        SavaButton(title: "Sign out", role: .secondary) {
             confirmSignOut = true
         }
+    }
+
+    /// Export and deletion.
+    ///
+    /// Placed last and styled quietly: these are the two things nobody wants to
+    /// tap by accident. Deletion is nonetheless a plain, visible control rather
+    /// than something buried — App Store Guideline 5.1.1(v) requires it to be
+    /// findable, and hiding it would be hostile regardless of the rule.
+    private var accountSection: some View {
+        VStack(alignment: .leading, spacing: Space.m) {
+            SectionHeader(text: "Your data")
+
+            Button {
+                Haptics.tap()
+                Task { await exportData() }
+            } label: {
+                HStack(spacing: Space.s) {
+                    Image(systemName: exporting
+                          ? "arrow.down.circle" : "square.and.arrow.up")
+                        .font(.system(size: 13, weight: .semibold))
+                    Text(exporting ? "Preparing…" : "Export my data")
+                        .font(SavaType.callout)
+                    Spacer(minLength: 0)
+                }
+                .foregroundStyle(SavaColor.secondary)
+                .frame(minHeight: 44)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(exporting)
+
+            NavigationLink {
+                DeleteAccountView()
+            } label: {
+                HStack(spacing: Space.s) {
+                    Image(systemName: "trash")
+                        .font(.system(size: 13, weight: .semibold))
+                    Text("Delete account")
+                        .font(SavaType.callout)
+                    Spacer(minLength: 0)
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(SavaColor.tertiary)
+                }
+                .foregroundStyle(SavaColor.danger)
+                .frame(minHeight: 44)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    private func exportData() async {
+        exporting = true
+        defer { exporting = false }
+        guard let data = try? await AccountService(client: session.api).exportData(),
+              !data.isEmpty else { return }
+        // Written to a temp file and handed to the share sheet: a JSON export is
+        // something people send to themselves, not something to read on a phone.
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("sava-export.json")
+        try? data.write(to: url)
+        exportPayload = SharePayload(url: url)
     }
 }
