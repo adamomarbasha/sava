@@ -29,9 +29,6 @@
 			</dict>
 		</dict>
 	</dict>
-	<!-- Mirrors the app so the extension resolves the same API origin. -->
-	<key>SAVA_API_BASE_URL</key>
-	<string>$(SAVA_API_BASE_URL)</string>
 	<key>SavaKeychainAccessGroup</key>
 	<string>$(AppIdentifierPrefix)com.sava.mobile.shared</string>
 </dict>

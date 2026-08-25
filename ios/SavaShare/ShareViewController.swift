@@ -97,11 +97,12 @@ final class ShareViewController: UIViewController {
     /// Post the save directly, reusing the app's own networking configuration.
     private func uploadNow(_ pending: PendingSave) async {
         guard let token = KeychainStore().read(.authToken) else { return }
-        // The app's own resolved base URL. In Release this is validated to be
-        // HTTPS and non-private; the extension inherits that validation rather
-        // than re-implementing it.
-        guard AppConfig.configurationError == nil else { return }
-        let base = AppConfig.apiBaseURL
+        // The origin the *app* resolved, published to the shared container on
+        // its last launch. The extension has its own bundle and cannot read the
+        // app's Info.plist, so this is the only value guaranteed to match what
+        // the app itself is talking to — including the LAN address stamped into
+        // Debug builds at compile time.
+        guard let base = AppConfig.sharedOrigin else { return }
 
         var request = URLRequest(url: base.appendingPathComponent("bookmarks"))
         request.httpMethod = "POST"

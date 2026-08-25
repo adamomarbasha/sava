@@ -85,6 +85,44 @@ enum AppConfig {
         }
     }()
 
+    // MARK: Sharing the origin with the share extension
+
+    /// Where the app publishes its resolved origin for the extension to read.
+    ///
+    /// The extension cannot work this out for itself. It has its own bundle and
+    /// its own Info.plist, so it does not see the app's `SAVA_API_BASE_URL`, and
+    /// in development the address is stamped into the *app's* built plist at
+    /// compile time by `Scripts/stamp-dev-host.sh` — a value that exists nowhere
+    /// the extension can reach.
+    ///
+    /// Duplicating the setting into the extension's plist would create a second
+    /// source of truth that silently drifts the first time somebody updates one
+    /// and not the other. Publishing the already-resolved value instead means
+    /// there is exactly one answer, and it is the one the app is actually using.
+    private static let sharedOriginKey = "sava.resolvedAPIOrigin"
+
+    private static var sharedDefaults: UserDefaults? {
+        UserDefaults(suiteName: PendingSaveQueue.appGroup)
+    }
+
+    /// Called by the app on launch. Cheap, idempotent.
+    static func publishOriginForExtension() {
+        guard configurationError == nil else { return }
+        sharedDefaults?.set(apiBaseURL.absoluteString, forKey: sharedOriginKey)
+    }
+
+    /// The origin, as published by the containing app.
+    ///
+    /// Nil until the app has launched at least once. That is the correct
+    /// behaviour rather than a limitation: the extension also needs the auth
+    /// token from the shared Keychain, which only exists after signing in, so
+    /// there is no state where a published origin would have helped and its
+    /// absence hurts.
+    static var sharedOrigin: URL? {
+        guard let raw = sharedDefaults?.string(forKey: sharedOriginKey) else { return nil }
+        return URL(string: raw)
+    }
+
     /// True when the app is talking to a real, secure, remote backend.
     static var isProductionReady: Bool { configurationError == nil && apiBaseURL.scheme == "https" }
 
