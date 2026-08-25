@@ -36,6 +36,7 @@ struct AppShell: View {
     @State private var devAddToBookmark: Bookmark?
     @State private var devTranscriptBookmark: Bookmark?
     @State private var devShowHistory = false
+    @Environment(\.scenePhase) private var scenePhase
     @State private var devShowSearch = false
     @State private var devShowDeleteAccount = false
 
@@ -107,6 +108,12 @@ struct AppShell: View {
                             service: PlaybackService(client: session.api))
         }
         .onAppear(perform: applyDevFlags)
+        // Anything the share extension could not upload in its few seconds is
+        // finished here, where there is no time limit and a real network stack.
+        .task { await drainPendingSaves() }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active { Task { await drainPendingSaves() } }
+        }
         .task { await openDevScreenIfRequested() }
         .sheet(isPresented: $devShowProfile) {
             NavigationStack { ProfileView(user: user).environmentObject(library) }
@@ -162,6 +169,29 @@ struct AppShell: View {
         case .collections: collectionsPath = NavigationPath()
         case .scroll:      scrollPath = NavigationPath()
         case .ask:         askPath = NavigationPath()
+        }
+    }
+
+    /// Finish saves handed over by the share extension.
+    ///
+    /// The extension writes to a shared queue and tries the network with a short
+    /// budget; whatever it could not deliver — offline, slow, or terminated by
+    /// iOS mid-request — is retried here. Failures are counted rather than
+    /// retried forever, so one permanently broken link cannot block the queue.
+    private func drainPendingSaves() async {
+        guard PendingSaveQueue.isAvailable else { return }
+        let pending = PendingSaveQueue.load()
+        guard !pending.isEmpty else { return }
+
+        let service = BookmarkService(client: session.api)
+        for save in pending {
+            do {
+                let bookmark = try await service.create(url: save.url)
+                PendingSaveQueue.remove(save.id)
+                library.insertSaved(bookmark, service: service)
+            } catch {
+                PendingSaveQueue.recordFailure(save.id)
+            }
         }
     }
 

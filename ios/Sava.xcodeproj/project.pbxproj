@@ -6,8 +6,37 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		A100000000000000000E09 /* SavaShare.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = A100000000000000000E01 /* SavaShare.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		DC59B96B303D1D8300618F00 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = A100000000000000000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = A100000000000000000E06;
+			remoteInfo = SavaShare;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		A100000000000000000E08 /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				A100000000000000000E09 /* SavaShare.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
 /* Begin PBXFileReference section */
 		A100000000000000000005 /* Sava.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Sava.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		A100000000000000000E01 /* SavaShare.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = SavaShare.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -16,10 +45,27 @@
 			path = Sava;
 			sourceTree = "<group>";
 		};
+		A100000000000000000E02 /* SavaShare */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = SavaShare;
+			sourceTree = "<group>";
+		};
+		A100000000000000000E0E /* SavaShared */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = SavaShared;
+			sourceTree = "<group>";
+		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
 		A100000000000000000007 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A100000000000000000E04 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -41,6 +87,7 @@
 			isa = PBXGroup;
 			children = (
 				A100000000000000000005 /* Sava.app */,
+				A100000000000000000E01 /* SavaShare.appex */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -55,20 +102,44 @@
 				A100000000000000000006 /* Sources */,
 				A100000000000000000007 /* Frameworks */,
 				A100000000000000000008 /* Resources */,
+				A100000000000000000E08 /* Embed Foundation Extensions */,
 				A1000000000000000000C2 /* Stamp dev host */,
 				A1000000000000000000C1 /* Validate API configuration */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				A100000000000000000E0A /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				A100000000000000000009 /* Sava */,
+				A100000000000000000E0E /* SavaShared */,
 			);
 			name = Sava;
 			productName = Sava;
 			productReference = A100000000000000000005 /* Sava.app */;
 			productType = "com.apple.product-type.application";
+		};
+		A100000000000000000E06 /* SavaShare */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A100000000000000000E07 /* Build configuration list for PBXNativeTarget "SavaShare" */;
+			buildPhases = (
+				A100000000000000000E03 /* Sources */,
+				A100000000000000000E04 /* Frameworks */,
+				A100000000000000000E05 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				A100000000000000000E02 /* SavaShare */,
+				A100000000000000000E0E /* SavaShared */,
+			);
+			name = SavaShare;
+			productName = SavaShare;
+			productReference = A100000000000000000E01 /* SavaShare.appex */;
+			productType = "com.apple.product-type.app-extension";
 		};
 /* End PBXNativeTarget section */
 
@@ -100,12 +171,20 @@
 			projectRoot = "";
 			targets = (
 				A100000000000000000004 /* Sava */,
+				A100000000000000000E06 /* SavaShare */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
 		A100000000000000000008 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A100000000000000000E05 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -159,7 +238,32 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		A100000000000000000E03 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		A100000000000000000E0A /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = A100000000000000000E06 /* SavaShare */;
+			targetProxy = DC59B96B303D1D8300618F00 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin PBXContainerItemProxy section */
+		A100000000000000000E0B /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = A100000000000000000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = A100000000000000000E06;
+			remoteInfo = SavaShare;
+		};
+/* End PBXContainerItemProxy section */
 
 /* Begin XCBuildConfiguration section */
 		A10000000000000000000C /* Debug */ = {
@@ -225,6 +329,7 @@
 				DEVELOPMENT_TEAM = LQWJL3L82D;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				CODE_SIGN_ENTITLEMENTS = Sava/Sava.entitlements;
 				INFOPLIST_FILE = Info.plist;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = UIInterfaceOrientationPortrait;
@@ -253,6 +358,7 @@
 				DEVELOPMENT_TEAM = LQWJL3L82D;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				CODE_SIGN_ENTITLEMENTS = Sava/Sava.entitlements;
 				INFOPLIST_FILE = "Info-Release.plist";
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = UIInterfaceOrientationPortrait;
@@ -267,6 +373,77 @@
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
+		};
+		DC59B970303D1D8400618F00 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				COPY_PHASE_STRIP = NO;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				PRODUCT_NAME = SavaShare;
+			};
+			name = Debug;
+		};
+		DC59B971303D1D8400618F00 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				COPY_PHASE_STRIP = YES;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				PRODUCT_NAME = SavaShare;
+			};
+			name = Release;
+		};
+		A100000000000000000E0C /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = "SavaShare.entitlements";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = LQWJL3L82D;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "SavaShare-Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = Sava;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.sava.mobile.share;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		A100000000000000000E0D /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = "SavaShare.entitlements";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = LQWJL3L82D;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "SavaShare-Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = Sava;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.sava.mobile.share;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = Release;
 		};
@@ -287,6 +464,15 @@
 			buildConfigurations = (
 				A10000000000000000000E /* Debug */,
 				A10000000000000000000F /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A100000000000000000E07 /* Build configuration list for PBXNativeTarget "SavaShare" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A100000000000000000E0C /* Debug */,
+				A100000000000000000E0D /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

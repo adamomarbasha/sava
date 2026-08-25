@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Shared container for the pending-save queue the share extension writes. -->
+	<key>com.apple.security.application-groups</key>
+	<array>
+		<string>group.com.sava.mobile</string>
+	</array>
+	<!--
+	  Shared Keychain. The extension runs in its own sandbox and cannot read the
+	  app's auth token without this; both targets must declare the same group.
+	-->
+	<key>keychain-access-groups</key>
+	<array>
+		<string>$(AppIdentifierPrefix)com.sava.mobile.shared</string>
+	</array>
+</dict>
+</plist>

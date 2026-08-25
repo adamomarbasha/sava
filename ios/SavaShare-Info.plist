@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDisplayName</key>
+	<string>Sava</string>
+	<key>NSExtension</key>
+	<dict>
+		<key>NSExtensionPointIdentifier</key>
+		<string>com.apple.share-services</string>
+		<key>NSExtensionPrincipalClass</key>
+		<string>$(PRODUCT_MODULE_NAME).ShareViewController</string>
+		<key>NSExtensionAttributes</key>
+		<dict>
+			<!--
+			  What Sava will accept from the share sheet.
+
+			  URLs and text only — deliberately no images or video. Accepting
+			  media would mean the extension receives file data it has seconds to
+			  upload, which is the slow, lossy shape this design avoids. A link
+			  is a few dozen bytes and the server resolves the rest.
+			-->
+			<key>NSExtensionActivationRule</key>
+			<dict>
+				<key>NSExtensionActivationSupportsWebURLWithMaxCount</key>
+				<integer>1</integer>
+				<key>NSExtensionActivationSupportsText</key>
+				<true/>
+			</dict>
+		</dict>
+	</dict>
+	<!-- Mirrors the app so the extension resolves the same API origin. -->
+	<key>SAVA_API_BASE_URL</key>
+	<string>$(SAVA_API_BASE_URL)</string>
+	<key>SavaKeychainAccessGroup</key>
+	<string>$(AppIdentifierPrefix)com.sava.mobile.shared</string>
+</dict>
+</plist>
