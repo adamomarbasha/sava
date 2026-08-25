@@ -36,3 +36,7 @@ uvicorn==0.35.0
 youtube-comment-downloader==0.1.78
 youtube-transcript-api==1.2.2
 yt-dlp==2025.9.26
+
+# Error reporting. Optional at runtime — api/observability.py no-ops
+# without SENTRY_DSN — but production wants it present.
+sentry-sdk[fastapi]>=2.0

@@ -150,6 +150,18 @@ def on_startup():
     # system is forgeable because one variable was missing.
     require_production_config()
 
+    # Storage is constructed here rather than on first use.
+    #
+    # `require_production_config()` checks that the S3 variables are *present*;
+    # this checks that they actually build a client — a missing dependency, a
+    # malformed endpoint or a bad region would otherwise surface hours later as
+    # the first save that tries to mirror a thumbnail. In production that must be
+    # a failed deploy, not a degraded runtime.
+    if IS_PRODUCTION:
+        from .storage import get_storage
+        provider = get_storage()
+        logger.info("object storage ready: %s", provider.name)
+
     init_db()
     # Additive, idempotent schema upgrade for the intelligence layer.
     try:

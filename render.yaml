@@ -1,0 +1,103 @@
+# Render blueprint: web + worker + PostgreSQL, from one repository.
+#
+# Why Render, briefly — the reasoning is in docs/DEPLOYMENT.md:
+#   * Two long-running processes from one image is the shape Sava needs, and a
+#     blueprint declares both plus the database in a file that lives in the repo.
+#   * The worker is a first-class service type, not a cron or a hack.
+#   * No Kubernetes, no broker. Sava's queue is already Postgres-backed.
+#
+# Object storage is deliberately NOT declared here: it is Cloudflare R2, because
+# Sava serves images to every library screen and R2 charges nothing for egress.
+#
+# Nothing in this file is secret. Values marked `sync: false` must be set in the
+# Render dashboard; they are never committed.
+
+services:
+  # ── API ───────────────────────────────────────────────────────────────────
+  - type: web
+    name: sava-api
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter
+    healthCheckPath: /health
+    autoDeploy: false          # deploy on a tag, not on every push to main
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: WEB_CONCURRENCY
+        value: "2"
+      - key: DATABASE_URL
+        fromDatabase:
+          name: sava-postgres
+          property: connectionString
+      # Generated once by Render and never seen by anyone. Rotating it signs
+      # everybody out, which is the intended effect after the history purge.
+      - key: SECRET_KEY
+        generateValue: true
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: SAVA_S3_BUCKET
+        sync: false
+      - key: SAVA_S3_ACCESS_KEY_ID
+        sync: false
+      - key: SAVA_S3_SECRET_ACCESS_KEY
+        sync: false
+      - key: SAVA_S3_ENDPOINT_URL
+        sync: false
+      - key: SAVA_S3_REGION
+        value: auto
+      - key: SENTRY_DSN
+        sync: false
+      - key: SAVA_TRUST_PROXY
+        # Render terminates TLS in front of the app, so the socket peer is
+        # always the proxy. Without this every request looks like one client and
+        # the per-address login limit protects nobody.
+        value: "1"
+
+  # ── Worker ────────────────────────────────────────────────────────────────
+  - type: worker
+    name: sava-worker
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter
+    autoDeploy: false
+    dockerCommand: python -m api.worker --concurrency 2
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: sava-postgres
+          property: connectionString
+      # Must be the SAME value as the web service. The worker does not issue
+      # tokens, but it imports api.auth, and that module refuses to load in
+      # production without a real key — which is the behaviour we want.
+      - key: SECRET_KEY
+        fromService:
+          type: web
+          name: sava-api
+          envVarKey: SECRET_KEY
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: SAVA_S3_BUCKET
+        sync: false
+      - key: SAVA_S3_ACCESS_KEY_ID
+        sync: false
+      - key: SAVA_S3_SECRET_ACCESS_KEY
+        sync: false
+      - key: SAVA_S3_ENDPOINT_URL
+        sync: false
+      - key: SAVA_S3_REGION
+        value: auto
+      - key: SENTRY_DSN
+        sync: false
+
+databases:
+  - name: sava-postgres
+    plan: basic-256mb
+    postgresMajorVersion: "16"
+    # pgvector is required, not optional: ContentEmbedding declares a `vector`
+    # column, so the schema cannot be created without it. `ensure_extensions()`
+    # runs before create_all and raises a named error if the extension is
+    # unavailable — so a provider without pgvector fails loudly on first boot
+    # rather than silently degrading.
