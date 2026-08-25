@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Privacy manifest. Required by Apple for App Store submission since May 2024.
+
+  Every entry below was determined by reading the code, not by copying a
+  template. Two things Sava does NOT do, stated because their absence is what
+  most manifests get wrong:
+
+    * No tracking. There is no advertising SDK, no analytics SDK, and no data
+      is shared with a data broker or joined with third-party data.
+    * No device identifiers, no location, no contacts, no health data, no
+      diagnostics collection.
+
+  What Sava does collect is exactly what a personal library needs: the email
+  address that identifies the account, and the content the user chose to save.
+-->
+<plist version="1.0">
+<dict>
+    <key>NSPrivacyTracking</key>
+    <false/>
+
+    <key>NSPrivacyTrackingDomains</key>
+    <array/>
+
+    <key>NSPrivacyCollectedDataTypes</key>
+    <array>
+        <!-- Sign-in identity. Linked to the user because it *is* the account. -->
+        <dict>
+            <key>NSPrivacyCollectedDataType</key>
+            <string>NSPrivacyCollectedDataTypeEmailAddress</string>
+            <key>NSPrivacyCollectedDataTypeLinked</key>
+            <true/>
+            <key>NSPrivacyCollectedDataTypeTracking</key>
+            <false/>
+            <key>NSPrivacyCollectedDataTypePurposes</key>
+            <array>
+                <string>NSPrivacyCollectedDataTypePurposeAppFunctionality</string>
+            </array>
+        </dict>
+
+        <!--
+          Saved links, titles, notes, collections, and the questions asked about
+          them. This is the product. Declared as "Other User Content" because it
+          is content the user supplies rather than any of Apple's narrower
+          categories.
+
+          Note for the reviewer and for us: saved content is sent to Google's
+          Gemini API for summarisation and embedding. That is a third-party data
+          flow and it belongs in the privacy policy, which this manifest does not
+          replace.
+        -->
+        <dict>
+            <key>NSPrivacyCollectedDataType</key>
+            <string>NSPrivacyCollectedDataTypeOtherUserContent</string>
+            <key>NSPrivacyCollectedDataTypeLinked</key>
+            <true/>
+            <key>NSPrivacyCollectedDataTypeTracking</key>
+            <false/>
+            <key>NSPrivacyCollectedDataTypePurposes</key>
+            <array>
+                <string>NSPrivacyCollectedDataTypePurposeAppFunctionality</string>
+            </array>
+        </dict>
+    </array>
+
+    <key>NSPrivacyAccessedAPITypes</key>
+    <array>
+        <!--
+          UserDefaults, via @AppStorage in seven files — the appearance setting,
+          the short-form mute preference, and similar. CA92.1 is the reason code
+          for "access info from same app", which is all Sava does with it: no App
+          Group, no shared suite, no reading anything another app wrote.
+        -->
+        <dict>
+            <key>NSPrivacyAccessedAPIType</key>
+            <string>NSPrivacyAccessedAPICategoryUserDefaults</string>
+            <key>NSPrivacyAccessedAPITypeReasons</key>
+            <array>
+                <string>CA92.1</string>
+            </array>
+        </dict>
+    </array>
+</dict>
+</plist>
