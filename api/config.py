@@ -89,6 +89,42 @@ DATABASE_URL = _resolve_database_url()
 IS_POSTGRES = DATABASE_URL.startswith("postgres")
 
 
+def describe_database_url(url: str = None) -> str:
+    """A connection string with the credentials removed, safe to log.
+
+    Startup used to log `DATABASE IN USE: %s` with the raw `DATABASE_URL`, which
+    on Render means the Postgres **password in plaintext in the deploy log** —
+    readable by anyone with dashboard access, retained in log history, and
+    shipped to any log drain. The line existed for a good reason (a silent
+    switch between two SQLite files once looked like "login is broken"), so the
+    answer is to keep the diagnostic and drop the secret.
+
+    Returns `postgresql host=… db=…`. Never the user, the password, or the query
+    string — `?sslmode=…` is harmless but `?password=…` is not, and this does
+    not try to tell them apart.
+    """
+    from urllib.parse import urlsplit
+
+    raw = url if url is not None else DATABASE_URL
+    if not raw:
+        return "unset"
+    try:
+        parts = urlsplit(raw)
+    except Exception:
+        return "unparseable"
+
+    scheme = parts.scheme or "unknown"
+    if scheme.startswith("sqlite"):
+        # A path is not a credential, and *which file* is the entire point of
+        # the diagnostic on a developer's machine.
+        return f"sqlite path={parts.path or raw.split('///')[-1]}"
+
+    host = parts.hostname or "unknown"
+    port = f":{parts.port}" if parts.port else ""
+    database = (parts.path or "").lstrip("/") or "unknown"
+    return f"{scheme} host={host}{port} db={database}"
+
+
 # ─── AI providers ────────────────────────────────────────────────────────────
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")

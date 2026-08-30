@@ -49,7 +49,9 @@ def test_connection():
         logger.info("Database connection successful")
         return True
     except Exception as e:
-        logger.error(f"Failed to connect to database: {e}")
+        # `OperationalError` embeds the connection URL, password included.
+        from .observability import scrub_secrets
+        logger.error("Failed to connect to database: %s", scrub_secrets(str(e)))
         return False
 
 def ensure_extensions(bind) -> None:
@@ -101,8 +103,13 @@ def init_db():
         logger.info("Database tables created successfully")
 
     except Exception as e:
-        logger.error(f"Failed to initialize database: {e}")
-        raise RuntimeError(f"Database initialization failed: {e}")
+        # Both the log line and the raised message are scrubbed: the exception
+        # propagates to the crash handler and to Sentry, so leaving the raw
+        # string in the message would only move the credential somewhere else.
+        from .observability import scrub_secrets
+        safe = scrub_secrets(str(e))
+        logger.error("Failed to initialize database: %s", safe)
+        raise RuntimeError(f"Database initialization failed: {safe}") from None
 
 def migrate_from_sqlite():
     if not DATABASE_URL.startswith("sqlite"):

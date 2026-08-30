@@ -117,7 +117,10 @@ def _optional_providers() -> Dict[str, Any]:
         from .ingestors.registry import provider_status
         return provider_status()
     except Exception as e:  # never let a diagnostic break the health endpoint
-        return {"error": type(e).__name__, "detail": str(e)}
+        # Class name only, matching every other check in this file. This value
+        # is returned in the `/health` body, so an unbounded `str(e)` would put
+        # whatever an import error happened to contain in front of a caller.
+        return {"error": type(e).__name__}
 
 
 def health_report(db) -> Dict[str, Any]:

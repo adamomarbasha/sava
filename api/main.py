@@ -29,6 +29,7 @@ from .rate_limiter import rate_limiter
 from .config import (API_DIR, ASYNC_SAVE, DOCS_ENABLED, ENVIRONMENT,
                      IS_PRODUCTION, PIPELINE_VERSION, require_production_config)
 from .migrations import run_migrations
+from .observability import scrub_secrets
 from .routes_intelligence import router as intelligence_router
 from .routes_playback import router as playback_router
 from .routes_subscription import router as subscription_router
@@ -173,25 +174,30 @@ def on_startup():
                 "Schema was out of date and has been repaired (%d steps): %s",
                 len(applied), ", ".join(applied[:8]))
     except Exception as e:
-        logger.error(f"Schema migration failed: {e}")
+        # Scrubbed: a SQLAlchemy error routinely quotes the connection URL.
+        logger.error("Schema migration failed: %s", scrub_secrets(str(e)))
 
     # Say plainly which database is live and what is in it. A silent switch
     # between database files (or a restored/reverted file) previously looked
     # like "login is broken" rather than "the schema moved underneath us".
     try:
         from sqlalchemy import text as _text
-        from .config import DATABASE_URL
+        from .config import describe_database_url
         from .db import SessionLocal
         _db = SessionLocal()
         try:
             users = _db.execute(_text("SELECT COUNT(*) FROM users")).scalar()
             saves = _db.execute(_text("SELECT COUNT(*) FROM bookmarks")).scalar()
-            logger.info("DATABASE IN USE: %s", DATABASE_URL)
+            # Sanitised, never the raw URL. On Render the connection string
+            # contains the Postgres password, and this line put it in plaintext
+            # in the deploy log — readable from the dashboard, kept in log
+            # history, and forwarded to any log drain.
+            logger.info("DATABASE IN USE: %s", describe_database_url())
             logger.info("  users=%s  bookmarks=%s", users, saves)
         finally:
             _db.close()
     except Exception as e:
-        logger.error("Could not read database summary: %s", e)
+        logger.error("Could not read database summary: %s", scrub_secrets(str(e)))
     # Self-heal legacy SQLite schemas (e.g. pre-existing DBs missing
     # users.updated_at). Idempotent and non-destructive — no-op on Postgres.
     migrate_from_sqlite()

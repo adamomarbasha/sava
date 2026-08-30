@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import contextvars
 import logging
+import re
 import os
 import uuid
 from typing import Optional
@@ -80,11 +81,116 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
         return response
 
 
+# ─── Secret scrubbing ────────────────────────────────────────────────────────
+#
+# A backstop, not the fix. Every known call site that could log a credential is
+# fixed at the source; this catches the ones nobody thought of — a SQLAlchemy
+# `OperationalError` that quotes the connection URL, a library that logs its own
+# configuration, a future `logger.error(f"...{e}")` written in a hurry.
+#
+# It runs on every record, so it is a handful of precompiled patterns and a
+# short list of literal values, nothing clever.
+
+#: `scheme://user:password@host` -> `scheme://***:***@host`. Covers every
+#: connection string Sava uses: Postgres, the S3 endpoint, a proxy URL.
+_URL_CREDENTIALS = re.compile(r"(?P<scheme>[a-zA-Z][\w+.-]*://)[^\s/@:]+:[^\s/@]*@")
+
+#: `password=…`, `api_key=…`, `token=…` in a query string or a key/value dump.
+#
+# An explicit `=` or `:` separator is required. An earlier version also accepted
+# bare whitespace and turned Postgres's most useful error —
+# "FATAL: password authentication failed for user" — into
+# "password ***redacted*** failed", destroying the diagnostic while redacting
+# nothing. A secret is always assigned; prose is not.
+_KV_SECRETS = re.compile(
+    r"(?i)\b(password|passwd|pwd|secret|api[_-]?key|access[_-]?key|token|dsn)"
+    r"\b(\s*[=:]\s*)(?P<value>[^\s,;&'\"]+)")
+
+#: `Authorization: Bearer <token>`. The whole value goes, scheme included —
+#: matching only the key would have redacted the word "Bearer" and left the
+#: credential sitting next to it, which is worse than not matching at all.
+_AUTH_HEADER = re.compile(
+    r"(?i)\b(authorization)(\s*[=:]\s*)[^\s,;]+(?:\s+[^\s,;]+)?")
+
+#: `Bearer <token>`, `Token <token>`. Matched separately because the secret is
+#: the word *after* the scheme, and the key/value pattern above would redact the
+#: scheme and leave the credential in place.
+_BEARER = re.compile(r"(?i)\b(bearer|token)\s+(?P<value>[A-Za-z0-9._\-+/=]{8,})")
+
+#: Environment variables whose *value* must never appear in a log line,
+#: whatever route it took to get there.
+_SECRET_ENV_VARS = (
+    "DATABASE_URL", "SECRET_KEY", "GEMINI_API_KEY", "OPENAI_API_KEY",
+    "SAVA_S3_SECRET_ACCESS_KEY", "SAVA_S3_ACCESS_KEY_ID", "SAVA_PROXY_URL",
+    "SENTRY_DSN", "SAVA_ASR_API_KEY", "SAVA_YTDLP_COOKIEFILE",
+)
+
+#: Below this length a value is too likely to be a common substring — replacing
+#: every occurrence of a 3-character "secret" would corrupt unrelated messages.
+_MIN_SECRET_LENGTH = 8
+
+
+def _literal_secrets() -> tuple:
+    """The actual values to redact, read fresh from the environment.
+
+    Not cached at import: Render injects variables before the process starts,
+    but a test (or a reload) can change them afterwards, and a stale list is a
+    list that stops redacting the thing it was built for.
+    """
+    out = []
+    for name in _SECRET_ENV_VARS:
+        value = os.getenv(name)
+        if value and len(value) >= _MIN_SECRET_LENGTH:
+            out.append(value)
+    # Longest first, so a URL containing a password is redacted whole rather
+    # than leaving the surrounding string behind.
+    return tuple(sorted(set(out), key=len, reverse=True))
+
+
+def scrub_secrets(text: str) -> str:
+    """Remove credentials from a string that is about to be logged."""
+    if not text:
+        return text
+    out = str(text)
+    for literal in _literal_secrets():
+        if literal in out:
+            out = out.replace(literal, "***redacted***")
+    out = _URL_CREDENTIALS.sub(r"\g<scheme>***:***@", out)
+    # Order matters: the header rule must run before the key/value rule, or
+    # "Authorization: Bearer <token>" loses the word "Bearer" and keeps the token.
+    out = _AUTH_HEADER.sub(lambda m: f"{m.group(1)}{m.group(2)}***redacted***", out)
+    out = _BEARER.sub(lambda m: f"{m.group(1)} ***redacted***", out)
+    out = _KV_SECRETS.sub(
+        lambda m: f"{m.group(1)}{m.group(2)}***redacted***", out)
+    return out
+
+
+class SecretScrubbingFilter(logging.Filter):
+    """Scrubs every log record before a handler formats it.
+
+    Applied to the record's rendered message rather than to its arguments, so a
+    secret reaches the same fate whether it arrived as `%s`, an f-string, or
+    inside an exception a library raised.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            message = record.getMessage()
+        except Exception:
+            return True
+        cleaned = scrub_secrets(message)
+        if cleaned != message:
+            record.msg = cleaned
+            record.args = ()
+        return True
+
+
 def configure_logging() -> None:
-    """Attach the request id to the root formatter, once."""
+    """Attach the request id and the secret scrubber to the root formatter."""
     root = logging.getLogger()
     for handler in root.handlers:
         handler.addFilter(RequestIDFilter())
+        handler.addFilter(SecretScrubbingFilter())
         handler.setFormatter(logging.Formatter(
             "%(asctime)s %(levelname)s [%(request_id)s] %(name)s: %(message)s"))
 
