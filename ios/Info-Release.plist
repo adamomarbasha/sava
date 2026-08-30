@@ -32,14 +32,5 @@
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>Sava uses photos you choose to set a collection cover.</string>
 
-	<!-- The published "Save to Sava" iCloud Shortcut. Optional.
-
-	     Left as the sentinel until a real Shortcut is published from the
-	     Shortcuts app — see docs/ACTION_BUTTON.md. Unlike SAVA_API_BASE_URL
-	     above, this one does NOT block the Release build: the native App
-	     Shortcut works without it, so the setup screen simply shows the
-	     instructions instead of a "Get Sava Shortcut" button. -->
-	<key>SAVA_SHARED_SHORTCUT_URL</key>
-	<string>REPLACE_WITH_ICLOUD_SHORTCUT_URL</string>
 </dict>
 </plist>

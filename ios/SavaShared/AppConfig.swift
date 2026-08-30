@@ -130,10 +130,12 @@ enum AppConfig {
 
     /// The official **Save to Sava** Shortcut, published from the Shortcuts app.
     ///
-    /// This is the one source of truth for the link. Nothing else in the app,
-    /// the docs, or the plists carries the id — replacing the published
-    /// Shortcut means editing this one line, and `tests/test_ios_shortcut.py`
-    /// fails the build if a second copy of it appears anywhere in `ios/`.
+    /// This is the one source of truth for the link. No other Swift file and
+    /// neither plist carries the id — replacing the published Shortcut means
+    /// editing this one line, and `tests/test_ios_shortcut.py` fails CI if a
+    /// second copy appears anywhere under `ios/`. (`docs/ACTION_BUTTON.md`
+    /// quotes it, which is documentation rather than a second configuration
+    /// point; the test allows that and nothing else.)
     ///
     /// Hardcoded rather than read from `Info.plist`, deliberately. A plist
     /// value would have to be duplicated into `Info.plist` *and*
