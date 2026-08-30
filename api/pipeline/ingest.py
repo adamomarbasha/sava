@@ -36,6 +36,10 @@ from ..config import (
     PIPELINE_VERSION, TIKTOK_VISION_MODE, UNDERSTANDING_SCHEMA_VERSION,
     YOUTUBE_VISION_MODE,
 )
+from ..concurrency import (
+    ContentBusy, acquire_content_lease, insert_or_ignore, insert_or_update,
+    release_content_lease, safe_rollback, worker_identity,
+)
 from ..content.identity import resolve_identity
 from ..platform_budget import PlatformUnavailable, guarded
 from ..models import (
@@ -704,13 +708,20 @@ def _read_cover(db, cc: CanonicalContent, *, router,
 
 def process_content(canonical_id: int, db, *, force: bool = False,
                     user_id: Optional[int] = None,
-                    deep: bool = False) -> Dict[str, Any]:
+                    deep: bool = False,
+                    want_vision: bool = False) -> Dict[str, Any]:
     """Run the ladder for one canonical item. Idempotent and resumable.
 
     `deep` is the only way to reach the widest frame budget. It comes from an
     explicit user request (Pro enhanced analysis), never from a heuristic — the
     whole point of the routing layer is that the expensive path is not the
     default for an ordinary TikTok.
+
+    `want_vision` is lazy escalation: an item understood from text alone, which
+    somebody has now asked a question about that only the picture can answer.
+    It forces the light frames route and nothing else — every earlier stage is
+    already guarded on `force`, so a re-run reuses the cached metadata,
+    transcript and classification and pays only for the frames.
     """
     from ..ai.router import get_router
 
@@ -719,16 +730,49 @@ def process_content(canonical_id: int, db, *, force: bool = False,
         return {"ok": False, "error": "canonical content not found"}
 
     if (cc.processing_state == ProcessingState.READY
-            and cc.pipeline_version == PIPELINE_VERSION and not force):
+            and cc.pipeline_version == PIPELINE_VERSION and not force
+            and not (want_vision or deep)):
         return {"ok": True, "skipped": "already ready", "cache_hit": True}
 
-    router = get_router()
-    strat = strategy_for(cc.platform)
+    # Escalation on an item that already has frames is a no-op, not a re-run.
+    # Two Asks racing, a retried job, or a user asking three visual questions in
+    # a row must not each pay for another download.
+    if (want_vision and not force and not deep
+            and db.query(ContentFrame)
+                 .filter(ContentFrame.canonical_content_id == cc.id,
+                         ContentFrame.ts_ms > 0).count() > 0):
+        return {"ok": True, "skipped": "visual intelligence already cached",
+                "cache_hit": True, "route": cc.route}
+
     result: Dict[str, Any] = {"stages": {}, "canonical_id": cc.id}
     total_bytes = 0
     workdirs: List[str] = []
 
+    # ── One worker per canonical item, from here on ──────────────────────────
+    #
+    # Everything above this line is a cache check and costs nothing, so it stays
+    # lock-free. Everything below it spends money: a proxied download, an ASR
+    # call, frame extraction, model calls. Two workers reaching this point for
+    # the same content — two jobs with different idempotency keys (a save and a
+    # visual-Ask escalation), or a retry overlapping a slow first attempt — used
+    # to run the whole ladder twice and then collide on a UNIQUE constraint at
+    # the very end, after both had already paid.
+    #
+    # The lease is taken with a compare-and-swap UPDATE, so it is one statement
+    # and one winner, on SQLite and Postgres alike. The loser raises ContentBusy
+    # and the queue parks its job for a moment rather than failing it.
+    lease_owner = worker_identity()
+    if not acquire_content_lease(db, cc.id, owner=lease_owner):
+        raise ContentBusy(cc.id)
+
     try:
+        # Inside the lease and inside the try, both deliberately. Everything
+        # from here is either billable or capable of failing, and the failure
+        # handling below is what turns that into a recorded partial state
+        # rather than an exception escaping to the queue.
+        router = get_router()
+        strat = strategy_for(cc.platform)
+
         # ── L1+L2 combined for caption platforms ────────────────────────────
         # On YouTube, one yt-dlp extract_info yields metadata AND the caption
         # track list. Fetching them separately would double the bytes pulled
@@ -914,6 +958,7 @@ def process_content(canonical_id: int, db, *, force: bool = False,
             asr_available=(strat.allow_asr and _asr_available()
                            and 0 < duration <= strat.asr_max_seconds),
             force_deep=bool(deep),
+            force_vision=bool(want_vision),
         )
         plan = route.decide(signals)
         cc.route = plan.route.value
@@ -926,6 +971,21 @@ def process_content(canonical_id: int, db, *, force: bool = False,
 
         # ── L2: transcript, only as far as the route requires ───────────────
         video_path: Optional[str] = None
+
+        # Re-read before deciding to spend money.
+        #
+        # `transcript_row` was read ~150 lines ago, before classification and
+        # routing. On a retry — or alongside a worker that started moments
+        # earlier — the transcript can have arrived in the meantime, and acting
+        # on the stale answer meant re-downloading the video and re-running ASR
+        # to produce a row that already existed. The duplicate INSERT was the
+        # symptom; this re-read is where the money was actually lost.
+        if not force:
+            transcript_row = (db.query(ContentTranscript)
+                              .filter(ContentTranscript.canonical_content_id == cc.id)
+                              .first())
+            if transcript_row is not None:
+                transcript_text = transcript_row.text or transcript_text
 
         if transcript_row and not force:
             result["stages"]["transcript"] = "cached"
@@ -1017,14 +1077,30 @@ def process_content(canonical_id: int, db, *, force: bool = False,
 
             if segments:
                 full_text = " ".join(s.get("text", "") for s in segments).strip()
-                transcript_row = ContentTranscript(
-                    canonical_content_id=cc.id, source=source or "asr", lang=lang,
-                    text=full_text, segments=json.dumps(segments, default=str),
-                    provider="youtube" if source == "captions" else asr_provider,
-                    audio_seconds=asr_seconds or duration, is_complete=True,
+                # INSERT ... ON CONFLICT DO NOTHING, not add-then-commit.
+                #
+                # The UNIQUE constraint on (content, lang, source) is correct and
+                # stays. What was wrong was asking the database to enforce it by
+                # raising: another worker finishing this same transcript first is
+                # an ordinary outcome, not an exception, and treating it as one
+                # killed the job *and* left the session needing a rollback.
+                insert_or_ignore(
+                    db, ContentTranscript,
+                    {"canonical_content_id": cc.id, "source": source or "asr",
+                     "lang": lang, "text": full_text,
+                     "segments": json.dumps(segments, default=str),
+                     "provider": "youtube" if source == "captions" else asr_provider,
+                     "audio_seconds": asr_seconds or duration, "is_complete": True},
+                    index_elements=["canonical_content_id", "lang", "source"],
                 )
-                db.add(transcript_row)
-                db.commit()
+                # Read back whichever row won. Ours or theirs, it is the same
+                # transcript of the same content.
+                transcript_row = (db.query(ContentTranscript)
+                                  .filter(ContentTranscript.canonical_content_id == cc.id,
+                                          ContentTranscript.lang == lang,
+                                          ContentTranscript.source == (source or "asr"))
+                                  .first())
+                full_text = transcript_row.text if transcript_row else full_text
                 transcript_text = full_text
                 _set_stage(cc, "transcript", "ok", source or "")
                 result["stages"]["transcript"] = f"ok ({source}, {len(segments)} segments)"
@@ -1208,11 +1284,17 @@ def process_content(canonical_id: int, db, *, force: bool = False,
         # The platform is throttled or circuit-open. Keep the content in a
         # truthful "still working" state and let the queue retry later —
         # this is not a failure of the save.
+        safe_rollback(db)
         cc.processing_state = ProcessingState.QUEUED
         db.commit()
         raise
     except Exception as e:
         logger.exception("pipeline failed for canonical %s", canonical_id)
+        # The session may be mid-failed-transaction — an IntegrityError from a
+        # racing writer is the common case — and recording the outcome requires
+        # a commit. Roll back first, or this handler dies with
+        # PendingRollbackError and hides the failure it was reporting.
+        safe_rollback(db)
         # Preserve whatever we did acquire. If any stage succeeded the item is
         # still partially useful, so never downgrade it to a bare failure.
         try:
@@ -1226,26 +1308,35 @@ def process_content(canonical_id: int, db, *, force: bool = False,
         db.commit()
         return {"ok": False, "error": str(e), "canonical_id": canonical_id}
     finally:
+        release_content_lease(db, cc.id, owner=lease_owner)
         for w in workdirs:
             acquire.cleanup(w)
 
 
 def _upsert_understanding(db, canonical_id: int, rec: Dict[str, Any]) -> None:
-    row = (db.query(ContentUnderstanding)
-           .filter(ContentUnderstanding.canonical_content_id == canonical_id).first())
-    if row is None:
-        row = ContentUnderstanding(canonical_content_id=canonical_id)
-        db.add(row)
-    row.schema_version = UNDERSTANDING_SCHEMA_VERSION
-    row.content_type = rec.get("content_type")
-    row.tl_dr = rec.get("tl_dr")
-    row.key_points = json.dumps(rec.get("key_points", []))
-    row.topics = json.dumps(rec.get("topics", []))
-    row.entities = json.dumps(rec.get("entities", {}))
-    row.typed_data = json.dumps(rec.get("typed_data", {}))
-    row.chapters = json.dumps(rec.get("chapters", []))
-    row.sources_used = json.dumps(rec.get("sources_used", []))
-    db.commit()
+    """Write the understanding record, whether or not one already exists.
+
+    Named "upsert" and now actually one. `canonical_content_id` is this table's
+    primary key, so the previous check-then-insert had the same race as the
+    embedding write: two workers both saw no row and both inserted. The lease in
+    `process_content` should prevent them from ever getting here together, but a
+    write that cannot be made to fail is better than a write that relies on a
+    lock upstream staying correct forever.
+    """
+    insert_or_update(
+        db, ContentUnderstanding,
+        {"canonical_content_id": canonical_id,
+         "schema_version": UNDERSTANDING_SCHEMA_VERSION,
+         "content_type": rec.get("content_type"),
+         "tl_dr": rec.get("tl_dr"),
+         "key_points": json.dumps(rec.get("key_points", [])),
+         "topics": json.dumps(rec.get("topics", [])),
+         "entities": json.dumps(rec.get("entities", {})),
+         "typed_data": json.dumps(rec.get("typed_data", {})),
+         "chapters": json.dumps(rec.get("chapters", [])),
+         "sources_used": json.dumps(rec.get("sources_used", []))},
+        index_elements=["canonical_content_id"],
+    )
 
 
 def build_embeddings(db, canonical_id: int, *, user_id: Optional[int] = None,
@@ -1371,14 +1462,23 @@ def build_embeddings(db, canonical_id: int, *, user_id: Optional[int] = None,
                 db, res, operation="embedding.document",
                 canonical_content_id=canonical_id, user_id=user_id, platform=cc.platform,
             )
-            if doc_row is None:
-                doc_row = ContentEmbedding(canonical_content_id=canonical_id)
-                db.add(doc_row)
-            doc_row.embedding = to_storage(res.vectors[0])
-            doc_row.model = res.model
-            doc_row.dim = res.dim
-            db.commit()
+            # Upsert rather than check-then-insert. `canonical_content_id` is the
+            # primary key, so a competing worker's row is a conflict, not a
+            # second row — and the right resolution is to overwrite, because a
+            # re-derived vector for the same document supersedes the old one.
+            insert_or_update(
+                db, ContentEmbedding,
+                {"canonical_content_id": canonical_id,
+                 "embedding": to_storage(res.vectors[0]),
+                 "model": res.model, "dim": res.dim},
+                index_elements=["canonical_content_id"],
+            )
         except Exception as e:
+            # Rollback, then carry on. Without it this handled failure left the
+            # session unusable and the *next* commit — in the caller, or in the
+            # queue recording the outcome — died with PendingRollbackError,
+            # reporting a rollback problem instead of an embedding one.
+            safe_rollback(db)
             logger.warning("document embedding failed: %s", e)
 
     return f"{written} chunks + doc vector" if written else "doc vector only"

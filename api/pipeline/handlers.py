@@ -26,6 +26,7 @@ def process_content_job(payload: Dict[str, Any], db) -> None:
         force=bool(payload.get("force")),
         user_id=payload.get("user_id"),
         deep=bool(payload.get("deep")),
+        want_vision=bool(payload.get("want_vision")),
     )
     _settle_units(db, canonical_id, payload.get("user_id"))
     _sync_bookmark_states(db, canonical_id)
