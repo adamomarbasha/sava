@@ -26,7 +26,39 @@ from ..vectors import from_storage, knn, mmr, normalize
 logger = logging.getLogger(__name__)
 
 # A hit must score at least this fraction of the best hit to count as a match.
+def _float_env(name: str, default: float) -> float:
+    import os
+    try:
+        return float(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
 RELEVANCE_RATIO = 0.55
+
+#: The absolute noise floor for a semantic-only match, as raw cosine similarity.
+#:
+#: Embeddings never score zero. This file already documented the measurement
+#: that matters: "an unrelated video still lands around 0.36 against any query".
+#: The relative floor above was the only filter, and it is defenceless against a
+#: query nothing matches — searching "shirt" in a library with no clothing in it
+#: produces a *flat* distribution where the best score is itself noise, so
+#: `best * 0.55` lands below the noise and every coincidence survives. That is
+#: the reported bug: eleven unrelated videos for one word.
+#:
+#: A relative floor answers "which of these is best". An absolute one answers
+#: "is any of this actually a match", and only the second can return nothing.
+#:
+#: Both values are env-overridable so they can be tuned against production
+#: traffic without a client release. They are set with headroom above the
+#: documented 0.36 noise level rather than fitted to a particular library.
+SEMANTIC_FLOOR = _float_env("SAVA_SEARCH_SEMANTIC_FLOOR", 0.50)
+
+#: How good the *best* semantic match must be for the semantic tail to appear
+#: at all. Below this, the honest answer is that nothing in the library matches
+#: — an empty result the user can act on, rather than a page of coincidences
+#: they have to read and reject.
+SEMANTIC_CONFIDENCE = _float_env("SAVA_SEARCH_SEMANTIC_CONFIDENCE", 0.58)
 
 #: The score floor for any result with a literal match. Above 0.72, which is the
 #: most a perfect semantic similarity can contribute, so lexical hits are always
@@ -264,11 +296,39 @@ def search_library(
     # to a stronger one.
     lexical = [(cid, score) for cid, score in ranked if cid in keyword]
     semantic_only = [(cid, score) for cid, score in ranked if cid not in keyword]
+
     if semantic_only:
-        best_semantic = semantic_only[0][1]
+        # 1. Absolute floor, on the raw similarity rather than the fused score.
+        #    Anything below this is a coincidence of the embedding space, not a
+        #    match, however it ranks relative to its neighbours.
         semantic_only = [(cid, score) for cid, score in semantic_only
-                         if score >= max(0.0, best_semantic * RELEVANCE_RATIO)]
-    ranked = (lexical + semantic_only) or ranked[:1]
+                         if semantic.get(cid, 0.0) >= SEMANTIC_FLOOR]
+
+        # 2. Confidence gate. If even the best surviving match is weak, the
+        #    library genuinely does not contain what was asked for, and the
+        #    whole tail goes — an empty result is a usable answer, eleven bad
+        #    ones are work the user has to do for us.
+        if semantic_only:
+            best_similarity = max(semantic.get(cid, 0.0) for cid, _ in semantic_only)
+            if best_similarity < SEMANTIC_CONFIDENCE:
+                semantic_only = []
+
+        # 3. Relative floor, among what is left. This is the original rule and
+        #    it still does the job it was written for: on a sharp query one
+        #    score dominates and the long tail falls away.
+        if semantic_only:
+            best_semantic = semantic_only[0][1]
+            semantic_only = [(cid, score) for cid, score in semantic_only
+                             if score >= max(0.0, best_semantic * RELEVANCE_RATIO)]
+
+    # No `or ranked[:1]` fallback any more.
+    #
+    # That clause guaranteed at least one result, which is precisely the
+    # behaviour being removed: for a query nothing matches, the single best
+    # coincidence is still a coincidence, and presenting it as *the* answer is
+    # worse than saying nothing was found. Lexical hits are never filtered, so
+    # anything containing the query word still comes back.
+    ranked = lexical + semantic_only
     ranked = ranked[: limit * 3]
 
     # Diversify the semantic tail only. MMR trades relevance for variety, which

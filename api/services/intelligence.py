@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from typing import Any, Dict, List, Optional
 
 from ..ai import telemetry
@@ -348,6 +349,40 @@ How to behave:
 - Do not restate the question. Do not add a closing summary paragraph."""
 
 
+class AskTimings:
+    """Wall-clock per phase of one Ask, so latency can be argued about.
+
+    Ask was reported as "extremely slow and frequently times out" with no way
+    to say *which* part was slow — retrieval, the embedding call, the model, or
+    the database. Guessing at that is how a timeout gets raised instead of a
+    bottleneck getting fixed, which is explicitly not the goal.
+
+    The numbers ride back on the response under `timings_ms` and are logged at
+    INFO, so a slow Ask in production leaves a breakdown behind rather than a
+    single duration.
+    """
+
+    __slots__ = ("_started", "_marks", "_last")
+
+    def __init__(self) -> None:
+        now = time.monotonic()
+        self._started = now
+        self._last = now
+        self._marks: Dict[str, int] = {}
+
+    def mark(self, phase: str) -> None:
+        now = time.monotonic()
+        self._marks[phase] = int((now - self._last) * 1000)
+        self._last = now
+
+    @property
+    def total_ms(self) -> int:
+        return int((time.monotonic() - self._started) * 1000)
+
+    def as_dict(self) -> Dict[str, int]:
+        return {**self._marks, "total": self.total_ms}
+
+
 def ask_sava(db, user_id: int, question: str, *, mode: Mode = Mode.AUTO,
              history: Optional[List[Dict[str, str]]] = None,
              max_saves: int = 10,
@@ -366,6 +401,7 @@ def ask_sava(db, user_id: int, question: str, *, mode: Mode = Mode.AUTO,
     the previous turn's items in scope is what makes follow-ups behave like
     conversation instead of like a fresh search box.
     """
+    timings = AskTimings()
     router = get_router()
     if not router.is_available():
         return {"ok": False, "reason": "ai_unavailable",
@@ -396,8 +432,10 @@ def ask_sava(db, user_id: int, question: str, *, mode: Mode = Mode.AUTO,
         if previous and len(question.split()) <= 12:
             query = f"{previous[-1]} {question}"
 
+    timings.mark("setup")
     retrieved = retrieval.retrieve_for_library_question(
         db, user_id, query, max_saves=max_saves, restrict_to=restrict_to)
+    timings.mark("retrieval")
     blocks = retrieved["context_blocks"]
     saves = list(retrieved["saves"])
 
@@ -423,6 +461,7 @@ def ask_sava(db, user_id: int, question: str, *, mode: Mode = Mode.AUTO,
         # Still worth answering: they may be asking something general, and
         # refusing outright is the RAG-bot behaviour this is meant to avoid.
         try:
+            timings.mark("context")
             completion = router.complete(
                 resolve_task(TaskType.ASK_SAVA, question=question,
                              source_count=0, mode=mode),
@@ -437,7 +476,9 @@ def ask_sava(db, user_id: int, question: str, *, mode: Mode = Mode.AUTO,
             return {"ok": False, "reason": "provider_error", "message": _busy_message(e)}
         telemetry.record_completion(db, completion, operation="ask_sava.no_match",
                                     user_id=user_id)
+        timings.mark("model")
         return {"ok": True, "answer": _clean_text(completion.text), "sources": [],
+                "timings_ms": timings.as_dict(),
                 "grounded_in": 0, "mode": mode.value}
 
     ctx: List[str] = []
@@ -467,6 +508,11 @@ def ask_sava(db, user_id: int, question: str, *, mode: Mode = Mode.AUTO,
         return {"ok": False, "reason": "provider_error", "message": _busy_message(e)}
     telemetry.record_completion(db, completion, operation=f"ask_sava.{task.value}",
                                 user_id=user_id)
+    timings.mark("model")
+
+    # A slow Ask now leaves a breakdown behind rather than a single duration.
+    logger.info("ask_sava user=%s grounded=%s timings=%s",
+                user_id, len(blocks), timings.as_dict())
 
     return {
         "ok": True,
@@ -474,6 +520,7 @@ def ask_sava(db, user_id: int, question: str, *, mode: Mode = Mode.AUTO,
         "mode": mode.value,
         "sources": [s.to_dict() for s in saves],
         "grounded_in": len(blocks),
+        "timings_ms": timings.as_dict(),
     }
 
 

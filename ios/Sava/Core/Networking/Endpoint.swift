@@ -17,8 +17,8 @@ struct Endpoint {
     var body: Data? = nil
     var requiresAuth: Bool = true
 
-    /// Multipart upload — used by screenshot resolution, which posts raw image
-    /// bytes rather than JSON.
+    /// Multipart upload — used by collection cover upload, which posts raw
+    /// image bytes rather than JSON.
     static func multipart(
         _ path: String,
         fileField: String,
@@ -46,9 +46,9 @@ struct Endpoint {
     /// Overrides the default `application/json` Content-Type.
     var contentTypeOverride: String? = nil
 
-    /// Per-request timeout. Screenshot resolution runs a vision model and a
-    /// search server-side, so it legitimately needs longer than the 20s
-    /// default that suits ordinary JSON calls.
+    /// Per-request timeout. Ask runs retrieval and a model call server-side
+    /// before it returns anything at all, so it legitimately needs longer than
+    /// the 20s default that suits ordinary JSON calls.
     var timeout: TimeInterval? = nil
 
     static func json<Body: Encodable>(

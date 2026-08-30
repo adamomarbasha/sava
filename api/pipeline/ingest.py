@@ -46,7 +46,7 @@ from ..models import (
     CanonicalContent, ContentChunk, ContentEmbedding, ContentFrame,
     ContentTranscript, ContentUnderstanding, ProcessingState,
 )
-from . import acquire, frames as frames_mod, route, understanding
+from . import acquire, fastmeta, frames as frames_mod, route, understanding
 from .chunking import build_document_text, chunk_text, chunk_transcript
 
 logger = logging.getLogger(__name__)
@@ -155,6 +155,13 @@ def resolve_or_create_canonical(db, url: str, platform_hint: Optional[str] = Non
         platform_content_id=ident.platform_content_id,
         canonical_url=ident.canonical_url,
         media_kind=ident.media_kind,
+        # A poster before any network call has been made. On YouTube the
+        # thumbnail URL is a function of the video id, so the card the user is
+        # about to see already has an image on it — rather than a placeholder
+        # that persists for as long as the worker queue is deep, or forever if
+        # the extractor is being blocked. See `fastmeta.derived_thumbnail`.
+        thumbnail_url=fastmeta.derived_thumbnail(ident.platform,
+                                                 ident.platform_content_id),
         is_short=is_short_form(ident.platform, media_kind=ident.media_kind,
                                url_hint=url),
         metadata_json=json.dumps({"shorts_url": True}) if shorts_hint else "{}",
@@ -182,6 +189,26 @@ def _set_stage(cc: CanonicalContent, stage: str, status: str, detail: str = "") 
         data = {}
     data[stage] = {"status": status, "detail": detail[:200], "at": int(time.time())}
     cc.stage_status = json.dumps(data)
+
+
+def _stage_ok(cc: CanonicalContent, stage: str) -> bool:
+    """Has this stage already completed successfully?
+
+    The full-extraction stages used to be gated on `not cc.title`, which was a
+    fine proxy for "we have not fetched anything yet" right up until Stage A
+    started filling the title from oEmbed in a quarter of a second. After that
+    the proxy inverted: a successful cheap fetch would have *skipped* the yt-dlp
+    pass, and with it duration, geometry, view counts and the caption track —
+    trading a blank card for a permanently shallow one.
+
+    Asking the stage record directly says what was actually meant.
+    """
+    try:
+        data = json.loads(cc.stage_status or "{}")
+    except Exception:
+        return False
+    entry = data.get(stage) or {}
+    return str(entry.get("status", "")).startswith("ok")
 
 
 def _state(db, cc: CanonicalContent, state: str, level: Optional[int] = None) -> None:
@@ -773,12 +800,37 @@ def process_content(canonical_id: int, db, *, force: bool = False,
         router = get_router()
         strat = strategy_for(cc.platform)
 
+        # ── Stage A: cheap metadata, before anything expensive ──────────────
+        #
+        # One small public request, no auth and no proxy, so the card stops
+        # saying "youtube.com" within about a quarter of a second of the worker
+        # picking the job up — instead of after a yt-dlp extraction that, in
+        # production, is currently losing to an anti-bot challenge.
+        #
+        # Runs first *and* unconditionally-ish so that everything after it is
+        # an improvement rather than a prerequisite: if the full extraction
+        # below fails outright, the save still has a title, a creator and a
+        # poster, and reads as a real item rather than as breakage.
+        if force or not cc.title or not cc.thumbnail_url:
+            fast = fastmeta.fetch(cc.platform, cc.canonical_url,
+                                  content_id=cc.platform_content_id)
+            if fast.useful and fastmeta.apply(cc, fast):
+                _set_stage(cc, "fastmeta", "ok", fast.source)
+                db.commit()
+                logger.info("fastmeta %s: %s in %dms (canonical %s)",
+                            cc.platform, fast.source, fast.wall_ms, cc.id)
+            result["stages"]["fastmeta"] = fast.source
+            telemetry.record(
+                db, operation="acquire.fastmeta", canonical_content_id=cc.id,
+                user_id=user_id, platform=cc.platform, wall_ms=fast.wall_ms,
+                success=fast.useful, error=None if fast.useful else "no_cheap_metadata")
+
         # ── L1+L2 combined for caption platforms ────────────────────────────
         # On YouTube, one yt-dlp extract_info yields metadata AND the caption
         # track list. Fetching them separately would double the bytes pulled
         # through a paid residential proxy for zero benefit.
         prefetched_captions = None
-        if strat.try_native_captions and (force or not cc.title):
+        if strat.try_native_captions and (force or not _stage_ok(cc, "metadata")):
             prefetched_captions = guarded(
                 cc.platform, "captions", acquire.fetch_captions_via_ytdlp,
                 cc.canonical_url, db=db, canonical_content_id=cc.id, user_id=user_id)
@@ -805,7 +857,7 @@ def process_content(canonical_id: int, db, *, force: bool = False,
             carousel = _ingest_carousel(db, cc, user_id=user_id, force=force)
             total_bytes += carousel.get("bytes", 0)
             result["stages"]["carousel"] = carousel.get("status", "skipped")
-        elif force or not cc.title:
+        elif force or not _stage_ok(cc, "metadata"):
             if prefetched_captions is not None and prefetched_captions.ok:
                 meta = _meta_from_info(prefetched_captions.metadata.get("info") or {},
                                        prefetched_captions.bytes_moved)
