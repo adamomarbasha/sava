@@ -24,6 +24,7 @@ struct SaveDetailView: View {
     @State private var showTranscript = false
     @State private var hasTranscript = false
     @State private var retrying = false
+    @State private var showPaywall = false
     @State private var summaryRevealed = false
     /// True only when this summary was generated on this request and has never
     /// been watched appearing before.
@@ -115,6 +116,12 @@ struct SaveDetailView: View {
             AddToCollectionSheet(bookmark: bookmark)
                 .environmentObject(session)
         }
+        .sheet(isPresented: $showPaywall) {
+            NavigationStack {
+                PaywallView(context: "quota_processing",
+                            reason: "You've used all your AI units this month.")
+            }
+        }
     }
 
     // MARK: Header
@@ -184,6 +191,19 @@ struct SaveDetailView: View {
     @ViewBuilder private var summaryUnavailable: some View {
         if bookmark.isProcessing {
             noticeLine("Sava is still reading this one.")
+        } else if bookmark.processingState == .limitReached {
+            // Not an error state, and it deliberately does not read like one.
+            // The save is fine; the allowance ran out. The remedy is an
+            // upgrade, so that is what is offered — not "Try again", which
+            // would fail identically every time until the month turned over.
+            VStack(alignment: .leading, spacing: Space.m) {
+                noticeLine("You've used this month's AI processing. This save is "
+                           + "safe in your library — Sava will read it when your "
+                           + "units reset, or as soon as you upgrade.")
+                Button("Upgrade to Sava Pro") { showPaywall = true }
+                    .font(SavaType.button)
+                    .foregroundStyle(SavaColor.accent)
+            }
         } else if bookmark.processingState == .failed {
             VStack(alignment: .leading, spacing: Space.m) {
                 noticeLine("Sava couldn't read this one.")

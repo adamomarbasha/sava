@@ -11,6 +11,16 @@ import Foundation
 enum ProcessingState: String, Decodable, Equatable {
     case queued, fetching, transcribing, analyzing, ready, partial, failed
 
+    /// Saved, but its AI processing has not been started because the account's
+    /// monthly Processing Units are spent.
+    ///
+    /// Explicitly **not** a failure, and the distinction is the whole point.
+    /// The item is in the library with its URL, note and collections intact; it
+    /// can be opened, organised, searched by title and deleted like anything
+    /// else. Only the understanding is missing, and it arrives on its own the
+    /// moment the allowance resets or the user upgrades.
+    case limitReached = "limit_reached"
+
     /// Short, human phrasing for the UI. Never exposes pipeline internals.
     var label: String {
         switch self {
@@ -18,6 +28,7 @@ enum ProcessingState: String, Decodable, Equatable {
         case .fetching, .transcribing, .analyzing: return "Reading"
         case .ready, .partial: return "Ready"
         case .failed:       return "Couldn't process"
+        case .limitReached: return "AI processing limit reached"
         }
     }
 
@@ -27,6 +38,9 @@ enum ProcessingState: String, Decodable, Equatable {
         default: return false
         }
     }
+
+    /// True when an upgrade (or a reset) is what unblocks this item.
+    var needsUpgrade: Bool { self == .limitReached }
 
     var isUsable: Bool { self == .ready || self == .partial }
 

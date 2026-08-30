@@ -1,0 +1,139 @@
+{
+  "appPolicies" : {
+    "eula" : "Sava Pro is an auto-renewing subscription. Local testing configuration only — this file is never used by a build installed from the App Store.",
+    "policies" : [
+      {
+        "locale" : "en_US",
+        "policyText" : "Sava Pro renews automatically until cancelled.",
+        "policyURL" : "https:\/\/sava.app\/privacy"
+      }
+    ]
+  },
+  "identifier" : "5A7A4E01",
+  "nonRenewingSubscriptions" : [
+
+  ],
+  "products" : [
+
+  ],
+  "settings" : {
+    "_applicationInternalID" : "",
+    "_developerTeamID" : "",
+    "_failTransactionsEnabled" : false,
+    "_lastSynchronizedDate" : 0,
+    "_locale" : "en_US",
+    "_storefront" : "USA",
+    "_storeKitErrors" : [
+      {
+        "current" : null,
+        "enabled" : false,
+        "name" : "Load Products"
+      },
+      {
+        "current" : null,
+        "enabled" : false,
+        "name" : "Purchase"
+      },
+      {
+        "current" : null,
+        "enabled" : false,
+        "name" : "Verification"
+      },
+      {
+        "current" : null,
+        "enabled" : false,
+        "name" : "App Store Sync"
+      },
+      {
+        "current" : null,
+        "enabled" : false,
+        "name" : "Subscription Status"
+      },
+      {
+        "current" : null,
+        "enabled" : false,
+        "name" : "App Transaction"
+      },
+      {
+        "current" : null,
+        "enabled" : false,
+        "name" : "Manage Subscriptions Sheet"
+      },
+      {
+        "current" : null,
+        "enabled" : false,
+        "name" : "Refund Request Sheet"
+      },
+      {
+        "current" : null,
+        "enabled" : false,
+        "name" : "Offer Code Redeem Sheet"
+      }
+    ]
+  },
+  "subscriptionGroups" : [
+    {
+      "id" : "21520489",
+      "localizations" : [
+
+      ],
+      "name" : "Sava Pro",
+      "subscriptions" : [
+        {
+          "adHocOffers" : [
+
+          ],
+          "codeOffers" : [
+
+          ],
+          "displayPrice" : "9.99",
+          "familyShareable" : false,
+          "groupNumber" : 1,
+          "internalID" : "6F4C1A22",
+          "introductoryOffer" : null,
+          "localizations" : [
+            {
+              "description" : "600 AI units and 1,500 Ask messages every month, with priority processing.",
+              "displayName" : "Sava Pro Monthly",
+              "locale" : "en_US"
+            }
+          ],
+          "productID" : "com.sava.mobile.pro.monthly",
+          "recurringSubscriptionPeriod" : "P1M",
+          "referenceName" : "Sava Pro Monthly",
+          "subscriptionGroupID" : "21520489",
+          "type" : "RecurringSubscription"
+        },
+        {
+          "adHocOffers" : [
+
+          ],
+          "codeOffers" : [
+
+          ],
+          "displayPrice" : "79.99",
+          "familyShareable" : false,
+          "groupNumber" : 1,
+          "internalID" : "6F4C1A23",
+          "introductoryOffer" : null,
+          "localizations" : [
+            {
+              "description" : "600 AI units and 1,500 Ask messages every month, with priority processing.",
+              "displayName" : "Sava Pro Annual",
+              "locale" : "en_US"
+            }
+          ],
+          "productID" : "com.sava.mobile.pro.annual",
+          "recurringSubscriptionPeriod" : "P1Y",
+          "referenceName" : "Sava Pro Annual",
+          "subscriptionGroupID" : "21520489",
+          "type" : "RecurringSubscription"
+        }
+      ]
+    }
+  ],
+  "version" : {
+    "major" : 4,
+    "minor" : 0
+  }
+}

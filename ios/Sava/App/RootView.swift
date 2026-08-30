@@ -9,6 +9,7 @@ import SwiftUI
 /// controls as the app behind it.
 struct RootView: View {
     @EnvironmentObject private var session: SessionStore
+    @EnvironmentObject private var subscriptions: SubscriptionManager
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @AppStorage(AppTheme.storageKey) private var themeRaw = AppTheme.dark.rawValue
 
@@ -65,6 +66,22 @@ struct RootView: View {
                 case .signedIn(let user):
                     AppShell(user: user).transition(.opacity)
                 }
+            }
+        }
+        // Bind the subscription manager to the session.
+        //
+        // Driven off `phase` rather than done once at launch, because the
+        // entitlement belongs to an *account*, not to an install. Signing out
+        // and back in as somebody else has to re-resolve it — otherwise the
+        // second user sees the first user's plan on the Profile screen.
+        .onChange(of: session.phase) { _, phase in
+            switch phase {
+            case .signedIn:
+                subscriptions.start(client: session.api)
+            case .signedOut:
+                subscriptions.stop()
+            case .restoring:
+                break
             }
         }
         // The appearance is applied to the window rather than as a SwiftUI

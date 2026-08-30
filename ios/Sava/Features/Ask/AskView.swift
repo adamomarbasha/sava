@@ -91,6 +91,10 @@ struct AskView: View {
     /// bubble immediately so the conversation never appears to swallow input.
     @State private var pending: String?
     @State private var showHistory = false
+    @State private var showPaywall = false
+    /// Set when the last failure was "out of Ask messages", so the error line
+    /// can offer an upgrade instead of a "Try again" that cannot work.
+    @State private var errorNeedsUpgrade = false
     @State private var suggestions: [AskSuggestion] = []
     @State private var loadingSuggestions = false
     /// A stable id for the pending block so the scroll view can follow it.
@@ -154,6 +158,12 @@ struct AskView: View {
                 Task { await open(thread) }
             }
             .environmentObject(session)
+        }
+        .sheet(isPresented: $showPaywall) {
+            NavigationStack {
+                PaywallView(context: "quota_ask",
+                            reason: "You've used all your Ask messages this month.")
+            }
         }
         .task {
             await loadSuggestions()
@@ -411,7 +421,14 @@ struct AskView: View {
                 .foregroundStyle(SavaColor.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
-            if !lastQuestion.isEmpty {
+            if errorNeedsUpgrade {
+                // "Try again" would fail identically until the month resets, so
+                // the only honest control is the one that actually changes the
+                // outcome.
+                Button("Upgrade to Sava Pro") { showPaywall = true }
+                    .font(SavaType.caption)
+                    .foregroundStyle(SavaColor.accent)
+            } else if !lastQuestion.isEmpty {
                 Button("Try again") { ask(lastQuestion) }
                     .font(SavaType.caption)
                     .foregroundStyle(SavaColor.accent)
@@ -521,6 +538,7 @@ struct AskView: View {
         focused = false
         asking = true
         errorMessage = nil
+        errorNeedsUpgrade = false
         question = ""
         inFlightQuestion = trimmed
         lastQuestion = trimmed
@@ -558,9 +576,13 @@ struct AskView: View {
                 guard !Task.isCancelled else { return }
                 asking = false
                 pending = nil
-                errorMessage = (error as? APIError)?.userMessage
+                let api = error as? APIError
+                errorNeedsUpgrade = api?.needsUpgrade ?? false
+                errorMessage = api?.userMessage
                     ?? "Couldn't get an answer. Try again."
-                Haptics.error()
+                // No error haptic for a quota: it is not a fault, and buzzing
+                // at somebody for reaching a documented limit reads as blame.
+                if errorNeedsUpgrade { Haptics.tap() } else { Haptics.error() }
             }
         }
     }
@@ -586,6 +608,7 @@ struct AskView: View {
             turns = []
             pending = nil
             errorMessage = nil
+        errorNeedsUpgrade = false
         }
         asking = false
         threadID = nil
@@ -617,6 +640,7 @@ struct AskView: View {
             turns = restored
             pending = nil
             errorMessage = nil
+        errorNeedsUpgrade = false
         }
         threadID = thread.id
         Haptics.success()

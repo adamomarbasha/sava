@@ -126,6 +126,9 @@ final class APIClient {
             throw APIError.notFound(Self.detail(from: data))
         case 409:
             throw APIError.conflict(Self.detail(from: data))
+        case 402:
+            throw APIError.upgradeRequired(Self.detail(from: data),
+                                           capability: Self.capability(from: data))
         case 400, 422:
             throw APIError.badRequest(Self.detail(from: data))
         default:
@@ -191,7 +194,24 @@ final class APIClient {
            let msg = first["msg"] as? String {
             return msg
         }
+        // A structured detail — what `entitlements.UpgradeRequired` sends, so
+        // the response can carry the capability alongside the message. Without
+        // this branch a 402 arrives with no text at all and the paywall opens
+        // with a blank reason.
+        if let dict = detail as? [String: Any],
+           let message = dict["message"] as? String {
+            return message
+        }
         return nil
+    }
+
+    /// The `capability` field of a structured error detail, when present.
+    private static func capability(from data: Data) -> String? {
+        guard let object = try? JSONSerialization.jsonObject(with: data),
+              let dict = object as? [String: Any],
+              let detail = dict["detail"] as? [String: Any]
+        else { return nil }
+        return detail["capability"] as? String
     }
 }
 

@@ -11,17 +11,21 @@ struct ProfileView: View {
 
     @EnvironmentObject private var session: SessionStore
     @EnvironmentObject private var library: LibraryViewModel
+    @EnvironmentObject private var subscriptions: SubscriptionManager
     @Environment(\.openURL) private var openURL
     @Environment(\.dismiss) private var dismiss
 
     @State private var confirmSignOut = false
     @State private var exporting = false
     @State private var exportPayload: SharePayload?
+    @State private var showPaywall = false
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: Space.xxl) {
                 identity
+                planSection
+                usageSection
                 appearance
                 libraryStats
                 captureSection
@@ -48,12 +52,28 @@ struct ProfileView: View {
         .sheet(item: $exportPayload) { payload in
             ShareSheet(items: [payload.url])
         }
+        .sheet(isPresented: $showPaywall) {
+            NavigationStack { PaywallView(context: "profile") }
+        }
         .confirmationDialog("Sign out of Sava?", isPresented: $confirmSignOut) {
             Button("Sign out", role: .destructive) {
                 Haptics.press()
                 session.signOut()
             }
         }
+    }
+
+    /// Sava Pro. First thing under the identity, because "what am I paying
+    /// for" is the question a settings screen most often gets opened to answer.
+    private var planSection: some View {
+        VStack(alignment: .leading, spacing: Space.m) {
+            SectionHeader(text: "Plan")
+            SubscriptionRow { showPaywall = true }
+        }
+    }
+
+    private var usageSection: some View {
+        UsageSection()
     }
 
     private var appearance: some View {
@@ -107,20 +127,46 @@ struct ProfileView: View {
         }
     }
 
+    /// One row into the setup screen, rather than the instructions inline.
+    ///
+    /// Installing the Shortcut and assigning the Action Button is a one-time
+    /// job with its own links and its own copy. Leaving it half-explained on
+    /// the settings screen meant a sentence and a dead row that told you where
+    /// to go without taking you there.
     private var captureSection: some View {
         VStack(alignment: .leading, spacing: Space.m) {
-            SectionHeader(text: "One-press save")
-            Text("Assign Sava to your Action Button to save whatever you're watching without opening the app.")
-                .font(SavaType.callout)
-                .foregroundStyle(SavaColor.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-
+            SectionHeader(text: "Saving")
             VStack(spacing: 0) {
+                NavigationLink {
+                    SaveAnywhereView()
+                } label: {
+                    HStack(spacing: Space.m) {
+                        Image(systemName: "button.horizontal.top.press")
+                            .font(.system(size: 15))
+                            .foregroundStyle(SavaColor.secondary)
+                            .frame(width: 22)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Save from anywhere")
+                                .font(SavaType.body)
+                                .foregroundStyle(SavaColor.primary)
+                            Text("Add the Shortcut, use the Action Button")
+                                .font(SavaType.meta)
+                                .foregroundStyle(SavaColor.tertiary)
+                        }
+                        Spacer(minLength: Space.s)
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(SavaColor.tertiary)
+                    }
+                    .frame(minHeight: 56)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .hairline()
+
                 SavaRow(title: "Open Shortcuts", symbol: "square.stack.3d.up") {
                     if let url = URL(string: "shortcuts://") { openURL(url) }
                 }
-                SavaRow(title: "Action Button", detail: "Settings → Action Button",
-                        symbol: "button.horizontal.top.press", showsChevron: false)
             }
         }
     }
