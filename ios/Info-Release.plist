@@ -3,18 +3,26 @@
 <plist version="1.0">
 <dict>
 	<!-- ══════════════════════════════════════════════════════════════════════
-	     THE ONE LINE TO CHANGE BEFORE SHIPPING.
+	     THE PRODUCTION API ORIGIN. Release builds talk to this and nothing else.
 
-	     Replace the sentinel below with Sava's deployed HTTPS API origin, e.g.
-	         <string>https://api.sava.app</string>
+	     This is Sava's live Render web service. A custom domain is deliberately
+	     not in use yet, so the Render-assigned hostname is the correct value
+	     rather than a stand-in for one: it is publicly reachable over HTTPS with
+	     a valid certificate, which is everything ATS and the validator require.
+
+	     When a custom domain is introduced, change this one line — every request
+	     in the app and the share extension resolves against it, so there is no
+	     second place to update. Point the domain at the same service first and
+	     confirm /health before switching, because a Release build has no
+	     fallback by design.
 
 	     It must be https and must not be a local or private address. The
-	     "Validate API configuration" build phase fails the Release build while
-	     the sentinel is still here, so a build pointing at a LAN address cannot
-	     be produced by accident.
+	     "Validate API configuration" build phase fails the Release build if that
+	     ever stops being true, so a build pointing at a LAN address cannot be
+	     produced by accident.
 	     ══════════════════════════════════════════════════════════════════════ -->
 	<key>SAVA_API_BASE_URL</key>
-	<string>REPLACE_WITH_PRODUCTION_API_URL</string>
+	<string>https://sava-api.onrender.com</string>
 
 	<!-- No NSAppTransportSecurity key at all.
 	     ATS therefore applies in full: TLS 1.2+, forward secrecy, no cleartext,
