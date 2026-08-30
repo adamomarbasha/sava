@@ -157,6 +157,19 @@ class ProcessingState:
     PARTIAL = "partial"      # usable, but some enrichment failed
     FAILED = "failed"
 
+    # The user is out of Processing Units, so the expensive understanding pass
+    # was never started. Deliberately NOT a failure: the save exists, it is in
+    # the library, its metadata is whatever we already had, and it becomes
+    # processable the moment the allowance resets or the user upgrades.
+    #
+    # A distinct state rather than leaving it QUEUED, because QUEUED means "a
+    # worker will get to this" and nothing ever will. The client shows
+    # "AI processing limit reached" and an upgrade affordance off this value.
+    LIMIT_REACHED = "limit_reached"
+
+    #: States from which a save can still be processed later.
+    RESUMABLE = (QUEUED, LIMIT_REACHED, FAILED)
+
 
 class CanonicalContent(Base):
     """One row per distinct piece of content, shared across all users."""
@@ -218,6 +231,20 @@ class CanonicalContent(Base):
     comment_count = Column(Integer)
     stage_status = Column(Text, nullable=False, default="{}")   # per-stage ok/failed/skipped
     last_error = Column(Text)
+
+    # Which pipeline route actually ran, and why.
+    #
+    # Recorded rather than inferred because it is the number the whole cost
+    # model turns on: what fraction of TikToks are served by text-only versus
+    # by a video download is the difference between a 25% and a 130% cost
+    # ratio, and it can only be known by measuring it. `/api/ops/routes`
+    # aggregates these so the escalation thresholds can be retuned from a real
+    # corpus instead of from the 129 items we had when they were chosen.
+    #
+    # Also what the meter charges against: a save is billed for the route it
+    # took, not for how long the video was.
+    route = Column(String(16))
+    route_reason = Column(String(200))
 
     first_seen_at = Column(DateTime(timezone=True), nullable=False, default=func.now())
     updated_at = Column(DateTime(timezone=True), nullable=False, default=func.now(), onupdate=func.now())
@@ -507,6 +534,16 @@ class Job(Base):
     # work for a platform that is currently throttled or circuit-open.
     platform = Column(String(20))
     payload = Column(Text, nullable=False, default="{}")
+
+    # Who caused this job. Denormalised out of `payload` so per-user fairness is
+    # an indexed query rather than a LIKE over JSON text.
+    #
+    # Note this is *the user who triggered the work*, not an owner: one job
+    # serves everyone who saved the same content, which is the whole point of
+    # the canonical cache. It exists so one account cannot occupy every worker
+    # slot, and so a Pro subscriber's concurrency allowance is enforceable.
+    user_id = Column(Integer)
+
     state = Column(String(16), nullable=False, default="queued")   # queued|running|done|failed|dead
     priority = Column(Integer, nullable=False, default=100)
     attempts = Column(Integer, nullable=False, default=0)
@@ -521,6 +558,7 @@ class Job(Base):
     __table_args__ = (
         Index("idx_jobs_claim", "state", "run_after", "priority"),
         Index("idx_jobs_platform", "platform", "state"),
+        Index("idx_jobs_user_state", "user_id", "state"),
     )
 
 
@@ -581,3 +619,184 @@ class ChatMessage(Base):
     created_at = Column(DateTime(timezone=True), nullable=False, default=func.now())
 
     __table_args__ = (Index("idx_messages_thread_created", "thread_id", "created_at"),)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# SUBSCRIPTION & METERING
+#
+# Two tables, and the split between them is the important part.
+#
+# `Subscription` is *what Apple told us*. It is written only by verified App
+# Store transaction data and is the sole thing that decides whether an account
+# is Pro. Nothing a client asserts reaches it.
+#
+# `BillingPeriod` is *what the account has spent*. One row per user per billing
+# month, holding the counters that the atomic reserve/refund runs against. It is
+# separate from `UsageEvent` on purpose: usage events are a best-effort cost
+# ledger written after the fact, whereas an allowance has to be decremented
+# transactionally before the money is spent. Counting events to decide whether
+# to start work would race with itself under concurrent saves.
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class SubscriptionStatus:
+    """Where an account stands with Apple.
+
+    Mirrors the states Apple actually exposes rather than inventing our own.
+    `GRACE` matters commercially: a renewal that failed on a expired card is
+    still a paying customer, and Apple keeps retrying for days. Cutting them off
+    at the first failed charge is how a subscription business loses people it
+    had already won.
+    """
+    NONE = "none"          # never subscribed
+    ACTIVE = "active"      # paid and current
+    GRACE = "grace"        # billing retry / grace period — still entitled
+    EXPIRED = "expired"    # lapsed
+    REVOKED = "revoked"    # refunded or family-sharing withdrawn — not entitled
+
+    #: The states that grant the `pro` entitlement. Everything else does not.
+    ENTITLED = (ACTIVE, GRACE)
+
+
+class Subscription(Base):
+    """One row per user. Written only from verified Apple transaction data."""
+    __tablename__ = "subscriptions"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"),
+                     nullable=False, unique=True)
+
+    plan = Column(String(16), nullable=False, default="free")
+    status = Column(String(16), nullable=False, default=SubscriptionStatus.NONE)
+    product_id = Column(String(120))
+
+    # Apple's stable identity for a subscription across every renewal. This is
+    # the anti-sharing key: it is unique here, so the same purchase cannot be
+    # replayed to grant Pro on a second account.
+    original_transaction_id = Column(String(64), unique=True)
+    # The most recent transaction seen, for idempotent re-verification.
+    latest_transaction_id = Column(String(64))
+
+    purchased_at = Column(DateTime(timezone=True))
+    expires_at = Column(DateTime(timezone=True))
+    auto_renew = Column(Boolean, nullable=False, default=False)
+
+    # "Production" | "Sandbox" | "LocalTesting". Recorded because a Sandbox
+    # transaction must never be mistaken for a real one in production, and
+    # because a support question always starts with "which environment?".
+    environment = Column(String(16), nullable=False, default="Production")
+
+    # How the entitlement was established. "apple_jws" is the real path;
+    # "local_testing" is only reachable when explicitly enabled outside
+    # production. Stored so an audit can tell them apart forever.
+    verification = Column(String(24), nullable=False, default="apple_jws")
+
+    last_verified_at = Column(DateTime(timezone=True))
+    # The decoded claim set of the last accepted transaction, as JSON. Not the
+    # raw JWS: it is large, it is a bearer-ish credential, and we have already
+    # extracted everything we act on.
+    last_claims = Column(Text, nullable=False, default="{}")
+
+    created_at = Column(DateTime(timezone=True), nullable=False, default=func.now())
+    updated_at = Column(DateTime(timezone=True), nullable=False,
+                        default=func.now(), onupdate=func.now())
+
+    __table_args__ = (
+        Index("idx_subscriptions_user", "user_id"),
+        Index("idx_subscriptions_expiry", "status", "expires_at"),
+    )
+
+
+class BillingPeriod(Base):
+    """One user's allowance counters for one billing month.
+
+    The period boundaries are computed and stored server-side and never come
+    from a client, so a phone with its clock wound back gets the same answer as
+    everybody else.
+
+    `units_used` and `ask_used` are moved only by conditional UPDATE statements
+    (`UPDATE ... SET units_used = units_used + n WHERE units_used + n <= limit`),
+    which is what makes concurrent saves unable to overspend the account: the
+    database decides the winner, not a read-then-write in Python.
+    """
+    __tablename__ = "billing_periods"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"),
+                     nullable=False)
+
+    period_start = Column(DateTime(timezone=True), nullable=False)
+    period_end = Column(DateTime(timezone=True), nullable=False)
+
+    #: The plan in force when this period opened. Informational — the live plan
+    #: from `entitlements` is what limits are read from, so upgrading mid-month
+    #: raises the ceiling immediately rather than at the next reset.
+    plan = Column(String(16), nullable=False, default="free")
+
+    units_used = Column(Integer, nullable=False, default=0)
+    ask_used = Column(Integer, nullable=False, default=0)
+
+    #: Units handed back after an infrastructure failure. Tracked separately so
+    #: refund abuse is visible rather than merely absent from `units_used`.
+    units_refunded = Column(Integer, nullable=False, default=0)
+
+    created_at = Column(DateTime(timezone=True), nullable=False, default=func.now())
+    updated_at = Column(DateTime(timezone=True), nullable=False,
+                        default=func.now(), onupdate=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "period_start", name="uq_period_user_start"),
+        Index("idx_periods_user_start", "user_id", "period_start"),
+    )
+
+
+class UnitReservation(Base):
+    """One debit against a billing period, tied to the work that caused it.
+
+    Exists so a refund can be *specific*. Without it the only way to give units
+    back would be to decrement the counter and hope the amount was right, and
+    nothing would stop the same failure refunding twice. Here a reservation is
+    consumed exactly once: `state` moves queued -> settled or queued -> refunded,
+    and the refund path only fires on a row still in `queued`.
+
+    Keyed on the canonical content id, matching the job that does the work, so
+    the reservation and the thing it paid for cannot drift apart.
+    """
+    __tablename__ = "unit_reservations"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"),
+                     nullable=False)
+    period_id = Column(Integer, ForeignKey("billing_periods.id", ondelete="CASCADE"),
+                       nullable=False)
+    canonical_content_id = Column(Integer)
+    bookmark_id = Column(Integer)
+
+    units = Column(Integer, nullable=False, default=0)
+    #: queued -> the work has not finished; settled -> spent; refunded -> given back.
+    state = Column(String(12), nullable=False, default="queued")
+    reason = Column(String(64))
+
+    #: Which run of this content this reservation paid for. 0 is the original
+    #: save; a reprocess opens attempt 1, and so on.
+    #
+    # It exists to keep the unique key useful across repeat work. Keying only on
+    # (user, content) would make the *second* expensive run free — the row from
+    # the first would be found and treated as already paid — which is a free
+    # "reprocess" button on every item in the library. Including the attempt
+    # means each genuine run is charged once and only once, while a retried
+    # enqueue of the same run still collides and cannot double-debit.
+    attempt = Column(Integer, nullable=False, default=0)
+
+    created_at = Column(DateTime(timezone=True), nullable=False, default=func.now())
+    settled_at = Column(DateTime(timezone=True))
+
+    __table_args__ = (
+        # One reservation per user, per content item, per run. This is what makes
+        # the debit idempotent: a re-enqueued job, a retried save, or two devices
+        # saving the same link at once all collide here rather than paying twice.
+        UniqueConstraint("user_id", "canonical_content_id", "attempt",
+                         name="uq_reservation_user_content_attempt"),
+        Index("idx_reservations_period_state", "period_id", "state"),
+        Index("idx_reservations_user_content", "user_id", "canonical_content_id"),
+    )
