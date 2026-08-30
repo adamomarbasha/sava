@@ -21,6 +21,7 @@ load_dotenv()
 from .db import get_db, init_db, migrate_from_sqlite
 from .models import User, Bookmark
 from .ingestors import ProviderUnavailable, add_bookmark, refresh_bookmark
+from .services import playback as playback_svc
 from .email_validation import validate_email_comprehensive
 from .transcript_service import get_youtube_transcript, get_available_transcript_languages, get_transcript
 from .comment_service import youtube_comment_service
@@ -564,9 +565,19 @@ def serialize_bookmark(bookmark, cc=None):
         # storage that copy is the durable one, and preferring the per-user
         # cache means every user keeps seeing the broken image the mirror was
         # created to fix.
+        # The last resort is derived, not stored.
+        #
+        # Saves made before metadata-first ingestion carry `thumbnail_url =
+        # NULL` on both rows, and every surface that reads this — the library
+        # grid, the Scroll poster, the Ask source list — then had nothing to
+        # draw. For YouTube the thumbnail is a pure function of the video id, so
+        # naming it here repairs those rows everywhere at once, with no backfill
+        # and no network call. `poster_for` returns None for platforms whose
+        # CDN paths are signed, because a guessed URL that 404s is worse than
+        # the designed no-image plate.
         "thumbnail_url": ((cc.thumbnail_url if (cc and cc.thumbnail_stored_key) else None)
                           or bookmark.thumbnail_url
-                          or (cc.thumbnail_url if cc else None)),
+                          or (playback_svc.poster_for(cc) if cc else None)),
         # The caption. For TikTok/Instagram the title *is* the caption, so the
         # client shows this only when it adds something.
         "description": bookmark.description or (cc.description if cc else None),

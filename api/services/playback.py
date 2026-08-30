@@ -394,9 +394,27 @@ def _gallery_images(db, cc) -> list:
     return images
 
 
+def poster_for(cc) -> Optional[str]:
+    """The best poster we can name for this item, without a network call.
+
+    Falls back to the derived YouTube thumbnail when the stored one is empty.
+
+    Saves made before metadata-first ingestion landed still carry
+    `thumbnail_url = NULL`, and the viewer reads its poster from here — so those
+    items opened onto a black frame with nothing behind the player while it
+    loaded. Deriving the URL at descriptor time repairs the existing rows
+    without a backfill, and costs nothing: it is a pure function of the video
+    id, and `fastmeta` already guards the id's shape.
+    """
+    if cc.thumbnail_url:
+        return cc.thumbnail_url
+    from ..pipeline.fastmeta import derived_thumbnail
+    return derived_thumbnail(cc.platform, cc.platform_content_id)
+
+
 def descriptor_for(db, cc, *, user_id: int, base_url: str = "") -> PlaybackDescriptor:
     """How this item plays. Never raises; an unplayable item says why."""
-    poster = cc.thumbnail_url
+    poster = poster_for(cc)
     duration = float(cc.duration_seconds) if cc.duration_seconds else None
     platform = (cc.platform or "").lower()
     kind = (cc.media_kind or "").lower()
@@ -575,27 +593,97 @@ def stream_upstream(db, cc, *, range_header: Optional[str], user_id: Optional[in
 
 # ─── The embed host page ─────────────────────────────────────────────────────
 
+# ── Telling the app what happened ──────────────────────────────────────────
+#
+# The host page used to paint `#000` and say nothing. If the iframe failed to
+# load — no network, an age-gated or removed video, a blocked embed — the app
+# had no way to know: `WKNavigationDelegate.didFinish` fires for the *page*,
+# which loaded fine, while the iframe inside it stayed empty. The result was a
+# full-screen black rectangle with no explanation and no way out, which is the
+# reported symptom.
+#
+# So the page now reports its own state to the app over `webkit.messageHandlers`
+# and, critically, distinguishes "the player is ready" from "the page loaded".
+# YouTube's IFrame API gives us both signals: `onReady` and `onError`. A
+# watchdog covers the case where neither ever fires.
+_EMBED_BRIDGE = """
+  function savaReport(state, detail) {
+    try {
+      window.webkit.messageHandlers.sava.postMessage(
+        {state: state, detail: detail || ''});
+    } catch (e) {}
+  }
+"""
+
 EMBED_PAGE = """<!doctype html>
 <html><head>
 <meta name="viewport" content="width=device-width, initial-scale=1,
       maximum-scale=1, user-scalable=no">
 <style>
-  html,body{{margin:0;padding:0;background:#000;height:100%;overflow:hidden}}
+  /* Transparent, not black.
+     The app holds the item's poster *behind* this web view until the player
+     reports ready, exactly as the AVPlayer path does. An opaque background
+     here would hide that poster and reintroduce the black frame. */
+  html,body{{margin:0;padding:0;background:transparent;height:100%;overflow:hidden}}
   #frame{{position:absolute;inset:0;width:100%;height:100%;border:0}}
 </style>
 </head><body>
-<iframe id="frame" allow="autoplay; encrypted-media" allowfullscreen
-  src="https://www.youtube.com/embed/{video_id}?playsinline=1&rel=0&modestbranding=1&controls=0&iv_load_policy=3&fs=0&autoplay=0&enablejsapi=1&origin={origin}"></iframe>
+<div id="host"></div>
+<script src="https://www.youtube.com/iframe_api"></script>
 <script>
-  var f = document.getElementById('frame');
-  function post(fn) {{
-    f.contentWindow.postMessage(
-      JSON.stringify({{event:'command', func:fn, args:[]}}), '*');
+{bridge}
+  var player = null, settled = false;
+
+  // An error always wins, even after `ready`.
+  //
+  // YouTube constructs the player and fires `onReady` *before* it discovers a
+  // video is removed or embedding-disabled, then fires `onError`. A first-wins
+  // guard therefore latched `ready`, the app took its poster down, and the user
+  // was shown YouTube's own "Video unavailable" screen with its branding
+  // colliding with Sava's overlay. Letting the error supersede lets Sava say it
+  // in Sava's words.
+  function settle(state, detail) {{
+    var fatal = (state === 'unavailable' || state === 'failed');
+    if (settled && !fatal) return;
+    settled = true;
+    savaReport(state, detail);
   }}
-  function savaPlay(){{ post('playVideo'); }}
-  function savaPause(){{ post('pauseVideo'); }}
-  function savaMute(){{ post('mute'); }}
-  function savaUnmute(){{ post('unMute'); }}
+
+  // The API script itself can fail to load on a captive or offline network,
+  // and the callback below would then never run.
+  var watchdog = setTimeout(function () {{
+    settle('failed', 'timeout');
+  }}, 12000);
+
+  function onYouTubeIframeAPIReady() {{
+    player = new YT.Player('host', {{
+      videoId: '{video_id}',
+      playerVars: {{
+        playsinline: 1, rel: 0, modestbranding: 1, controls: 0,
+        iv_load_policy: 3, fs: 0, autoplay: 0, origin: '{origin}'
+      }},
+      events: {{
+        onReady: function () {{
+          clearTimeout(watchdog);
+          var f = document.getElementById('host');
+          if (f && f.tagName === 'IFRAME') {{ f.id = 'frame'; }}
+          settle('ready', '');
+        }},
+        // 2 bad id, 5 html5 error, 100 removed, 101/150 embedding disabled.
+        // These are the cases that used to render as an unexplained black
+        // rectangle; each one now becomes a sentence the user can act on.
+        onError: function (e) {{
+          clearTimeout(watchdog);
+          settle('unavailable', String(e && e.data));
+        }}
+      }}
+    }});
+  }}
+
+  function savaPlay(){{ if (player && player.playVideo) player.playVideo(); }}
+  function savaPause(){{ if (player && player.pauseVideo) player.pauseVideo(); }}
+  function savaMute(){{ if (player && player.mute) player.mute(); }}
+  function savaUnmute(){{ if (player && player.unMute) player.unMute(); }}
 </script>
 </body></html>"""
 
@@ -616,7 +704,9 @@ INSTAGRAM_EMBED_PAGE = """<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1,
       maximum-scale=1, user-scalable=no">
 <style>
-  html,body{{margin:0;padding:0;background:#000;height:100%;overflow:hidden}}
+  /* Transparent for the same reason as the YouTube page: the app holds the
+     poster behind this until the frame reports in. */
+  html,body{{margin:0;padding:0;background:transparent;height:100%;overflow:hidden}}
   #frame{{position:absolute;inset:0;width:100%;height:100%;border:0}}
 </style>
 </head><body>
@@ -624,6 +714,25 @@ INSTAGRAM_EMBED_PAGE = """<!doctype html>
   allowtransparency="true" frameborder="0" scrolling="no"
   src="https://www.instagram.com/p/{code}/embed/captioned/"></iframe>
 <script>
+{bridge}
+  var reported = false;
+  function settle(state, detail) {{
+    if (reported) return;
+    reported = true;
+    savaReport(state, detail);
+  }}
+
+  // Instagram publishes no JS API for its embed, so `load` on the iframe is the
+  // only signal available. It fires when the frame has content — including
+  // Instagram's own "this post is unavailable" page, which cannot be
+  // distinguished from here without reaching into a cross-origin document.
+  // Reporting `ready` is therefore honest about what is known: the frame
+  // rendered *something*, and the poster can be taken down.
+  var f = document.getElementById('frame');
+  f.addEventListener('load', function () {{ settle('ready', ''); }});
+  f.addEventListener('error', function () {{ settle('failed', 'iframe'); }});
+  setTimeout(function () {{ settle('failed', 'timeout'); }}, 12000);
+
   // Instagram's embed exposes no JS control surface, so these exist only so the
   // app's player protocol has something to call. Playback is the user's tap
   // inside the frame.
@@ -638,9 +747,9 @@ INSTAGRAM_EMBED_PAGE = """<!doctype html>
 def instagram_embed_page(code: str, origin: str) -> str:
     """Host page for one Instagram post. `origin` is unused by Instagram but
     kept in the signature so both embed builders are called the same way."""
-    return INSTAGRAM_EMBED_PAGE.format(code=code)
+    return INSTAGRAM_EMBED_PAGE.format(code=code, bridge=_EMBED_BRIDGE)
 
 
 def embed_page(video_id: str, origin: str) -> str:
     """The host page for one video. Origin is declared, not guessed."""
-    return EMBED_PAGE.format(video_id=video_id, origin=origin)
+    return EMBED_PAGE.format(video_id=video_id, origin=origin, bridge=_EMBED_BRIDGE)

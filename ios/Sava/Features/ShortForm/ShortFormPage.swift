@@ -19,6 +19,10 @@ struct ShortFormPage: View {
 
     @State private var progress: Double = 0
     @State private var showPlayGlyph = false
+    /// One per page, and owned here rather than inside `EmbedPlayer`: SwiftUI
+    /// recreates the representable struct on every parent redraw, so state
+    /// living in it would reset and flash the poster back over a playing video.
+    @StateObject private var embedState = EmbedState()
 
     var body: some View {
         ZStack {
@@ -68,12 +72,9 @@ struct ShortFormPage: View {
 
         case .embed:
             if let url = descriptor?.url {
-                // Sized to the item's own ratio rather than filled, so a Short
-                // is not cropped and a mis-tagged landscape video is not blown
-                // up past the edges of the screen.
-                EmbedPlayer(url: url, isActive: isCurrent, isMuted: pool.isMuted)
-                    .aspectRatio(descriptor?.aspect ?? bookmark.mediaAspect,
-                                 contentMode: .fit)
+                EmbedStage(bookmark: bookmark, url: url,
+                           aspect: descriptor?.aspect ?? bookmark.mediaAspect,
+                           isCurrent: isCurrent, pool: pool, state: embedState)
             } else {
                 ShortFormUnavailable(bookmark: bookmark, reason: nil)
             }
@@ -101,6 +102,109 @@ struct ShortFormPage: View {
             try? await Task.sleep(nanoseconds: 550_000_000)
             withAnimation(Motion.gentle) { showPlayGlyph = false }
         }
+    }
+}
+
+// MARK: - Embed
+
+/// The web-view stage: poster underneath, player over it, failure in front.
+///
+/// Mirrors `VideoStage` deliberately. Both hold the item's poster until their
+/// decoder has something real to show, and both keep the poster *under* the
+/// player rather than instead of it, so the handover has nothing to flicker
+/// through. The embed path simply had none of this — it put an opaque black web
+/// view on screen and hoped.
+private struct EmbedStage: View {
+    let bookmark: Bookmark
+    let url: URL
+    let aspect: CGFloat
+    let isCurrent: Bool
+    @ObservedObject var pool: ShortPlayerPool
+    @ObservedObject var state: EmbedState
+
+    var body: some View {
+        ZStack {
+            // Held under the player, not instead of it, so the transition from
+            // the grid is continuous and a slow embed shows the frame the user
+            // tapped rather than a hole.
+            if state.phase.showsPoster {
+                ShortFormPoster(bookmark: bookmark,
+                                showsSpinner: !state.phase.isTerminalFailure)
+            }
+
+            // Sized to the item's own ratio rather than filled, so a Short is
+            // not cropped and a mis-tagged landscape video is not blown up past
+            // the edges of the screen.
+            //
+            // Kept mounted through a retryable failure: tearing the web view
+            // down would discard a page that may still be mid-recovery, and
+            // remounting is what makes a retry feel like a reload rather than a
+            // navigation.
+            if !isUnavailable {
+                EmbedPlayer(url: url, isActive: isCurrent,
+                            isMuted: pool.isMuted, state: state)
+                    .aspectRatio(aspect, contentMode: .fit)
+                    .opacity(state.phase == .ready ? 1 : 0)
+                    .allowsHitTesting(state.phase == .ready)
+            }
+
+            switch state.phase {
+            case .unavailable(let why):
+                ShortFormUnavailable(bookmark: bookmark, reason: why)
+            case .failed(let why):
+                ShortFormRetry(bookmark: bookmark, reason: why) { state.retry() }
+            default:
+                EmptyView()
+            }
+        }
+    }
+
+    private var isUnavailable: Bool {
+        if case .unavailable = state.phase { return true }
+        return false
+    }
+}
+
+/// A failure that might not recur, with the one control that helps.
+///
+/// Distinct from `ShortFormUnavailable`, which is for permanent facts about the
+/// content ("the creator doesn't allow this to play outside YouTube"). Offering
+/// Retry there would be a button that cannot work; withholding it here would
+/// strand somebody whose train went into a tunnel.
+private struct ShortFormRetry: View {
+    let bookmark: Bookmark
+    let reason: String
+    let onRetry: () -> Void
+
+    var body: some View {
+        ZStack {
+            MediaImage(url: bookmark.imageURL, fallback: .transparent,
+                       fit: .fitOnBackdrop, cornerRadius: 0)
+                .overlay(Color.black.opacity(0.68))
+
+            VStack(spacing: Space.l) {
+                Image(systemName: "arrow.trianglehead.clockwise")
+                    .font(.system(size: 28, weight: .regular))
+                    .foregroundStyle(.white.opacity(0.85))
+                Text(reason)
+                    .font(SavaType.callout)
+                    .foregroundStyle(.white.opacity(0.9))
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button(action: onRetry) {
+                    Text("Try again")
+                        .font(SavaType.caption)
+                        .foregroundStyle(SavaColor.onAccent)
+                        .padding(.horizontal, Space.xl)
+                        .frame(minHeight: 44)
+                        .background(SavaColor.accent, in: Capsule())
+                }
+                .buttonStyle(.plain)
+            }
+            .screenPadding()
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("\(reason) Double tap Try again to reload.")
     }
 }
 
@@ -281,7 +385,7 @@ private struct ShortFormUnavailable: View {
         ZStack {
             MediaImage(url: bookmark.imageURL, fallback: .transparent,
                        fit: .fitOnBackdrop, cornerRadius: 0)
-                .overlay(Color.black.opacity(0.55))
+                .overlay(Color.black.opacity(0.68))
 
             VStack(spacing: Space.m) {
                 Text("Can't play this here")
