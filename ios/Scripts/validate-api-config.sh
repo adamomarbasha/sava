@@ -50,10 +50,23 @@ case "${URL}" in
         ;;
 esac
 
+# An IPv6 literal is bracketed in a URL: https://[::1]:8000. The host
+# extraction below cuts at the first ":" and so produced "[", which matched
+# none of the private patterns — IPv6 loopback validated cleanly, and the
+# "::1" case was unreachable. A shipping build has no reason to point at a raw
+# IPv6 address at all, so the whole form is refused rather than classified.
+case "${URL}" in
+    https://\[*)
+        echo "error: SAVA_API_BASE_URL uses a raw IPv6 literal: ${URL}"
+        echo "error: A Release build must target a public hostname."
+        exit 1
+        ;;
+esac
+
 HOST=$(echo "${URL}" | sed -E 's#^https://##; s#[:/].*$##')
 
 case "${HOST}" in
-    localhost|*.local|127.*|10.*|192.168.*|169.254.*|::1)
+    localhost|*.local|127.*|10.*|192.168.*|169.254.*)
         echo "error: SAVA_API_BASE_URL points at the private address ${HOST}."
         echo "error: A Release build must target a publicly reachable host."
         exit 1

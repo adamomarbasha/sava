@@ -277,9 +277,19 @@ enum AppConfig {
 
     /// Hosts that can only ever mean "a machine on the developer's desk".
     static func isPrivateHost(_ host: String) -> Bool {
-        let lowered = host.lowercased()
+        var lowered = host.lowercased()
+
+        // A URL wraps an IPv6 literal in brackets (RFC 3986), so `URLComponents`
+        // reports the host of `https://[::1]:8000` as `[::1]` and never as the
+        // bare `::1` this function used to compare against. That comparison was
+        // therefore unreachable, and IPv6 loopback passed validation into a
+        // Release build. Unwrap first, then classify.
+        if lowered.hasPrefix("["), lowered.hasSuffix("]") {
+            lowered = String(lowered.dropFirst().dropLast())
+        }
+
         if lowered == "localhost" || lowered.hasSuffix(".local") { return true }
-        if lowered == "::1" { return true }
+        if lowered.contains(":") { return isPrivateIPv6(lowered) }
 
         let parts = lowered.split(separator: ".").compactMap { UInt8($0) }
         guard parts.count == 4 else { return false }
@@ -291,5 +301,29 @@ enum AppConfig {
         case (172, 16...31):                return true    // 172.16.0.0/12
         default:                            return false
         }
+    }
+
+    /// The IPv6 equivalent, parsed rather than pattern-matched.
+    ///
+    /// `::1` can be written `0:0:0:0:0:0:0:1`, link-local carries a zone
+    /// (`fe80::1%en0`), and `::ffff:127.0.0.1` is loopback wearing an IPv6 hat.
+    /// String comparison catches none of those; `inet_pton` gives the 16 bytes
+    /// the ranges are actually defined over.
+    private static func isPrivateIPv6(_ address: String) -> Bool {
+        let bare = String(address.split(separator: "%").first ?? "")
+        var parsed = in6_addr()
+        guard inet_pton(AF_INET6, bare, &parsed) == 1 else { return false }
+        let b = withUnsafeBytes(of: &parsed) { Array($0) }
+        guard b.count == 16 else { return false }
+
+        // ::1 loopback and :: unspecified.
+        if b[0..<15].allSatisfy({ $0 == 0 }) { return b[15] <= 1 }
+        // ::ffff:a.b.c.d is exactly as private as the IPv4 address inside it.
+        if b[0..<10].allSatisfy({ $0 == 0 }), b[10] == 0xff, b[11] == 0xff {
+            return isPrivateHost("\(b[12]).\(b[13]).\(b[14]).\(b[15])")
+        }
+        if b[0] == 0xfe, b[1] & 0xc0 == 0x80 { return true }   // fe80::/10 link-local
+        if b[0] & 0xfe == 0xfc { return true }                 // fc00::/7  unique local
+        return false
     }
 }
