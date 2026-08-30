@@ -95,6 +95,9 @@ struct AskView: View {
     /// Set when the last failure was "out of Ask messages", so the error line
     /// can offer an upgrade instead of a "Try again" that cannot work.
     @State private var errorNeedsUpgrade = false
+    /// Something worth saying while the answer is being written — currently
+    /// only visual escalation ("Looking through the video…").
+    @State private var statusMessage: String?
     @State private var suggestions: [AskSuggestion] = []
     @State private var loadingSuggestions = false
     /// A stable id for the pending block so the scroll view can follow it.
@@ -107,12 +110,16 @@ struct AskView: View {
     struct Turn: Identifiable, Equatable {
         let id = UUID()
         let question: String
-        let answer: String
-        let sources: [RelatedSave]
-        let citations: [AskAnswer.Citation]
+        /// Grows as deltas arrive.
+        var answer: String
+        var sources: [RelatedSave]
+        var citations: [AskAnswer.Citation]
         /// True until its answer has finished arriving. Scrolling back to an
         /// older turn must not replay it.
         var isNew: Bool = false
+        /// Tokens are still arriving, so the turn shows a caret rather than the
+        /// finished treatment.
+        var isStreaming: Bool = false
     }
 
     // MARK: Body
@@ -287,6 +294,15 @@ struct AskView: View {
                         .id(pendingAnchor)
                         .transition(.opacity)
                     }
+                    // The turn exists but its first token has not landed. Same
+                    // affordance as `pending`, so the transition from "asked" to
+                    // "answering" does not blink an indicator out and back in.
+                    if asking, pending == nil,
+                       let last = turns.last, last.isStreaming, last.answer.isEmpty {
+                        workingLine
+                            .id(pendingAnchor)
+                            .transition(.opacity)
+                    }
                     if let errorMessage { errorLine(errorMessage) }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -307,6 +323,21 @@ struct AskView: View {
                 withAnimation(Motion.respecting(Motion.standard, reduceMotion)) {
                     proxy.scrollTo(last.id, anchor: .top)
                 }
+            }
+            // Follow the answer as it is written.
+            //
+            // `turns.count` alone was enough when an answer arrived whole: one
+            // append, one scroll. A streamed turn is appended *empty* and then
+            // grows for several seconds, so without this the text writes itself
+            // off the bottom of the screen while the view sits still.
+            //
+            // Anchored to the *bottom* rather than the top: the question is
+            // already read and the newest words are what matter. Unanimated,
+            // because animating a scroll on every token fights the next one and
+            // produces a visible stutter.
+            .onChange(of: turns.last?.answer) { _, _ in
+                guard let last = turns.last, last.isStreaming else { return }
+                proxy.scrollTo(last.id, anchor: .bottom)
             }
         }
     }
@@ -339,11 +370,25 @@ struct AskView: View {
                 }
             }
 
-            StreamingText(text: turn.answer, font: SavaType.body,
-                          animates: turn.isNew) {
-                markSettled(turn.id)
+            // `animates: false` — the answer is now genuinely streamed.
+            //
+            // `StreamingText` reveals a *finished* string word by word on a
+            // timer, which was the right illusion when the whole answer landed
+            // at once. It is the wrong thing now: the deltas already arrive
+            // progressively, so leaving it on would animate an animation —
+            // re-revealing text the user has already watched appear, and
+            // holding the last words back behind a timer that has nothing to
+            // do with the model. The real tokens are the motion.
+            HStack(alignment: .bottom, spacing: 2) {
+                StreamingText(text: turn.answer, font: SavaType.body,
+                              animates: false) {
+                    markSettled(turn.id)
+                }
+                .foregroundStyle(SavaColor.primary)
+                if turn.isStreaming && !turn.answer.isEmpty {
+                    StreamingCaret()
+                }
             }
-            .foregroundStyle(SavaColor.primary)
         }
     }
 
@@ -402,11 +447,28 @@ struct AskView: View {
     /// Three breathing dots. A spinner beside "Looking through your library…"
     /// narrates the implementation; this just says something is happening, which
     /// is all anyone needs while they wait a second and a half.
+    /// The gap between asking and the first token.
+    ///
+    /// It is short now — retrieval finishes in tens of milliseconds and the
+    /// first token follows — but it is not nothing, and a silent gap is what
+    /// made Ask feel broken. When the server has something specific to say
+    /// (currently only "Looking through the video…") it says it; otherwise the
+    /// dots carry it.
     private var workingLine: some View {
-        ThinkingDots()
-            .padding(.top, Space.xs)
-            .accessibilityLabel(scopeIsSave ? "Reading it" : "Looking through your library")
-            .accessibilityAddTraits(.updatesFrequently)
+        HStack(spacing: Space.s) {
+            ThinkingDots()
+            if let statusMessage {
+                Text(statusMessage)
+                    .font(SavaType.meta)
+                    .foregroundStyle(SavaColor.tertiary)
+                    .transition(.opacity)
+            }
+        }
+        .padding(.top, Space.xs)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(statusMessage
+            ?? (scopeIsSave ? "Reading it" : "Looking through your library"))
+        .accessibilityAddTraits(.updatesFrequently)
     }
 
     /// A failed turn, stated quietly with a way forward.
@@ -539,6 +601,7 @@ struct AskView: View {
         asking = true
         errorMessage = nil
         errorNeedsUpgrade = false
+        statusMessage = nil
         question = ""
         inFlightQuestion = trimmed
         lastQuestion = trimmed
@@ -547,45 +610,148 @@ struct AskView: View {
         }
         Haptics.tap()
 
-        askTask = Task {
-            do {
-                let result = try await send(trimmed)
-                guard !Task.isCancelled else { return }
-                asking = false
+        askTask = Task { await stream(trimmed) }
+    }
+
+    /// Consume the answer as it is generated.
+    ///
+    /// ── The shape this is trying to produce ─────────────────────────────
+    ///
+    ///   * the question is already on screen (`pending`, set by `ask`)
+    ///   * `sources` arrives in tens of milliseconds and opens a live turn, so
+    ///     the reply block appears long before the sentence does
+    ///   * every `token` is appended to that turn
+    ///   * `done` closes it
+    ///
+    /// The turn is opened on the *first* event that proves work is happening
+    /// rather than on the first token, because retrieval finishing is itself
+    /// worth showing — it is the difference between "nothing is happening" and
+    /// "it is reading these four things".
+    @MainActor
+    private func stream(_ trimmed: String) async {
+        var live: UUID?
+        var produced = false
+
+        func openTurn(sources: [RelatedSave]) {
+            guard live == nil else { return }
+            let turn = Turn(question: trimmed, answer: "", sources: sources,
+                            citations: [], isNew: true, isStreaming: true)
+            live = turn.id
+            withAnimation(Motion.respecting(Motion.standard, reduceMotion)) {
                 pending = nil
-                if result.ok, let answer = result.answer, !answer.isEmpty {
-                    threadID = result.threadID ?? threadID
-                    withAnimation(Motion.respecting(Motion.standard, reduceMotion)) {
-                        turns.append(Turn(question: trimmed, answer: answer,
-                                          sources: result.sources,
-                                          citations: result.citations,
-                                          isNew: true))
-                    }
-                    Haptics.success()
-                } else {
-                    // Be honest when the evidence simply is not there. Inventing
-                    // an answer from outside the user's library would break the
-                    // one promise this feature makes.
-                    errorMessage = result.message ?? fallbackMessage
-                    Haptics.error()
-                }
-            } catch is CancellationError {
-                asking = false
-                pending = nil
-            } catch {
-                guard !Task.isCancelled else { return }
-                asking = false
-                pending = nil
-                let api = error as? APIError
-                errorNeedsUpgrade = api?.needsUpgrade ?? false
-                errorMessage = api?.userMessage
-                    ?? "Couldn't get an answer. Try again."
-                // No error haptic for a quota: it is not a fault, and buzzing
-                // at somebody for reaching a documented limit reads as blame.
-                if errorNeedsUpgrade { Haptics.tap() } else { Haptics.error() }
+                turns.append(turn)
             }
         }
+
+        do {
+            for try await event in events(trimmed) {
+                if Task.isCancelled { break }
+                switch event {
+                case .meta(let id):
+                    // Captured before anything can fail, so a retry after an
+                    // error continues this conversation rather than orphaning it.
+                    if let id { threadID = id }
+
+                case .sources(let sources, _):
+                    openTurn(sources: sources)
+
+                case .status(let message, _):
+                    withAnimation(Motion.gentle) { statusMessage = message }
+
+                case .token(let delta):
+                    guard !delta.isEmpty else { continue }
+                    openTurn(sources: [])
+                    produced = true
+                    statusMessage = nil
+                    // Appended, never assigned: the server sends deltas.
+                    if let live, let i = turns.firstIndex(where: { $0.id == live }) {
+                        turns[i].answer += delta
+                    }
+
+                case .done(let answer):
+                    produced = produced || !(answer.answer ?? "").isEmpty
+                    if let live, let i = turns.firstIndex(where: { $0.id == live }) {
+                        // Trust the final text over the accumulation: the server
+                        // cleans it up, and any frame dropped by a flaky
+                        // connection is repaired here rather than left as a gap.
+                        if let final = answer.answer, !final.isEmpty {
+                            turns[i].answer = final
+                        }
+                        turns[i].sources = answer.sources
+                        turns[i].citations = answer.citations
+                        turns[i].isStreaming = false
+                    }
+                    if let id = answer.threadID { threadID = id }
+
+                case .failed(let message, _):
+                    throw AskStreamFailure(message: message)
+                }
+            }
+
+            asking = false
+            statusMessage = nil
+            if produced {
+                Haptics.success()
+            } else {
+                // Nothing was generated at all. Be honest rather than leaving an
+                // empty bubble that looks like the answer.
+                discard(live)
+                pending = nil
+                errorMessage = fallbackMessage
+                Haptics.error()
+            }
+        } catch is CancellationError {
+            finishCancelled(live, produced: produced)
+        } catch {
+            guard !Task.isCancelled else {
+                finishCancelled(live, produced: produced)
+                return
+            }
+            asking = false
+            statusMessage = nil
+            // A partial answer is kept. It is real output the user already read,
+            // and deleting it on failure is more disorienting than leaving it
+            // with an error underneath.
+            if !produced {
+                discard(live)
+                pending = nil
+            } else if let live, let i = turns.firstIndex(where: { $0.id == live }) {
+                turns[i].isStreaming = false
+            }
+            let api = error as? APIError
+            errorNeedsUpgrade = api?.needsUpgrade ?? false
+            errorMessage = (error as? AskStreamFailure)?.message
+                ?? api?.userMessage
+                ?? "Couldn't get an answer. Try again."
+            // No error haptic for a quota: it is not a fault, and buzzing at
+            // somebody for reaching a documented limit reads as blame.
+            if errorNeedsUpgrade { Haptics.tap() } else { Haptics.error() }
+        }
     }
+
+    /// Cancelled mid-answer. Whatever arrived is kept — the user watched it
+    /// appear, so removing it would look like a bug rather than a cancellation.
+    @MainActor
+    private func finishCancelled(_ live: UUID?, produced: Bool) {
+        asking = false
+        statusMessage = nil
+        pending = nil
+        if produced, let live, let i = turns.firstIndex(where: { $0.id == live }) {
+            turns[i].isStreaming = false
+        } else {
+            discard(live)
+        }
+    }
+
+    @MainActor
+    private func discard(_ live: UUID?) {
+        guard let live else { return }
+        turns.removeAll { $0.id == live }
+    }
+
+    /// One error type, so a server-sent `error` frame and a transport failure
+    /// land in the same place.
+    private struct AskStreamFailure: Error { let message: String }
 
     /// Stop waiting for an answer and give the question back, so it can be
     /// edited rather than retyped.
@@ -646,17 +812,20 @@ struct AskView: View {
         Haptics.success()
     }
 
-    private func send(_ text: String) async throws -> AskAnswer {
+    /// The right stream for this scope. Library, collection and single-item Ask
+    /// all use the same architecture — one event protocol, one renderer.
+    private func events(_ text: String) -> AsyncThrowingStream<AskEvent, Error> {
         switch scope {
         case .library:
-            return try await intelligence.askSava(question: text, mode: mode, threadID: threadID)
+            return intelligence.askSavaStream(question: text, mode: mode,
+                                              threadID: threadID)
         case .collection(let collection):
-            return try await intelligence.askSava(question: text, mode: mode,
-                                                  threadID: threadID,
-                                                  collectionID: collection.id)
+            return intelligence.askSavaStream(question: text, mode: mode,
+                                              threadID: threadID,
+                                              collectionID: collection.id)
         case .save(let bookmark):
-            return try await intelligence.askThis(bookmarkID: bookmark.id, question: text,
-                                                  mode: mode, threadID: threadID)
+            return intelligence.askThisStream(bookmarkID: bookmark.id, question: text,
+                                              mode: mode, threadID: threadID)
         }
     }
 

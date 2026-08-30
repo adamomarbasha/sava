@@ -105,6 +105,79 @@ class GeminiProvider(AIProvider):
             raise ProviderError(f"Gemini generation failed: {e}",
                                 provider=self.name, retryable=retryable) from e
 
+    # ── Streaming ────────────────────────────────────────────────────────────
+
+    def complete_stream(
+        self,
+        *,
+        spec: ModelSpec,
+        system: Optional[str],
+        prompt: str,
+        temperature: float = 0.3,
+        max_output_tokens: Optional[int] = None,
+        history: Optional[List[Dict[str, str]]] = None,
+    ):
+        """Real token streaming via `generate_content(stream=True)`.
+
+        The SDK yields partial `GenerateContentResponse` objects as the model
+        produces them. Each one carries only the *new* text, so the chunks are
+        already deltas and are passed straight through — accumulating here and
+        yielding the running total is the classic way to make an answer repeat
+        itself on screen.
+
+        Usage metadata only appears on the final chunk, so it is read at the end
+        rather than per chunk.
+        """
+        if not self._ensure():
+            raise ProviderError("Gemini is not configured", provider=self.name,
+                                retryable=False)
+
+        import google.generativeai as genai
+        from .base import CompletionChunk
+
+        gen_cfg: Dict[str, object] = {
+            "temperature": temperature,
+            "max_output_tokens": max_output_tokens or spec.max_output_tokens,
+        }
+
+        try:
+            model = genai.GenerativeModel(spec.model, system_instruction=system)
+            if history:
+                convo = [
+                    {"role": "user" if h.get("role") == "user" else "model",
+                     "parts": [h.get("content", "")]}
+                    for h in history[-8:]
+                ]
+                convo.append({"role": "user", "parts": [prompt]})
+                stream = model.generate_content(convo, generation_config=gen_cfg,
+                                                stream=True)
+            else:
+                stream = model.generate_content(prompt, generation_config=gen_cfg,
+                                                stream=True)
+
+            last = None
+            for piece in stream:
+                last = piece
+                delta = _extract_text(piece)
+                if delta:
+                    yield CompletionChunk(text=delta)
+
+            usage = getattr(last, "usage_metadata", None) if last is not None else None
+            yield CompletionChunk(
+                done=True,
+                input_tokens=int(getattr(usage, "prompt_token_count", 0) or 0),
+                output_tokens=int(getattr(usage, "candidates_token_count", 0) or 0),
+                raw=last,
+            )
+        except ProviderError:
+            raise
+        except Exception as e:
+            retryable = not any(
+                s in str(e).lower() for s in ("api key", "permission", "not found", "invalid")
+            )
+            raise ProviderError(f"Gemini streaming failed: {e}",
+                                provider=self.name, retryable=retryable) from e
+
     # ── Embeddings ───────────────────────────────────────────────────────────
     def embed(
         self,

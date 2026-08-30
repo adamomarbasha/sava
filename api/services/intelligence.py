@@ -10,10 +10,11 @@ from __future__ import annotations
 import json
 import logging
 import time
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from ..ai import telemetry
-from ..ai.base import Mode, ProviderError, TaskType
+from ..ai.base import Completion, Mode, ProviderError, TaskType
 from ..ai.router import get_router, resolve_task
 from ..config import LAZY_SUMMARY_OVER_SECONDS
 from ..models import (
@@ -199,22 +200,33 @@ How to behave:
   add headings unless the answer really is a list of separate things."""
 
 
-def ask_this(db, bookmark: Bookmark, question: str, *, user_id: int,
-             mode: Mode = Mode.AUTO, history: Optional[List[Dict[str, str]]] = None
-             ) -> Dict[str, Any]:
-    """Conversation about one item, with the item as context.
+@dataclass
+class AskThisPlan:
+    """One item's Ask, prepared. See `AskPlan` for why this is extracted."""
+    system: str = ""
+    prompt: str = ""
+    task: Optional[TaskType] = None
+    chunks: List[Dict[str, Any]] = field(default_factory=list)
+    visual: Any = None
+    canonical_id: Optional[int] = None
+    operation: str = "ask_this"
+    early: Optional[Dict[str, Any]] = None
 
-    Deliberately *not* a strict RAG gate. An item Sava has not finished reading
-    used to make this endpoint refuse outright, which meant a perfectly ordinary
-    question — "is this a common game?" — got "this save is still being
-    processed" instead of an answer. The retrieved passages are context that
-    makes the assistant better informed about this particular item; their absence
-    is a reason to lean on general knowledge, not a reason to stop talking.
+
+def _prepare_ask_this(db, bookmark: Bookmark, question: str, *, user_id: int,
+                      mode: Mode, history) -> AskThisPlan:
+    """Context assembly for one item. No model call, no writes.
+
+    Reuses what Sava already knows — the stored summary, typed data, entities,
+    transcript chunks and any cached visual reading — and only escalates to
+    looking at the video when `visual_ask.prepare` says the question actually
+    needs it. A transcript question never triggers frame work.
     """
     router = get_router()
     if not router.is_available():
-        return {"ok": False, "reason": "ai_unavailable",
-                "message": "AI is not configured on this server."}
+        return AskThisPlan(early={
+            "ok": False, "reason": "ai_unavailable",
+            "message": "AI is not configured on this server."})
 
     cc = (db.query(CanonicalContent).get(bookmark.canonical_content_id)
           if bookmark.canonical_content_id else None)
@@ -291,34 +303,154 @@ def ask_this(db, bookmark: Bookmark, question: str, *, user_id: int,
 
     task = resolve_task(TaskType.ASK_THIS_SIMPLE, question=question,
                         source_count=1, mode=mode)
-    try:
-        completion = router.complete(
-            task, system=_ASK_THIS_SYSTEM,
-            prompt="\n".join(ctx) + f"\n\nQUESTION: {question}",
-            mode=mode, temperature=0.5, history=history, max_output_tokens=2048,
-        )
-    except ProviderError as e:
-        logger.warning("ask_this provider failure: %s", e)
-        return {"ok": False, "reason": "provider_error", "message": _busy_message(e)}
-    telemetry.record_completion(db, completion, operation=f"ask_this.{task.value}",
-                                user_id=user_id,
-                                canonical_content_id=cc.id if cc else None,
-                                bookmark_id=bookmark.id, platform=bookmark.platform)
+    return AskThisPlan(
+        system=_ASK_THIS_SYSTEM,
+        prompt="\n".join(ctx) + f"\n\nQUESTION: {question}",
+        task=task, chunks=chunks, visual=visual,
+        canonical_id=cc.id if cc else None,
+        operation=f"ask_this.{task.value}")
 
-    return {
+
+def _ask_this_payload(plan: AskThisPlan, answer: str, mode: Mode,
+                      timings_ms: Optional[Dict[str, int]] = None) -> Dict[str, Any]:
+    """The response shape, defined once so both paths return the same thing."""
+    out = {
         "ok": True,
-        "answer": _clean_text(completion.text),
+        "answer": answer,
         "mode": mode.value,
         "citations": [{
             "start_s": c.get("start_s"), "end_s": c.get("end_s"),
             "timestamp": _timestamp(c.get("start_s")),
             "source": c.get("modality"), "text": (c.get("text") or "")[:200],
-        } for c in chunks[:4]],
-        "grounded_in": len(chunks),
+        } for c in plan.chunks[:4]],
+        "grounded_in": len(plan.chunks),
         # Additive: lets the client say "Sava is watching this now" or offer an
         # upgrade. Older clients ignore the extra keys.
-        **visual.public(),
+        **plan.visual.public(),
     }
+    if timings_ms:
+        out["timings_ms"] = timings_ms
+    return out
+
+
+def ask_this(db, bookmark: Bookmark, question: str, *, user_id: int,
+             mode: Mode = Mode.AUTO, history: Optional[List[Dict[str, str]]] = None
+             ) -> Dict[str, Any]:
+    """Conversation about one item, with the item as context.
+
+    Deliberately *not* a strict RAG gate. An item Sava has not finished reading
+    used to make this endpoint refuse outright, which meant a perfectly ordinary
+    question — "is this a common game?" — got "this save is still being
+    processed" instead of an answer. The retrieved passages are context that
+    makes the assistant better informed about this particular item; their absence
+    is a reason to lean on general knowledge, not a reason to stop talking.
+    """
+    plan = _prepare_ask_this(db, bookmark, question, user_id=user_id,
+                             mode=mode, history=history)
+    if plan.early is not None:
+        return plan.early
+
+    router = get_router()
+    try:
+        completion = router.complete(
+            plan.task, system=plan.system, prompt=plan.prompt,
+            mode=mode, temperature=0.5, history=history, max_output_tokens=2048)
+    except ProviderError as e:
+        logger.warning("ask_this provider failure: %s", e)
+        return {"ok": False, "reason": "provider_error", "message": _busy_message(e)}
+
+    telemetry.record_completion(db, completion, operation=plan.operation,
+                                user_id=user_id,
+                                canonical_content_id=plan.canonical_id,
+                                bookmark_id=bookmark.id, platform=bookmark.platform)
+    return _ask_this_payload(plan, _clean_text(completion.text), mode)
+
+
+def ask_this_stream(db, bookmark: Bookmark, question: str, *, user_id: int,
+                    mode: Mode = Mode.AUTO,
+                    history: Optional[List[Dict[str, str]]] = None):
+    """One item's Ask, streamed. Same events as `ask_sava_stream`.
+
+    Emits a `status` event before the tokens when the question needed the video
+    and Sava has gone to look at it, so the chat can say "Looking through the
+    video…" instead of freezing. The answer that follows is still written from
+    what is known *now* — a queued frames job does not licence guessing at what
+    the frames will show.
+    """
+    timings = AskTimings()
+    plan = _prepare_ask_this(db, bookmark, question, user_id=user_id,
+                             mode=mode, history=history)
+    timings.mark("context")
+
+    if plan.early is not None:
+        yield {"event": "error", "reason": plan.early.get("reason", "unavailable"),
+               "message": plan.early.get("message", "Sava could not answer that.")}
+        return
+
+    visual = plan.visual
+    if getattr(visual, "queued", False):
+        yield {"event": "status", "state": "visual_queued",
+               "message": "Looking through the video…"}
+    elif getattr(visual, "required", False) and getattr(visual, "available", False):
+        yield {"event": "status", "state": "visual_cached",
+               "message": "Reading what Sava saw in the video…"}
+
+    router = get_router()
+    pieces: List[str] = []
+    first_token_ms: Optional[int] = None
+    started = time.monotonic()
+    final = None
+
+    try:
+        for chunk in router.complete_stream(
+                plan.task, system=plan.system, prompt=plan.prompt,
+                mode=mode, temperature=0.5, history=history,
+                max_output_tokens=2048):
+            if chunk.done:
+                final = chunk
+                break
+            if not chunk.text:
+                continue
+            if first_token_ms is None:
+                first_token_ms = int((time.monotonic() - started) * 1000)
+                timings.mark("first_token")
+            pieces.append(chunk.text)
+            yield {"event": "token", "text": chunk.text}
+    except ProviderError as e:
+        logger.warning("ask_this_stream provider failure: %s", e)
+        yield {"event": "error", "reason": "provider_error",
+               "message": _busy_message(e)}
+        return
+    except Exception as e:                                   # pragma: no cover
+        logger.exception("ask_this_stream failed: %s", e)
+        yield {"event": "error", "reason": "internal",
+               "message": "Sava couldn't finish that answer."}
+        return
+
+    timings.mark("model")
+    answer = _clean_text("".join(pieces))
+
+    if final is not None:
+        completion = Completion(
+            text=answer, provider="gemini",
+            model=getattr(final, "_model", "") or "",
+            input_tokens=final.input_tokens, output_tokens=final.output_tokens,
+            wall_ms=timings.total_ms)
+        setattr(completion, "_usd", getattr(final, "_usd", 0.0))
+        telemetry.record_completion(db, completion, operation=plan.operation,
+                                    user_id=user_id,
+                                    canonical_content_id=plan.canonical_id,
+                                    bookmark_id=bookmark.id,
+                                    platform=bookmark.platform)
+
+    payload = timings.as_dict()
+    if first_token_ms is not None:
+        payload["first_token"] = first_token_ms
+    logger.info("ask_this_stream user=%s bookmark=%s timings=%s",
+                user_id, bookmark.id, payload)
+
+    done = _ask_this_payload(plan, answer, mode, timings_ms=payload)
+    yield {"event": "done", **done}
 
 
 # ─── Ask Sava ────────────────────────────────────────────────────────────────
@@ -383,29 +515,37 @@ class AskTimings:
         return {**self._marks, "total": self.total_ms}
 
 
-def ask_sava(db, user_id: int, question: str, *, mode: Mode = Mode.AUTO,
-             history: Optional[List[Dict[str, str]]] = None,
-             max_saves: int = 10,
-             collection_id: Optional[int] = None,
-             carry_over_ids: Optional[List[int]] = None) -> Dict[str, Any]:
-    """A conversation about someone's library, grounded in retrieval.
+@dataclass
+class AskPlan:
+    """Everything an Ask needs decided before the model is called.
 
-    With `collection_id`, retrieval is confined to that collection's members, so
-    "Ask this collection" genuinely answers from the collection rather than
-    silently widening to everything they have.
-
-    `carry_over_ids` are the items the previous turn talked about. A follow-up
-    like "which one looks best for a date?" contains almost no retrievable words,
-    so searching on it alone returns nothing and the assistant answers "I
-    couldn't find anything" about a conversation it was mid-way through. Keeping
-    the previous turn's items in scope is what makes follow-ups behave like
-    conversation instead of like a fresh search box.
+    Extracted so the streaming and non-streaming paths cannot disagree about
+    what was retrieved, what the prompt said, or which task was resolved. They
+    used to be one function; adding a second copy for streaming would have meant
+    two prompt builders drifting apart, which is how "Ask" and "Ask, streamed"
+    end up answering differently.
     """
-    timings = AskTimings()
+    system: str = ""
+    prompt: str = ""
+    task: Optional[TaskType] = None
+    saves: List[Any] = field(default_factory=list)
+    blocks: List[Dict[str, Any]] = field(default_factory=list)
+    max_output_tokens: int = 3072
+    operation: str = "ask_sava"
+    #: A finished response requiring no model call at all.
+    early: Optional[Dict[str, Any]] = None
+
+
+def _prepare_ask(db, user_id: int, question: str, *, mode: Mode,
+                 history: Optional[List[Dict[str, str]]],
+                 max_saves: int, collection_id: Optional[int],
+                 carry_over_ids: Optional[List[int]],
+                 timings: "AskTimings") -> AskPlan:
+    """Retrieval and prompt construction. No model call, no writes."""
     router = get_router()
     if not router.is_available():
-        return {"ok": False, "reason": "ai_unavailable",
-                "message": "AI is not configured on this server."}
+        return AskPlan(early={"ok": False, "reason": "ai_unavailable",
+                              "message": "AI is not configured on this server."})
 
     restrict_to = None
     scope_label = "your library"
@@ -420,9 +560,10 @@ def ask_sava(db, user_id: int, question: str, *, mode: Mode = Mode.AUTO,
         restrict_to = {r[0] for r in rows}
         scope_label = "this collection"
         if not restrict_to:
-            return {"ok": True, "sources": [], "grounded_in": 0, "mode": mode.value,
-                    "answer": "Nothing in this collection has been processed yet, "
-                              "so there is nothing for me to read."}
+            return AskPlan(early={
+                "ok": True, "sources": [], "grounded_in": 0, "mode": mode.value,
+                "answer": "Nothing in this collection has been processed yet, "
+                          "so there is nothing for me to read."})
 
     # A short follow-up carries its meaning in the conversation, not in its own
     # words, so the retrieval query borrows the previous question's vocabulary.
@@ -460,26 +601,16 @@ def ask_sava(db, user_id: int, question: str, *, mode: Mode = Mode.AUTO,
     if not blocks:
         # Still worth answering: they may be asking something general, and
         # refusing outright is the RAG-bot behaviour this is meant to avoid.
-        try:
-            timings.mark("context")
-            completion = router.complete(
-                resolve_task(TaskType.ASK_SAVA, question=question,
-                             source_count=0, mode=mode),
-                system=_ASK_SAVA_SYSTEM,
+        timings.mark("context")
+        return AskPlan(
+            system=_ASK_SAVA_SYSTEM,
             prompt=(f"Nothing in {scope_label} matches this question, so answer it "
                     f"from general knowledge and say briefly that you did not find "
                     f"anything of theirs on it.\n\nQUESTION: {question}"),
-                mode=mode, temperature=0.5, history=history, max_output_tokens=1024,
-            )
-        except ProviderError as e:
-            logger.warning("ask_sava provider failure: %s", e)
-            return {"ok": False, "reason": "provider_error", "message": _busy_message(e)}
-        telemetry.record_completion(db, completion, operation="ask_sava.no_match",
-                                    user_id=user_id)
-        timings.mark("model")
-        return {"ok": True, "answer": _clean_text(completion.text), "sources": [],
-                "timings_ms": timings.as_dict(),
-                "grounded_in": 0, "mode": mode.value}
+            task=resolve_task(TaskType.ASK_SAVA, question=question,
+                              source_count=0, mode=mode),
+            saves=[], blocks=[], max_output_tokens=1024,
+            operation="ask_sava.no_match")
 
     ctx: List[str] = []
     for i, b in enumerate(blocks, start=1):
@@ -496,32 +627,157 @@ def ask_sava(db, user_id: int, question: str, *, mode: Mode = Mode.AUTO,
 
     task = resolve_task(TaskType.ASK_SAVA, question=question,
                         source_count=len(blocks), mode=mode)
+    timings.mark("context")
+    return AskPlan(
+        system=_ASK_SAVA_SYSTEM,
+        prompt="FROM THEIR LIBRARY:\n\n" + "\n\n".join(ctx)
+               + f"\n\nQUESTION: {question}",
+        task=task, saves=saves, blocks=blocks,
+        max_output_tokens=3072, operation=f"ask_sava.{task.value}")
+
+
+def ask_sava(db, user_id: int, question: str, *, mode: Mode = Mode.AUTO,
+             history: Optional[List[Dict[str, str]]] = None,
+             max_saves: int = 10,
+             collection_id: Optional[int] = None,
+             carry_over_ids: Optional[List[int]] = None) -> Dict[str, Any]:
+    """A conversation about someone's library, grounded in retrieval.
+
+    The non-streaming path, kept because plenty of callers want one object:
+    tests, tools, and any client that has not adopted the stream. It is now a
+    thin wrapper over the same plan the streaming path uses.
+    """
+    timings = AskTimings()
+    plan = _prepare_ask(db, user_id, question, mode=mode, history=history,
+                        max_saves=max_saves, collection_id=collection_id,
+                        carry_over_ids=carry_over_ids, timings=timings)
+    if plan.early is not None:
+        return plan.early
+
+    router = get_router()
     try:
         completion = router.complete(
-            task, system=_ASK_SAVA_SYSTEM,
-            prompt="FROM THEIR LIBRARY:\n\n" + "\n\n".join(ctx)
-                   + f"\n\nQUESTION: {question}",
-            mode=mode, temperature=0.5, history=history, max_output_tokens=3072,
-        )
+            plan.task, system=plan.system, prompt=plan.prompt,
+            mode=mode, temperature=0.5, history=history,
+            max_output_tokens=plan.max_output_tokens)
     except ProviderError as e:
         logger.warning("ask_sava provider failure: %s", e)
         return {"ok": False, "reason": "provider_error", "message": _busy_message(e)}
-    telemetry.record_completion(db, completion, operation=f"ask_sava.{task.value}",
+
+    telemetry.record_completion(db, completion, operation=plan.operation,
                                 user_id=user_id)
     timings.mark("model")
-
-    # A slow Ask now leaves a breakdown behind rather than a single duration.
     logger.info("ask_sava user=%s grounded=%s timings=%s",
-                user_id, len(blocks), timings.as_dict())
+                user_id, len(plan.blocks), timings.as_dict())
 
     return {
         "ok": True,
         "answer": _clean_text(completion.text),
         "mode": mode.value,
-        "sources": [s.to_dict() for s in saves],
-        "grounded_in": len(blocks),
+        "sources": [s.to_dict() for s in plan.saves],
+        "grounded_in": len(plan.blocks),
         "timings_ms": timings.as_dict(),
     }
+
+
+def ask_sava_stream(db, user_id: int, question: str, *, mode: Mode = Mode.AUTO,
+                    history: Optional[List[Dict[str, str]]] = None,
+                    max_saves: int = 10,
+                    collection_id: Optional[int] = None,
+                    carry_over_ids: Optional[List[int]] = None):
+    """The same answer, yielded as it is generated.
+
+    Emits plain dicts; the route turns them into SSE frames. Event shapes:
+
+        {"event": "sources", "sources": [...], "grounded_in": n}
+        {"event": "token",   "text": "…"}                    # a *delta*
+        {"event": "done",    "answer": "…", "timings_ms": {...}}
+        {"event": "error",   "reason": "…", "message": "…"}
+
+    Sources are emitted *before* the first token, which is the point of the
+    whole exercise: retrieval finishes in tens of milliseconds and the model
+    takes seconds, so the client can render what it is reading from while the
+    answer is still being written.
+    """
+    timings = AskTimings()
+    plan = _prepare_ask(db, user_id, question, mode=mode, history=history,
+                        max_saves=max_saves, collection_id=collection_id,
+                        carry_over_ids=carry_over_ids, timings=timings)
+
+    if plan.early is not None:
+        early = plan.early
+        if early.get("ok"):
+            yield {"event": "sources", "sources": early.get("sources", []),
+                   "grounded_in": early.get("grounded_in", 0)}
+            yield {"event": "token", "text": early.get("answer", "")}
+            yield {"event": "done", "answer": early.get("answer", ""),
+                   "timings_ms": timings.as_dict(), "grounded_in": 0,
+                   "mode": mode.value, "sources": early.get("sources", [])}
+        else:
+            yield {"event": "error", "reason": early.get("reason", "unavailable"),
+                   "message": early.get("message", "Sava could not answer that.")}
+        return
+
+    sources = [s.to_dict() for s in plan.saves]
+    yield {"event": "sources", "sources": sources,
+           "grounded_in": len(plan.blocks)}
+
+    router = get_router()
+    pieces: List[str] = []
+    first_token_ms: Optional[int] = None
+    started = time.monotonic()
+    final = None
+
+    try:
+        for chunk in router.complete_stream(
+                plan.task, system=plan.system, prompt=plan.prompt,
+                mode=mode, temperature=0.5, history=history,
+                max_output_tokens=plan.max_output_tokens):
+            if chunk.done:
+                final = chunk
+                break
+            if not chunk.text:
+                continue
+            if first_token_ms is None:
+                first_token_ms = int((time.monotonic() - started) * 1000)
+                timings.mark("first_token")
+            pieces.append(chunk.text)
+            yield {"event": "token", "text": chunk.text}
+    except ProviderError as e:
+        logger.warning("ask_sava_stream provider failure: %s", e)
+        yield {"event": "error", "reason": "provider_error",
+               "message": _busy_message(e)}
+        return
+    except Exception as e:                                   # pragma: no cover
+        logger.exception("ask_sava_stream failed: %s", e)
+        yield {"event": "error", "reason": "internal",
+               "message": "Sava couldn't finish that answer."}
+        return
+
+    timings.mark("model")
+    answer = _clean_text("".join(pieces))
+
+    if final is not None:
+        # Same accounting as the non-streaming path — a streamed answer costs
+        # exactly what an unstreamed one costs, and must be recorded.
+        completion = Completion(
+            text=answer, provider="gemini",
+            model=getattr(final, "_model", "") or "",
+            input_tokens=final.input_tokens, output_tokens=final.output_tokens,
+            wall_ms=timings.total_ms)
+        setattr(completion, "_usd", getattr(final, "_usd", 0.0))
+        telemetry.record_completion(db, completion, operation=plan.operation,
+                                    user_id=user_id)
+
+    payload = timings.as_dict()
+    if first_token_ms is not None:
+        payload["first_token"] = first_token_ms
+    logger.info("ask_sava_stream user=%s grounded=%s timings=%s",
+                user_id, len(plan.blocks), payload)
+
+    yield {"event": "done", "answer": answer, "mode": mode.value,
+           "sources": sources, "grounded_in": len(plan.blocks),
+           "timings_ms": payload}
 
 
 def _timestamp(seconds: Optional[int]) -> str:

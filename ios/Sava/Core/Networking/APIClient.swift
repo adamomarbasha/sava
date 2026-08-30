@@ -136,6 +136,67 @@ final class APIClient {
         }
     }
 
+    // MARK: Streaming
+
+    /// Consume a Server-Sent Events response as an async sequence of frames.
+    ///
+    /// ── Why `bytes(for:)` ───────────────────────────────────────────────
+    ///
+    /// `URLSession.data(for:)` buffers the entire body before returning, which
+    /// is exactly the behaviour streaming exists to avoid — it would deliver
+    /// every token at once, at the end, and be indistinguishable from the
+    /// synchronous endpoint it replaces. `bytes(for:)` hands back an
+    /// `AsyncSequence` of lines as they arrive off the socket.
+    ///
+    /// Cancellation is inherited: cancelling the enclosing `Task` tears down
+    /// the URLSession task, which closes the connection, which lands on the
+    /// server as a `GeneratorExit` and stops generation. Nothing needs to be
+    /// sent to say "stop".
+    ///
+    /// Only `data:` lines are parsed. SSE also carries `event:` and `id:`
+    /// lines, but the event name is duplicated inside the JSON payload, so one
+    /// parser handles both and a frame is never split across two shapes.
+    func stream(_ endpoint: Endpoint) -> AsyncThrowingStream<Data, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                do {
+                    var request = try buildRequest(endpoint)
+                    request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+                    // A generated answer legitimately outlives an ordinary JSON
+                    // call, and the timeout here is per *byte received* rather
+                    // than for the whole body, so a streaming response resets it
+                    // with every token.
+                    request.timeoutInterval = endpoint.timeout ?? 120
+
+                    let (bytes, response) = try await session.bytes(for: request)
+                    guard let http = response as? HTTPURLResponse else {
+                        throw APIError.invalidResponse
+                    }
+                    guard (200..<300).contains(http.statusCode) else {
+                        // The error body is small and not a stream, so it can be
+                        // collected and reported through the normal path.
+                        var body = Data()
+                        for try await byte in bytes { body.append(byte) }
+                        throw Self.error(status: http.statusCode, data: body)
+                    }
+
+                    for try await line in bytes.lines {
+                        guard !Task.isCancelled else { break }
+                        guard line.hasPrefix("data:") else { continue }
+                        let payload = line.dropFirst("data:".count)
+                            .trimmingCharacters(in: .whitespaces)
+                        guard !payload.isEmpty else { continue }
+                        continuation.yield(Data(payload.utf8))
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
     private func buildRequest(_ endpoint: Endpoint) throws -> URLRequest {
         guard var components = URLComponents(
             url: baseURL.appendingPathComponent(endpoint.path),
@@ -177,6 +238,26 @@ final class APIClient {
         #endif
 
         return request
+    }
+
+    /// The `APIError` for a non-2xx response.
+    ///
+    /// Shared with `send`, so a 402 on the streaming endpoint produces the same
+    /// upgrade prompt as a 402 anywhere else rather than a generic failure.
+    /// `handleUnauthorized` is not called here: the streaming path is always
+    /// user-initiated and a sign-out mid-answer is handled by the next ordinary
+    /// request, whereas tearing the session down from inside a stream races the
+    /// view that is rendering it.
+    static func error(status: Int, data: Data) -> APIError {
+        switch status {
+        case 401, 403: return .unauthorized
+        case 404:      return .notFound(detail(from: data))
+        case 409:      return .conflict(detail(from: data))
+        case 402:      return .upgradeRequired(detail(from: data),
+                                               capability: capability(from: data))
+        case 400, 422: return .badRequest(detail(from: data))
+        default:       return .server(status: status, detail: detail(from: data))
+        }
     }
 
     /// FastAPI encodes errors as `{"detail": ...}`. The value may be a string or,

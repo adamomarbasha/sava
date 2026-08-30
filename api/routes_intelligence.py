@@ -10,6 +10,7 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -280,6 +281,167 @@ def ask_this(bookmark_id: int, body: AskIn,
 
     _persist_turn(db, thread.id, body.question, result, _mode(body.mode))
     return {**result, "thread_id": thread.id}
+
+
+# ─── Streaming ───────────────────────────────────────────────────────────────
+#
+# Ask was a synchronous request: retrieval, then the model, then the database,
+# then one JSON body. Time-to-first-token was therefore *identical* to
+# time-to-full-answer — several seconds of a frozen screen, and a timeout when
+# the model ran long. Raising the timeout would have made the freeze longer
+# rather than shorter.
+#
+# These endpoints emit Server-Sent Events instead. SSE rather than WebSockets
+# because the traffic is one-way, it is plain HTTP through the same auth and
+# the same proxy, and `URLSession.bytes(for:)` consumes it natively on iOS
+# without a socket library.
+#
+# The frames are:
+#
+#     event: sources | status | token | done | error
+#     data:  {...}\n\n
+#
+# `token` carries a *delta*, never the running total. `sources` arrives before
+# the first token, because retrieval takes tens of milliseconds while the model
+# takes seconds — so the client can show what it is reading from immediately.
+
+SSE_HEADERS = {
+    "Content-Type": "text/event-stream; charset=utf-8",
+    "Cache-Control": "no-cache, no-transform",
+    "Connection": "keep-alive",
+    # Render and most reverse proxies buffer responses by default, which would
+    # hold every token until the stream closed and reproduce exactly the
+    # behaviour this replaces.
+    "X-Accel-Buffering": "no",
+}
+
+
+def _sse(event: Dict[str, Any]) -> str:
+    """One SSE frame. The event name is carried in the payload as well as the
+    `event:` line, so a client that only reads `data:` still works."""
+    import json as _json
+    name = event.get("event", "message")
+    return f"event: {name}\ndata: {_json.dumps(event, default=str)}\n\n"
+
+
+def _stream_ask(*, user_id: int, thread_id: int, question: str, mode: Mode,
+                produce):
+    """Shared plumbing for both streaming endpoints.
+
+    Opens its **own** database session rather than using the request-scoped one.
+    A `Depends(get_db)` session is closed when the response finishes, and for a
+    StreamingResponse the generator outlives the handler that created it — so
+    the session must belong to the generator or it can be closed underneath it.
+
+    Billing follows the same rule as the non-streaming path with one addition:
+    if the stream ends without producing a single character — a provider error,
+    or the user cancelling before anything arrived — the Ask is refunded.
+    Charging for an answer nobody received is how an outage feels like a scam.
+    """
+    from .db import SessionLocal
+
+    db = SessionLocal()
+    produced = False
+    answer = ""
+    final: Dict[str, Any] = {}
+    try:
+        yield _sse({"event": "meta", "thread_id": thread_id})
+        for event in produce(db):
+            if event.get("event") == "token" and event.get("text"):
+                produced = True
+            if event.get("event") == "done":
+                answer = event.get("answer", "")
+                final = event
+            yield _sse(event)
+
+        if answer:
+            _persist_turn(db, thread_id, question, final, mode)
+        elif not produced:
+            billing.refund_ask(db, user_id)
+    except GeneratorExit:
+        # The client went away mid-answer. Whatever was generated is real work
+        # that was really delivered, so it stays charged; nothing is persisted,
+        # because a half-answer is not a turn worth reloading into a thread.
+        logger.info("ask stream cancelled by client (thread %s)", thread_id)
+        raise
+    except Exception as e:                                   # pragma: no cover
+        logger.exception("ask stream failed: %s", e)
+        if not produced:
+            try:
+                billing.refund_ask(db, user_id)
+            except Exception:
+                pass
+        yield _sse({"event": "error", "reason": "internal",
+                    "message": "Sava couldn't finish that answer."})
+    finally:
+        db.close()
+
+
+@router.post("/api/ask/stream")
+def ask_sava_stream(body: AskSavaIn,
+                    current_user: dict = Depends(get_current_user),
+                    db: Session = Depends(get_db)):
+    """Library-wide Ask, streamed. Same contract as `POST /api/ask`."""
+    quota.check(db, current_user["id"], "ask")
+    if not (body.question or "").strip():
+        raise HTTPException(status_code=422, detail="A question is required")
+    _spend_ask(db, current_user["id"])
+
+    if body.collection_id is not None:
+        owns = (db.query(Collection)
+                .filter(Collection.id == body.collection_id,
+                        Collection.user_id == current_user["id"]).first())
+        if owns is None:
+            raise HTTPException(status_code=404, detail="Collection not found")
+
+    thread, history = _thread_and_history(
+        db, current_user["id"], body.thread_id,
+        scope="collection" if body.collection_id is not None else "library",
+        bookmark_id=None, title=body.question[:60])
+    carry_over = _recent_sources(db, thread.id)
+    user_id = current_user["id"]
+    mode = _mode(body.mode)
+
+    def produce(session):
+        return intelligence.ask_sava_stream(
+            session, user_id, body.question, mode=mode, history=history,
+            collection_id=body.collection_id, carry_over_ids=carry_over)
+
+    return StreamingResponse(
+        _stream_ask(user_id=user_id, thread_id=thread.id, question=body.question,
+                    mode=mode, produce=produce),
+        media_type="text/event-stream", headers=SSE_HEADERS)
+
+
+@router.post("/api/bookmarks/{bookmark_id}/ask/stream")
+def ask_this_stream(bookmark_id: int, body: AskIn,
+                    current_user: dict = Depends(get_current_user),
+                    db: Session = Depends(get_db)):
+    """One item's Ask, streamed. Same architecture as the library stream."""
+    quota.check(db, current_user["id"], "ask")
+    bm = _owned_bookmark(db, bookmark_id, current_user["id"])
+    if not (body.question or "").strip():
+        raise HTTPException(status_code=422, detail="A question is required")
+    _spend_ask(db, current_user["id"])
+
+    thread, history = _thread_and_history(
+        db, current_user["id"], body.thread_id, scope="save",
+        bookmark_id=bm.id, title=body.question[:60])
+    user_id = current_user["id"]
+    mode = _mode(body.mode)
+    bookmark_id_ = bm.id
+
+    def produce(session):
+        from .models import Bookmark as _BM
+        fresh = session.query(_BM).get(bookmark_id_)
+        return intelligence.ask_this_stream(
+            session, fresh, body.question, user_id=user_id,
+            mode=mode, history=history)
+
+    return StreamingResponse(
+        _stream_ask(user_id=user_id, thread_id=thread.id, question=body.question,
+                    mode=mode, produce=produce),
+        media_type="text/event-stream", headers=SSE_HEADERS)
 
 
 # ─── Ask Sava ────────────────────────────────────────────────────────────────

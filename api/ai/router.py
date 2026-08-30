@@ -251,6 +251,83 @@ class ModelRouter:
         setattr(completion, "_usd", usd)
         return completion
 
+    def complete_stream(
+        self,
+        task: TaskType,
+        *,
+        prompt: str,
+        system: Optional[str] = None,
+        mode: Mode = Mode.AUTO,
+        temperature: float = 0.3,
+        max_output_tokens: Optional[int] = None,
+        history=None,
+        spec: Optional[ModelSpec] = None,
+    ):
+        """Yield `CompletionChunk`s, falling back through the same chain.
+
+        ── Why the fallback is *not* per-chunk ──────────────────────────────
+        The non-streaming path can retry a failed model transparently because
+        nothing has been shown to anyone yet. Streaming cannot: once a token has
+        left the building, retrying on a different model would either duplicate
+        text or contradict what the user already read. So a model is chosen and
+        may fall back *before the first chunk*, and after that a failure is a
+        failure — reported as one, mid-answer.
+
+        A provider with no streaming support is not faked. It runs `complete()`
+        and emits one chunk, which shows up as an answer that arrives all at
+        once. That is the truth about that provider.
+        """
+        from .base import CompletionChunk, ProviderError
+
+        chosen = spec or self.spec_for(task, mode)
+        attempts = [chosen] + [s for s in FALLBACK_CHAIN if s.model != chosen.model]
+
+        last_err = None
+        for i, cand in enumerate(attempts):
+            provider = self.provider_for(cand)
+            try:
+                iterator = provider.complete_stream(
+                    spec=cand, system=system, prompt=prompt,
+                    temperature=temperature, max_output_tokens=max_output_tokens,
+                    history=history,
+                )
+                first = next(iterator)          # forces the request to open
+            except NotImplementedError:
+                completion = provider.complete(
+                    spec=cand, system=system, prompt=prompt, json_mode=False,
+                    temperature=temperature, max_output_tokens=max_output_tokens,
+                    history=history, images=None,
+                )
+                usd = (completion.input_tokens * cand.usd_per_1m_input / 1e6
+                       + completion.output_tokens * cand.usd_per_1m_output / 1e6)
+                yield CompletionChunk(text=completion.text)
+                chunk = CompletionChunk(done=True,
+                                        input_tokens=completion.input_tokens,
+                                        output_tokens=completion.output_tokens)
+                setattr(chunk, "_usd", usd)
+                setattr(chunk, "_model", cand.model)
+                yield chunk
+                return
+            except Exception as e:
+                last_err = e
+                if i == len(attempts) - 1:
+                    raise
+                logger.warning("stream falling back from %s: %s", cand.model, e)
+                continue
+
+            if i:
+                logger.warning("stream fell back to %s after %s", cand.model, last_err)
+
+            yield first
+            for chunk in iterator:
+                if chunk.done:
+                    usd = (chunk.input_tokens * cand.usd_per_1m_input / 1e6
+                           + chunk.output_tokens * cand.usd_per_1m_output / 1e6)
+                    setattr(chunk, "_usd", usd)
+                    setattr(chunk, "_model", cand.model)
+                yield chunk
+            return
+
     def embed(self, texts, *, task_type: str = "retrieval_document", dim: Optional[int] = None):
         from ..config import EMBED_DIM
         spec = EMBED

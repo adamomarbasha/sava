@@ -9,7 +9,7 @@ from __future__ import annotations
 import abc
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, Iterator, List, Optional, Sequence
 
 
 class TaskType(str, Enum):
@@ -71,6 +71,25 @@ class Completion:
 
 
 @dataclass
+class CompletionChunk:
+    """One piece of a streaming completion.
+
+    `text` is a *delta* — the new characters since the previous chunk, not the
+    accumulated answer. Providers differ on this and getting it wrong produces
+    an answer that repeats itself with every chunk, so the contract is stated
+    here rather than left to each implementation.
+
+    The final chunk carries `done=True` and whatever usage the provider
+    reported; everything before it carries text and nothing else.
+    """
+    text: str = ""
+    done: bool = False
+    input_tokens: int = 0
+    output_tokens: int = 0
+    raw: Any = None
+
+
+@dataclass
 class EmbeddingResult:
     vectors: List[Sequence[float]]
     provider: str
@@ -105,6 +124,25 @@ class AIProvider(abc.ABC):
         ...
 
     @abc.abstractmethod
+    def complete_stream(
+        self,
+        *,
+        spec: "ModelSpec",
+        system: Optional[str],
+        prompt: str,
+        temperature: float = 0.3,
+        max_output_tokens: Optional[int] = None,
+        history: Optional[List[Dict[str, str]]] = None,
+    ) -> Iterator["CompletionChunk"]:
+        """Yield the answer as it is generated.
+
+        Optional. A provider that cannot stream should not pretend to: the
+        router falls back to `complete()` and emits the whole answer as a single
+        chunk, which is honest about there being no streaming rather than
+        dribbling a finished string out on a timer.
+        """
+        raise NotImplementedError
+
     def embed(
         self,
         *,

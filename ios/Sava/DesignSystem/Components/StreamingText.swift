@@ -122,3 +122,23 @@ struct ThinkingDots: View {
         .accessibilityHidden(true)
     }
 }
+
+/// A blinking caret shown while tokens are still arriving.
+///
+/// Driven by a `TimelineView` rather than a `repeatForever` animation, so it
+/// stops with the view instead of leaving a render loop alive behind a
+/// finished conversation.
+struct StreamingCaret: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 0.45)) { timeline in
+            let on = Int(timeline.date.timeIntervalSinceReferenceDate / 0.45) % 2 == 0
+            RoundedRectangle(cornerRadius: 1)
+                .fill(SavaColor.accent)
+                .frame(width: 2, height: 15)
+                .opacity(reduceMotion ? 0.9 : (on ? 1 : 0.15))
+        }
+        .accessibilityHidden(true)
+    }
+}
