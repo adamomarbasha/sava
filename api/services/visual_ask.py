@@ -293,7 +293,11 @@ def _escalate(db, cc, *, user_id: int, available: bool) -> VisualContext:
 
     reservation = billing.reserve_units(
         db, user_id, units=delta, entitlement=entitlement,
-        canonical_content_id=cc.id, reason="vision_escalation")
+        canonical_content_id=cc.id, reason="vision_escalation",
+        # What the save-time route already paid toward this item. Settlement
+        # needs it, or it compares the 8-unit frames route against this 7-unit
+        # top-up and bills a ninth unit for work nobody did.
+        baseline_units=already)
 
     if not reservation.granted:
         from ..ai import telemetry

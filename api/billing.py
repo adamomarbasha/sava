@@ -207,7 +207,8 @@ def _counters(db, period_id: int) -> Tuple[int, int]:
 def reserve_units(db, user_id: int, *, units: int, entitlement,
                   canonical_content_id: Optional[int] = None,
                   bookmark_id: Optional[int] = None,
-                  reason: str = "content.process") -> Reservation:
+                  reason: str = "content.process",
+                  baseline_units: int = 0) -> Reservation:
     """Debit `units` if the allowance covers them. Never partially grants.
 
     Returns a `Reservation` whose `granted` says what happened. Callers must not
@@ -263,7 +264,8 @@ def reserve_units(db, user_id: int, *, units: int, entitlement,
     reservation = UnitReservation(
         user_id=user_id, period_id=period.id,
         canonical_content_id=canonical_content_id, bookmark_id=bookmark_id,
-        units=units, state="queued", reason=reason, attempt=attempt)
+        units=units, state="queued", reason=reason, attempt=attempt,
+        baseline_units=max(0, int(baseline_units or 0)))
     db.add(reservation)
     try:
         db.commit()
@@ -290,15 +292,28 @@ def settle(db, *, user_id: int, canonical_content_id: int,
            actual_units: Optional[int] = None) -> None:
     """Close a reservation once the work is genuinely done.
 
-    When `actual_units` is supplied and differs from what was reserved, the
-    difference is corrected first. This is what makes the "unknown duration"
-    estimate honest: a save charges the shortest video band up front, and once
-    the worker knows the real duration the account is charged the rest.
+    Reconciles what the account has paid toward this run to what the run
+    actually cost. The comparison is against **`baseline_units + this
+    reservation`**, not against this reservation alone — that was a real
+    over-charge:
 
-    A shortfall that no longer fits the allowance is charged anyway, up to the
-    ceiling, and the remainder is logged rather than clawed back from work that
-    has already been paid for in dollars. Refusing to settle would leave the
-    reservation open forever.
+        save routes to text   reserve 1, settle to 1              paid 1
+        Ask needs the picture reserve 7 (the 8-unit route minus 1) paid 8
+        worker finishes       settle sees actual 8 vs reserved 7   paid 9
+
+    The account paid 9 units for an 8-unit item, every time an Ask escalated.
+    `_escalate` records the 1 already paid as `baseline_units`, so settlement
+    sees 1 + 7 == 8 and charges nothing further.
+
+    Deliberately not a period-wide sum over the item. That fixes the same +1 and
+    opens a worse hole: a reprocess is a genuinely new run of the same route, and
+    reconciling it against the earlier run's charge makes every reprocess after
+    the first free while still downloading the video — about $14 a month per
+    user of real spend, uncharged. Runs are distinguished by intent, and only
+    the caller knows its intent, so the caller states it.
+
+    Settlement stays idempotent: it only ever acts on a `queued` reservation, so
+    a retried job or a repeated call finds nothing to do.
     """
     reservation = (db.query(UnitReservation)
                    .filter(UnitReservation.user_id == user_id,
@@ -308,8 +323,12 @@ def settle(db, *, user_id: int, canonical_content_id: int,
         return
 
     reserved = int(reservation.units or 0)
+    baseline = max(0, int(reservation.baseline_units or 0))
     if actual_units is not None:
-        delta = max(1, int(actual_units)) - reserved
+        # What this run still owes, after what an earlier run already paid.
+        # Floored at 1 so a run can never end up costing nothing at all.
+        outstanding = max(1, int(actual_units) - baseline)
+        delta = outstanding - reserved
         if delta > 0:
             applied = db.execute(text("""
                 UPDATE billing_periods SET units_used = units_used + :n

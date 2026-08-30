@@ -389,3 +389,159 @@ class TestCanonicalReuse:
         assert billing.current_period(clean_db, other.id).units_used == 0
         assert clean_db.query(Job).filter(
             Job.idempotency_key == f"content.vision:{cc.id}").count() == 1
+
+
+class TestSettlementCharesTheRouteExactlyOnce:
+    """The +1 over-charge, and the two things a naive fix would break.
+
+    Found by running the real flow against a real TikTok: the worker logged
+    `units: settled +1` and the account paid 9 units for an 8-unit item. It
+    happened on every escalation.
+
+    The obvious fix — reconcile against everything reserved for the item this
+    period — removes the +1 and makes every reprocess after the first free while
+    still downloading the video. So settlement reconciles against
+    `baseline_units + this reservation`, and the caller states the baseline.
+    """
+
+    def _settle(self, db, user, cc, route):
+        cc.route = route
+        db.commit()
+        billing.settle(db, user_id=user.id, canonical_content_id=cc.id,
+                       actual_units=plans.units_for_route(route))
+
+    def _used(self, db, user):
+        return billing.current_period(db, user.id).units_used
+
+    def test_save_then_escalation_charges_the_route_once(self, clean_db, user):
+        """1 (save) + 7 (upgrade) == 8, not 9."""
+        cc = _content(clean_db, "tiktok:s1", route="text")
+        e = entitlements.for_user(clean_db, user.id)
+
+        # Save reserves its flat estimate and settles to the text route.
+        billing.reserve_units(clean_db, user.id, units=plans.UNITS_ON_SAVE,
+                              entitlement=e, canonical_content_id=cc.id)
+        assert self._used(clean_db, user) == 1
+        self._settle(clean_db, user, cc, "text")
+        assert self._used(clean_db, user) == 1, "the save should cost 1"
+
+        # A visual Ask escalates, reserving only the difference.
+        ctx = visual_ask.prepare(clean_db, cc, user_id=user.id,
+                                 question="what colour is the shirt")
+        assert ctx.units_charged == 7
+        assert self._used(clean_db, user) == 8
+
+        # The worker finishes on the frames route.
+        self._settle(clean_db, user, cc, "light_vision")
+        assert self._used(clean_db, user) == plans.units_for_route("light_vision") == 8
+
+    def test_the_escalation_reservation_records_its_baseline(self, clean_db, user):
+        cc = _content(clean_db, "tiktok:s2", route="text")
+        visual_ask.prepare(clean_db, cc, user_id=user.id,
+                           question="what colour is the shirt")
+        row = (clean_db.query(UnitReservation)
+               .filter(UnitReservation.canonical_content_id == cc.id,
+                       UnitReservation.reason == "vision_escalation").first())
+        assert row.units == 7
+        assert row.baseline_units == plans.units_for_route("text") == 1
+
+    def test_an_audio_routed_item_also_lands_exactly_on_the_route(self, clean_db, user):
+        cc = _content(clean_db, "tiktok:s3", route="audio")
+        e = entitlements.for_user(clean_db, user.id)
+        billing.reserve_units(clean_db, user.id, units=plans.UNITS_ON_SAVE,
+                              entitlement=e, canonical_content_id=cc.id)
+        self._settle(clean_db, user, cc, "audio")
+        assert self._used(clean_db, user) == 3
+
+        ctx = visual_ask.prepare(clean_db, cc, user_id=user.id,
+                                 question="what colour is the shirt")
+        assert ctx.units_charged == 8 - 3 == 5
+        self._settle(clean_db, user, cc, "light_vision")
+        assert self._used(clean_db, user) == 8
+
+    def test_a_plain_save_still_settles_up_to_its_real_route(self, clean_db, user):
+        """The flat save estimate must still reconcile upward. Unchanged path."""
+        cc = _content(clean_db, "tiktok:s4", route="text")
+        e = entitlements.for_user(clean_db, user.id)
+        billing.reserve_units(clean_db, user.id, units=plans.UNITS_ON_SAVE,
+                              entitlement=e, canonical_content_id=cc.id)
+        assert self._used(clean_db, user) == 1
+        self._settle(clean_db, user, cc, "light_vision")
+        assert self._used(clean_db, user) == 8, "1 reserved, 8 owed, 7 charged"
+
+    def test_a_degraded_route_refunds_most_of_the_escalation(self, clean_db, user):
+        """Escalation paid for frames; the run came back on the cover route.
+
+        Settles to 2, not to 1: the save's text run cost 1 and the escalation
+        run still did real work — it read the cover, which is a vision call.
+        Charging the item's final route cost alone would make a run that
+        degraded and still spent money free, and a degradation loop free with
+        it. The floor is one unit per run that ran.
+        """
+        cc = _content(clean_db, "tiktok:s5", route="text")
+        e = entitlements.for_user(clean_db, user.id)
+        billing.reserve_units(clean_db, user.id, units=plans.UNITS_ON_SAVE,
+                              entitlement=e, canonical_content_id=cc.id)
+        self._settle(clean_db, user, cc, "text")
+        visual_ask.prepare(clean_db, cc, user_id=user.id,
+                           question="what colour is the shirt")
+        assert self._used(clean_db, user) == 8
+
+        self._settle(clean_db, user, cc, "cover")     # frames never happened
+        used = self._used(clean_db, user)
+        assert used == 2, "6 of the 7 frame units must come back"
+        assert used < 8, "the frames charge must not be kept"
+
+    def test_reprocess_is_still_charged_in_full(self, clean_db, user):
+        """The hole a period-wide sum would open.
+
+        A reprocess re-downloads the video. Reconciling it against the earlier
+        run's charge would make it — and every one after it — free.
+        """
+        cc = _content(clean_db, "tiktok:s6", route="light_vision")
+        e = entitlements.for_user(clean_db, user.id)
+
+        billing.reserve_units(clean_db, user.id, units=plans.UNITS_ON_SAVE,
+                              entitlement=e, canonical_content_id=cc.id)
+        self._settle(clean_db, user, cc, "light_vision")
+        assert self._used(clean_db, user) == 8
+
+        for run in range(2, 5):
+            billing.reserve_units(
+                clean_db, user.id, units=plans.units_for_route("light_vision"),
+                entitlement=e, canonical_content_id=cc.id, reason="reprocess")
+            self._settle(clean_db, user, cc, "light_vision")
+            assert self._used(clean_db, user) == 8 * run, f"run {run} was not charged"
+
+    def test_settlement_is_idempotent(self, clean_db, user):
+        """A retried job, or the handler firing twice, must not charge again."""
+        cc = _content(clean_db, "tiktok:s7", route="text")
+        e = entitlements.for_user(clean_db, user.id)
+        billing.reserve_units(clean_db, user.id, units=plans.UNITS_ON_SAVE,
+                              entitlement=e, canonical_content_id=cc.id)
+        visual_ask.prepare(clean_db, cc, user_id=user.id,
+                           question="what colour is the shirt")
+
+        for _ in range(5):
+            self._settle(clean_db, user, cc, "light_vision")
+        assert self._used(clean_db, user) == 8
+        assert clean_db.query(UnitReservation).filter(
+            UnitReservation.canonical_content_id == cc.id,
+            UnitReservation.state == "queued").count() == 0
+
+    def test_settling_an_item_with_no_open_reservation_does_nothing(
+            self, clean_db, user):
+        cc = _content(clean_db, "tiktok:s8", route="text")
+        before = self._used(clean_db, user)
+        self._settle(clean_db, user, cc, "light_vision")
+        assert self._used(clean_db, user) == before
+
+    def test_a_run_never_settles_to_nothing(self, clean_db, user):
+        """Even if the baseline already covers the route, the run costs >= 1."""
+        cc = _content(clean_db, "tiktok:s9", route="light_vision")
+        e = entitlements.for_user(clean_db, user.id)
+        billing.reserve_units(clean_db, user.id, units=1, entitlement=e,
+                              canonical_content_id=cc.id, reason="vision_escalation",
+                              baseline_units=99)
+        self._settle(clean_db, user, cc, "light_vision")
+        assert self._used(clean_db, user) >= 1

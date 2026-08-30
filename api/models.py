@@ -792,6 +792,22 @@ class UnitReservation(Base):
     state = Column(String(12), nullable=False, default="queued")
     reason = Column(String(64))
 
+    #: Units an *earlier* run already paid toward the route this reservation is
+    #: completing. Zero for a fresh run.
+    #
+    # Only lazy visual escalation sets it. When an Ask upgrades a text-routed
+    # item (1 unit, already settled) to frames (8 units), `_escalate` reserves
+    # the 7-unit difference and records the 1 that was already paid. Without
+    # that record, settlement compares the 8-unit route against a 7-unit
+    # reservation and tops it up by 1 — the account pays 9 for an 8-unit item.
+    #
+    # A period-wide sum would fix that and break something worse: a reprocess is
+    # a genuinely new run of the same route, and reconciling it against the
+    # earlier run's charge makes every reprocess after the first cost nothing
+    # while still downloading the video. The distinction is *intent*, which only
+    # the caller knows, so the caller states it here.
+    baseline_units = Column(Integer, nullable=False, default=0)
+
     #: Which run of this content this reservation paid for. 0 is the original
     #: save; a reprocess opens attempt 1, and so on.
     #
