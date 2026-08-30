@@ -113,8 +113,31 @@ YOUTUBE_VISION_MODE = os.getenv("SAVA_YOUTUBE_VISION_MODE", "never")
 INSTAGRAM_VISION_MODE = os.getenv("SAVA_INSTAGRAM_VISION_MODE", "conditional")
 
 MAX_FRAMES_PER_VIDEO = int(os.getenv("SAVA_MAX_FRAMES", "8"))
-FRAME_MAX_WIDTH = int(os.getenv("SAVA_FRAME_MAX_WIDTH", "640"))
-DOWNLOAD_MAX_HEIGHT = int(os.getenv("SAVA_DOWNLOAD_MAX_HEIGHT", "480"))
+
+# 384, not 640.
+#
+# Gemini prices images by tile: an image whose dimensions both fall under the
+# tile size costs one tile, and anything larger is split. At 640px a vertical
+# 9:16 frame is 640x1138 and was measured costing ~1,134 input tokens; at 384px
+# it is 384x683, both under the 768 tile edge, so it costs 258. Measured vision
+# calls averaged 6,237 input tokens for 5.5 frames — that becomes ~1,400.
+#
+# The frames are read for on-screen text and gross composition, and 384px is
+# comfortably enough for both. This is not a quality trade so much as not paying
+# to send pixels the model tiles away anyway.
+FRAME_MAX_WIDTH = int(os.getenv("SAVA_FRAME_MAX_WIDTH", "384"))
+# 360, not 480.
+#
+# This file is fetched for one purpose: to cut frames out of it that are then
+# scaled to 384px for the vision model. Downloading 480p to produce 384px stills
+# pays for pixels that are discarded before anything looks at them.
+#
+# Measured TikTok downloads averaged 7.39 MB at 480p, which at $3/GB is $0.0216
+# and was ~83% of the cost of understanding a TikTok. Encoded bitrate falls
+# roughly with pixel count, so 360p is expected around 4.4 MB / $0.013.
+# `acquire.video` telemetry records the real bytes, so the actual saving is
+# measurable rather than assumed.
+DOWNLOAD_MAX_HEIGHT = int(os.getenv("SAVA_DOWNLOAD_MAX_HEIGHT", "360"))
 
 # Long-form content: defer the (more expensive) summary until first open.
 LAZY_SUMMARY_OVER_SECONDS = int(os.getenv("SAVA_LAZY_SUMMARY_OVER_SECONDS", "1200"))

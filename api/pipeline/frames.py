@@ -283,3 +283,86 @@ def cleanup_frames(frames: List[Frame]) -> None:
                 p.unlink()
         except Exception:
             pass
+
+
+# ─── Cover-image reading (zero bandwidth) ────────────────────────────────────
+
+_COVER_SYSTEM = """You are reading the cover image of a short social video.
+Return what is actually visible. Be literal and specific.
+
+Return STRICT JSON, no markdown fences:
+{"ocr":"exact on-screen text, verbatim, empty string if none",
+ "caption":"one sentence describing what is shown",
+ "objects":["visible object or product"],
+ "enough":true}
+
+Rules:
+- `ocr` must be text literally rendered on the image (title cards, captions,
+  overlays, packaging, signage). Do not invent text.
+- Do not identify or name individual people. Describe them generically.
+- Set `enough` to false ONLY if the image is so uninformative (a blank frame, a
+  logo, a face with no context) that watching the video would be required to
+  know what it is about. Otherwise true."""
+
+
+def analyze_cover(image_bytes: bytes, *, router, content_hint: Optional[str] = None,
+                  mode=None) -> Tuple[Dict[str, Any], Any]:
+    """Read the already-stored cover image. One call, no download.
+
+    This is the cheapest visual understanding Sava has, and on short-form it is
+    often the most valuable per cent spent. The cover was already fetched and
+    mirrored so the library grid could draw it, so reading it adds **zero
+    bandwidth** — only ~258 input tokens for a single small image.
+
+    It matters because of what short-form actually looks like: TikTok and Reels
+    creators put the hook on frame one as rendered text. A caption that says
+    "wait for it 😭" plus a cover that says "3 INGREDIENT PASTA" is the whole
+    item, and the old pipeline could only reach that text by downloading 7 MB of
+    video.
+
+    Returns `({"ocr", "caption", "enough"}, completion)`. `enough=False` is the
+    signal that escalation is worth paying for.
+    """
+    from ..ai.base import Mode, TaskType
+
+    if not image_bytes:
+        return {}, None
+
+    hint = f" This appears to be {content_hint} content." if content_hint else ""
+    completion = router.complete(
+        TaskType.VISION_ANALYSIS,
+        system=_COVER_SYSTEM,
+        prompt=f"The cover image follows.{hint} Describe what is visible.",
+        mode=mode or Mode.AUTO,
+        json_mode=True,
+        images=[image_bytes],
+        temperature=0.1,
+        # Small: one image, one short object. The old 4096 budget was sized for
+        # eight frames and let a reasoning model spend the difference thinking.
+        max_output_tokens=768,
+    )
+    try:
+        data = json.loads(completion.text or "{}")
+    except Exception as e:
+        logger.warning("cover JSON parse failed: %s", e)
+        return {}, completion
+
+    ocr = (data.get("ocr") or "").strip()
+    caption = (data.get("caption") or "").strip()
+    extra = [str(o) for o in (data.get("objects") or [])[:6] if o]
+    if extra:
+        caption = (caption + f" [visible: {', '.join(extra)}]").strip()
+    return {"ocr": ocr, "caption": caption,
+            "enough": bool(data.get("enough", True))}, completion
+
+
+def cover_text(read: Dict[str, Any]) -> str:
+    """Flatten a cover reading into text for understanding and embedding."""
+    if not read:
+        return ""
+    parts = []
+    if read.get("ocr"):
+        parts.append(f"[cover] on-screen: {read['ocr']}")
+    if read.get("caption"):
+        parts.append(f"[cover] {read['caption']}")
+    return "\n".join(parts)

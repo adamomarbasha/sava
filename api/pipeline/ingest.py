@@ -32,8 +32,9 @@ from typing import Any, Dict, List, Optional, Tuple
 from ..ai import telemetry
 from ..ai.base import Mode
 from ..config import (
-    INSTAGRAM_VISION_MODE, LAZY_SUMMARY_OVER_SECONDS, PIPELINE_VERSION,
-    TIKTOK_VISION_MODE, UNDERSTANDING_SCHEMA_VERSION, YOUTUBE_VISION_MODE,
+    INSTAGRAM_VISION_MODE, LAZY_SUMMARY_OVER_SECONDS, MAX_FRAMES_PER_VIDEO,
+    PIPELINE_VERSION, TIKTOK_VISION_MODE, UNDERSTANDING_SCHEMA_VERSION,
+    YOUTUBE_VISION_MODE,
 )
 from ..content.identity import resolve_identity
 from ..platform_budget import PlatformUnavailable, guarded
@@ -41,7 +42,7 @@ from ..models import (
     CanonicalContent, ContentChunk, ContentEmbedding, ContentFrame,
     ContentTranscript, ContentUnderstanding, ProcessingState,
 )
-from . import acquire, frames as frames_mod, understanding
+from . import acquire, frames as frames_mod, route, understanding
 from .chunking import build_document_text, chunk_text, chunk_transcript
 
 logger = logging.getLogger(__name__)
@@ -601,9 +602,116 @@ def _queue_comments(db, cc: CanonicalContent, *, user_id: Optional[int] = None) 
         logger.warning("could not queue comments for %s: %s", cc.id, e)
 
 
+def _metadata_lists_captions(cc: CanonicalContent) -> bool:
+    """Did the metadata call report a caption track for this item?
+
+    The metadata response already carries `subtitles` and `automatic_captions`.
+    Consulting it costs nothing and is the difference between "this platform
+    generally has captions" (the old per-platform boolean) and "this *item*
+    has captions" — which is what actually decides whether free text exists.
+
+    It matters most where the old flag said no: TikTok and Instagram do expose
+    caption tracks on some items, and the previous code never looked.
+    """
+    try:
+        meta = json.loads(cc.metadata_json or "{}")
+    except Exception:
+        return False
+    return bool(meta.get("subtitles") or meta.get("automatic_captions"))
+
+
+def _asr_available() -> bool:
+    """Is speech-to-text actually configured on this deployment?
+
+    Asked before routing, so an item is never sent down the audio path on a
+    server that cannot transcribe — which would download the bytes and then
+    throw them away.
+    """
+    try:
+        from ..asr import get_asr
+        return bool(get_asr().available)
+    except Exception:
+        return False
+
+
+def _read_cover(db, cc: CanonicalContent, *, router,
+                user_id: Optional[int] = None,
+                force: bool = False) -> Tuple[Dict[str, Any], str]:
+    """Read the stored cover image. The cheapest visual understanding we have.
+
+    Zero bandwidth: the cover was already mirrored into object storage so the
+    library grid could draw it. Reading it is one small vision call on an image
+    Sava already owns.
+
+    Persisted as a `ContentFrame` at ts=0 so it is cached like any other frame,
+    survives a re-run, and flows into embeddings through the existing path.
+    """
+    from ..storage import get_storage
+
+    existing = (db.query(ContentFrame)
+                .filter(ContentFrame.canonical_content_id == cc.id,
+                        ContentFrame.ts_ms == 0).first())
+    if existing is not None and not force:
+        return ({"enough": True},
+                frames_mod.cover_text({"ocr": existing.ocr_text,
+                                       "caption": existing.vision_caption}))
+
+    blob = None
+    if cc.thumbnail_stored_key:
+        try:
+            blob = get_storage().get(cc.thumbnail_stored_key)
+        except Exception as e:
+            logger.debug("cover fetch from storage failed for %s: %s", cc.id, e)
+    if blob is None and cc.thumbnail_url:
+        try:
+            from ..services import thumbnails as thumb_svc
+            blob, _ = thumb_svc.fetch(cc.thumbnail_url, platform=cc.platform)
+        except Exception as e:
+            logger.debug("cover fetch from source failed for %s: %s", cc.id, e)
+
+    if not blob:
+        _set_stage(cc, "cover", "skipped", "no cover image available")
+        return {}, ""
+
+    try:
+        read, completion = frames_mod.analyze_cover(
+            blob, router=router, content_hint=cc.content_type)
+    except Exception as e:
+        logger.warning("cover read failed for %s: %s", cc.id, e)
+        _set_stage(cc, "cover", "failed", str(e)[:160])
+        return {}, ""
+
+    if completion is not None:
+        telemetry.record_completion(
+            db, completion, operation="vision.cover", canonical_content_id=cc.id,
+            user_id=user_id, platform=cc.platform, frames_processed=1)
+
+    text = frames_mod.cover_text(read)
+    if text:
+        if existing is None:
+            db.add(ContentFrame(canonical_content_id=cc.id, ts_ms=0,
+                                ocr_text=read.get("ocr") or None,
+                                vision_caption=read.get("caption") or None))
+        else:
+            existing.ocr_text = read.get("ocr") or None
+            existing.vision_caption = read.get("caption") or None
+        db.commit()
+        _set_stage(cc, "cover", "ok", f"{len(text)} chars")
+    else:
+        _set_stage(cc, "cover", "ok", "nothing readable")
+    return read, text
+
+
 def process_content(canonical_id: int, db, *, force: bool = False,
-                    user_id: Optional[int] = None) -> Dict[str, Any]:
-    """Run the ladder for one canonical item. Idempotent and resumable."""
+                    user_id: Optional[int] = None,
+                    deep: bool = False) -> Dict[str, Any]:
+    """Run the ladder for one canonical item. Idempotent and resumable.
+
+    `deep` is the only way to reach the widest frame budget. It comes from an
+    explicit user request (Pro enhanced analysis), never from a heuristic — the
+    whole point of the routing layer is that the expensive path is not the
+    default for an ordinary TikTok.
+    """
     from ..ai.router import get_router
 
     cc = db.query(CanonicalContent).get(canonical_id)
@@ -745,10 +853,78 @@ def process_content(canonical_id: int, db, *, force: bool = False,
 
         duration = float(cc.duration_seconds or 0)
 
-        # ── L2: transcript ──────────────────────────────────────────────────
+        # ── Classification, BEFORE any media is fetched ─────────────────────
+        #
+        # This used to run *after* transcript acquisition, which is what made
+        # TikTok expensive: the transcript stage asked `wants_vision()` while
+        # `visual_dependency` was still None, defaulted it to 0.5, saw no
+        # transcript, and downloaded the whole video — every time, on every
+        # TikTok, before anything had an opinion about whether the video was
+        # needed. See the note at the top of `pipeline/route.py`.
+        #
+        # Classification needs only metadata: title, creator, caption, duration.
+        # It costs ~$0.0002 on the cheap model. Running it here buys the routing
+        # decision for a fraction of a percent of what the download costs.
+        _state(db, cc, ProcessingState.ANALYZING, 2)
         transcript_row = (db.query(ContentTranscript)
                           .filter(ContentTranscript.canonical_content_id == cc.id)
                           .first())
+        transcript_text = transcript_row.text if transcript_row else ""
+
+        if not cc.content_type or force:
+            cls, comp = understanding.classify(
+                router=router, title=cc.title, creator=cc.creator_name,
+                caption=cc.description, transcript_head=transcript_text[:1500],
+                platform=cc.platform, duration_s=duration,
+            )
+            cc.content_type = cls.get("content_type")
+            cc.content_type_confidence = cls.get("confidence")
+            cc.visual_dependency = cls.get("visual_dependency")
+            db.commit()
+            if comp is not None:
+                telemetry.record_completion(
+                    db, comp, operation="classify", canonical_content_id=cc.id,
+                    user_id=user_id, platform=cc.platform,
+                )
+            result["stages"]["classify"] = (
+                f"{cc.content_type} (vd={cc.visual_dependency:.2f})"
+                if cc.visual_dependency is not None else f"{cc.content_type}")
+        else:
+            result["stages"]["classify"] = "cached"
+
+        # ── Route: the cheapest path that should be good enough ─────────────
+        from .. import providers
+
+        caption_track_available = bool(
+            strat.try_native_captions
+            or (prefetched_captions is not None and prefetched_captions.ok)
+            or _metadata_lists_captions(cc))
+
+        signals = route.Signals(
+            platform=cc.platform,
+            media_kind=cc.media_kind or "unknown",
+            duration_seconds=duration,
+            caption_chars=len(cc.description or ""),
+            transcript_chars=len(transcript_text),
+            has_caption_track=caption_track_available,
+            has_cover=bool(cc.thumbnail_stored_key or cc.thumbnail_url),
+            visual_dependency=cc.visual_dependency,
+            content_type=cc.content_type,
+            media_allowed=providers.media_analysis_allowed(cc.platform),
+            asr_available=(strat.allow_asr and _asr_available()
+                           and 0 < duration <= strat.asr_max_seconds),
+            force_deep=bool(deep),
+        )
+        plan = route.decide(signals)
+        cc.route = plan.route.value
+        cc.route_reason = plan.reason[:200]
+        db.commit()
+        result["route"] = plan.route.value
+        result["route_reason"] = plan.reason
+        logger.info("canonical %s (%s) -> route=%s (%s)",
+                    cc.id, cc.platform, plan.route.value, plan.reason)
+
+        # ── L2: transcript, only as far as the route requires ───────────────
         video_path: Optional[str] = None
 
         if transcript_row and not force:
@@ -761,7 +937,10 @@ def process_content(canonical_id: int, db, *, force: bool = False,
             segments, source, lang, asr_seconds = [], None, "en", 0.0
             asr_provider = "none"
 
-            if strat.try_native_captions:
+            # Captions are free text and are always worth asking for when the
+            # platform lists a track. The metadata call already returned the
+            # track list, so this costs nothing when there is nothing to fetch.
+            if caption_track_available:
                 cap = prefetched_captions or guarded(
                     cc.platform, "captions", acquire.fetch_native_captions,
                     cc.canonical_url, db=db, canonical_content_id=cc.id,
@@ -778,14 +957,14 @@ def process_content(canonical_id: int, db, *, force: bool = False,
                     segments = cap.metadata.get("segments") or []
                     source, lang = "captions", cap.metadata.get("language", "en")
 
-            if not segments and strat.allow_asr and 0 < duration <= strat.asr_max_seconds:
-                # If vision is likely, download video once and reuse it for audio.
-                will_need_vision = strat.wants_vision(
-                    visual_dependency=(cc.visual_dependency
-                                       if cc.visual_dependency is not None else 0.5),
-                    has_transcript=False, media_kind=cc.media_kind,
-                )
-                if will_need_vision:
+            # Media is fetched ONLY when the route asked for it, and audio-only
+            # whenever frames are not also needed. The old code downloaded the
+            # full video whenever it thought vision was *likely*, which on
+            # TikTok was always.
+            if not segments and plan.route.needs_transcript:
+                dl = None
+                audio_path = None
+                if plan.needs_video:
                     dl = guarded(
                         cc.platform, "download_video", acquire.download_video_lowres,
                         cc.canonical_url, db=db, canonical_content_id=cc.id,
@@ -794,30 +973,26 @@ def process_content(canonical_id: int, db, *, force: bool = False,
                         video_path = dl.path
                         workdirs.append(dl.path)
                         audio_path = acquire.extract_audio_from_video(dl.path) or dl.path
-                    else:
-                        audio_path = None
-                else:
+                elif plan.needs_audio:
                     dl = guarded(
                         cc.platform, "download_audio", acquire.download_audio,
                         cc.canonical_url, db=db, canonical_content_id=cc.id,
                         user_id=user_id)
-                    audio_path = dl.path if dl.ok else None
                     if dl.ok:
+                        audio_path = dl.path
                         workdirs.append(dl.path)
 
-                total_bytes += dl.bytes_moved
-                telemetry.record(
-                    db, operation=f"acquire.{dl.kind}", canonical_content_id=cc.id,
-                    user_id=user_id, platform=cc.platform, proxy_bytes=dl.bytes_moved,
-                    wall_ms=dl.wall_ms,
-                    estimated_usd=telemetry.proxy_cost(dl.bytes_moved),
-                    success=dl.ok, error=dl.error,
-                )
+                if dl is not None:
+                    total_bytes += dl.bytes_moved
+                    telemetry.record(
+                        db, operation=f"acquire.{dl.kind}", canonical_content_id=cc.id,
+                        user_id=user_id, platform=cc.platform,
+                        proxy_bytes=dl.bytes_moved, wall_ms=dl.wall_ms,
+                        estimated_usd=telemetry.proxy_cost(dl.bytes_moved),
+                        success=dl.ok, error=dl.error,
+                    )
 
                 if audio_path:
-                    # Under its own concurrency ceiling: transcription is the
-                    # one stage that can saturate a host irrespective of which
-                    # platform the media came from.
                     asr = guarded("asr", "transcribe", acquire.transcribe_audio,
                                   audio_path, db=db, canonical_content_id=cc.id,
                                   user_id=user_id)
@@ -831,14 +1006,14 @@ def process_content(canonical_id: int, db, *, force: bool = False,
                         db, operation="asr", canonical_content_id=cc.id, user_id=user_id,
                         platform=cc.platform, audio_seconds=asr_seconds,
                         wall_ms=asr.wall_ms,
-                        # Local transcription costs machine time, not vendor
-                        # spend; hosted costs money. Price them differently or
-                        # the cost report is fiction.
                         estimated_usd=telemetry.asr_cost(
                             asr_seconds, local=(asr_provider == "local-whisper")),
                         model=asr.metadata.get("model"), provider=asr_provider,
                         success=asr.ok, error=asr.error,
                     )
+            elif not segments:
+                _set_stage(cc, "transcript", "skipped", f"route={plan.route.value}")
+                result["stages"]["transcript"] = f"skipped (route={plan.route.value})"
 
             if segments:
                 full_text = " ".join(s.get("text", "") for s in segments).strip()
@@ -850,43 +1025,45 @@ def process_content(canonical_id: int, db, *, force: bool = False,
                 )
                 db.add(transcript_row)
                 db.commit()
+                transcript_text = full_text
                 _set_stage(cc, "transcript", "ok", source or "")
                 result["stages"]["transcript"] = f"ok ({source}, {len(segments)} segments)"
-            else:
+            elif plan.route.needs_transcript:
                 _set_stage(cc, "transcript", "failed", "no transcript obtainable")
                 result["stages"]["transcript"] = "failed"
 
-        # ── Classification (drives the visual decision) ─────────────────────
-        _state(db, cc, ProcessingState.ANALYZING, 3)
-        transcript_text = transcript_row.text if transcript_row else ""
-        if not cc.content_type or force:
-            cls, comp = understanding.classify(
-                router=router, title=cc.title, creator=cc.creator_name,
-                caption=cc.description, transcript_head=transcript_text[:1500],
-                platform=cc.platform, duration_s=duration,
-            )
-            cc.content_type = cls.get("content_type")
-            cc.content_type_confidence = cls.get("confidence")
-            cc.visual_dependency = cls.get("visual_dependency")
-            db.commit()
-            if comp is not None:
-                telemetry.record_completion(
-                    db, comp, operation="classify", canonical_content_id=cc.id,
-                    user_id=user_id, platform=cc.platform,
-                )
-            result["stages"]["classify"] = f"{cc.content_type} (vd={cc.visual_dependency:.2f})"
-        else:
-            result["stages"]["classify"] = "cached"
+        transcript_text = transcript_row.text if transcript_row else transcript_text
 
-        # ── L3: visual (conditional) ────────────────────────────────────────
+        # ── The cover read: visual understanding for zero bandwidth ─────────
         visual_text = ""
+        cover_read: Dict[str, Any] = {}
+        if plan.reads_cover and cc.media_kind not in ("carousel",):
+            cover_read, cover_text_value = _read_cover(
+                db, cc, router=router, user_id=user_id, force=force)
+            visual_text = cover_text_value
+            result["stages"]["cover"] = (
+                f"ok ({len(visual_text)} chars)" if visual_text else "nothing readable")
+
+        # ── Escalate, but only on evidence ──────────────────────────────────
+        escalation = route.should_escalate_after_text(
+            signals, plan,
+            transcript_chars=len(transcript_text),
+            cover_text_chars=len(visual_text),
+        )
+        if escalation is not None and not (cover_read.get("enough", True) is True
+                                           and len(visual_text) >= route.MIN_TRANSCRIPT_CHARS):
+            plan = escalation
+            cc.route = plan.route.value
+            cc.route_reason = plan.reason[:200]
+            db.commit()
+            result["route"] = plan.route.value
+            result["route_reason"] = plan.reason
+            logger.info("canonical %s escalated -> %s (%s)",
+                        cc.id, plan.route.value, plan.reason)
+
+        # ── L3: frames, only when the route ended up needing them ───────────
         existing_frames = (db.query(ContentFrame)
                            .filter(ContentFrame.canonical_content_id == cc.id).count())
-        wants_vision = strat.wants_vision(
-            visual_dependency=cc.visual_dependency or 0.4,
-            has_transcript=bool(transcript_text),
-            media_kind=cc.media_kind,
-        )
 
         if cc.media_kind == "carousel":
             visual_text = _read_carousel_slides(db, cc, router=router,
@@ -905,9 +1082,9 @@ def process_content(canonical_id: int, db, *, force: bool = False,
                 for r in rows
             ).strip()
             result["stages"]["vision"] = "cached"
-        elif not wants_vision:
-            result["stages"]["vision"] = f"skipped (mode={strat.vision_mode}, vd={cc.visual_dependency})"
-            _set_stage(cc, "vision", "skipped", strat.vision_mode)
+        elif not plan.needs_video:
+            result["stages"]["vision"] = f"skipped (route={plan.route.value})"
+            _set_stage(cc, "vision", "skipped", plan.route.value)
         elif not frames_mod.ffmpeg_available():
             result["stages"]["vision"] = "skipped: ffmpeg unavailable"
             _set_stage(cc, "vision", "skipped", "ffmpeg missing")
@@ -931,7 +1108,9 @@ def process_content(canonical_id: int, db, *, force: bool = False,
                         workdirs.append(dl.path)
 
                 if video_path:
-                    ts = frames_mod.select_timestamps(video_path, duration or None)
+                    ts = frames_mod.select_timestamps(
+                        video_path, duration or None,
+                        max_frames=plan.frame_budget or MAX_FRAMES_PER_VIDEO)
                     picked = frames_mod.extract_frames(video_path, ts)
                     picked = frames_mod.deduplicate(picked)
                     if picked:
@@ -944,7 +1123,10 @@ def process_content(canonical_id: int, db, *, force: bool = False,
                                 ocr_text=f.ocr_text, vision_caption=f.vision_caption,
                             ))
                         db.commit()
-                        visual_text = frames_mod.collect_visual_text(picked)
+                        frame_text = frames_mod.collect_visual_text(picked)
+                        # Keep the cover reading: it is already paid for and it
+                        # describes frame one, which the sampler skips.
+                        visual_text = "\n".join(filter(None, [visual_text, frame_text]))
                         if vcomp is not None:
                             telemetry.record_completion(
                                 db, vcomp, operation="vision", canonical_content_id=cc.id,
@@ -961,7 +1143,6 @@ def process_content(canonical_id: int, db, *, force: bool = False,
                     _set_stage(cc, "vision", "failed", "download failed")
                     result["stages"]["vision"] = "failed: download"
             except Exception as e:
-                # Optional enrichment must never fail the whole save.
                 logger.warning("vision stage failed for %s: %s", cc.id, e)
                 _set_stage(cc, "vision", "failed", str(e))
                 result["stages"]["vision"] = f"failed: {e}"
