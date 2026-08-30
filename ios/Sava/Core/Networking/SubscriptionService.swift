@@ -89,6 +89,10 @@ struct PricingCatalogue: Decodable {
         let askMessages: Int
         let enhancedAnalysis: Bool
         let priorityProcessing: Bool
+        /// How many of this user's expensive jobs may run at once. A real,
+        /// enforced difference (`api/jobs.py`), so the comparison table is
+        /// allowed to state it.
+        let concurrentJobs: Int
 
         var id: String { plan }
 
@@ -99,6 +103,32 @@ struct PricingCatalogue: Decodable {
             case askMessages = "ask_messages"
             case enhancedAnalysis = "enhanced_analysis"
             case priorityProcessing = "priority_processing"
+            case concurrentJobs = "concurrent_jobs"
+        }
+
+        /// Older responses did not carry `concurrent_jobs`. Decoding it as
+        /// optional keeps a client newer than its server working rather than
+        /// failing the whole catalogue over one field.
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            plan = try c.decode(String.self, forKey: .plan)
+            displayName = try c.decode(String.self, forKey: .displayName)
+            approxVideos = try c.decode(Int.self, forKey: .approxVideos)
+            askMessages = try c.decode(Int.self, forKey: .askMessages)
+            enhancedAnalysis = try c.decode(Bool.self, forKey: .enhancedAnalysis)
+            priorityProcessing = try c.decode(Bool.self, forKey: .priorityProcessing)
+            concurrentJobs = try c.decodeIfPresent(Int.self, forKey: .concurrentJobs) ?? 1
+        }
+
+        init(plan: String, displayName: String, approxVideos: Int, askMessages: Int,
+             enhancedAnalysis: Bool, priorityProcessing: Bool, concurrentJobs: Int) {
+            self.plan = plan
+            self.displayName = displayName
+            self.approxVideos = approxVideos
+            self.askMessages = askMessages
+            self.enhancedAnalysis = enhancedAnalysis
+            self.priorityProcessing = priorityProcessing
+            self.concurrentJobs = concurrentJobs
         }
 
         /// The bullet list shown under a plan. Written in videos and messages,
@@ -117,9 +147,11 @@ struct PricingCatalogue: Decodable {
     /// Launch values, used until the fetch lands or when it fails.
     static let fallback = PricingCatalogue(plans: [
         Plan(plan: "free", displayName: "Free", approxVideos: 120,
-             askMessages: 150, enhancedAnalysis: false, priorityProcessing: false),
+             askMessages: 150, enhancedAnalysis: false, priorityProcessing: false,
+             concurrentJobs: 1),
         Plan(plan: "pro", displayName: "Sava Pro", approxVideos: 460,
-             askMessages: 1500, enhancedAnalysis: true, priorityProcessing: true),
+             askMessages: 1500, enhancedAnalysis: true, priorityProcessing: true,
+             concurrentJobs: 3),
     ])
 }
 

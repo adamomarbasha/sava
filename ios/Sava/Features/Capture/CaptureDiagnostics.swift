@@ -4,7 +4,7 @@ import Foundation
 ///
 /// The App Intent runs without UI, so a failure is otherwise invisible — you
 /// get a one-line dialog and no way to tell whether the Shortcut passed a URL,
-/// passed a screenshot, or passed nothing at all. This writes a structured
+/// passed nothing at all. This writes a structured
 /// trace of every invocation that the Profile screen can display.
 ///
 /// Compiled out of Release entirely: the type exists so call sites stay clean,
@@ -19,9 +19,7 @@ struct CaptureTrace: Codable, Identifiable {
     var onScreenURLs: [String] = []        // URLs found
     var onScreenURLCount: Int = 0          // URL count
     var selectedURL: String?               // selected URL
-    var screenshotTaken: Bool = false      // screenshot taken yes/no
     var providedURL: String?
-    var screenshotBytes: Int = 0
     var clipboardChecked: Bool = false
     var clipboardType: String?
     var clipboardValue: String?
@@ -31,10 +29,8 @@ struct CaptureTrace: Codable, Identifiable {
 
     // What we decided
     var detectedPlatform: String = "unknown"
-    var path: String = "unknown"        // direct_url | screenshot_resolution | clipboard_fallback | failed
+    var path: String = "unknown"        // direct_url | clipboard_fallback | failed
     var resolvedURL: String?
-    var resolverReason: String?
-    var resolverConfidence: Double?
     var outcome: String = "pending"     // saved | duplicate | failed
     var message: String?
     var durationMs: Int = 0
@@ -94,15 +90,12 @@ enum CaptureDiagnostics {
             "urlCount=\(t.onScreenURLCount)",
             "urls=[\(t.onScreenURLs.prefix(4).joined(separator: " | "))]",
             "selected=\(t.selectedURL ?? "nil")",
-            "screenshotTaken=\(t.screenshotTaken ? "yes" : "no")",
-            "screenshot=\(t.screenshotBytes > 0 ? "\(t.screenshotBytes)B" : "nil")",
             "clipboard=\(t.clipboardChecked ? (t.clipboardValue ?? "empty") : "not checked")",
             "platform=\(t.detectedPlatform)",
             "path=\(t.path)",
             "outcome=\(t.outcome)",
         ]
         if let r = t.resolvedURL { parts.append("resolved=\(r)") }
-        if let r = t.resolverReason { parts.append("reason=\(r)") }
         if let s = t.saveID { parts.append("save_id=\(s)") }
         if let c = t.canonicalID { parts.append("canonical_id=\(c)") }
         if let h = t.httpStatus { parts.append("http=\(h)") }

@@ -56,19 +56,17 @@ struct PaywallView: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: Space.xl) {
+                    // Understand, then choose.
+                    //
+                    // The previous order put Monthly and Annual above the
+                    // explanation, which asked the user to pick a price for
+                    // something they had not been told the shape of yet. Now:
+                    // what Pro changes, then Free against Pro in full, and only
+                    // then the two prices.
                     if let reason { limitNotice(reason) }
                     hero
-                    // Above the plan cards, not below them.
-                    //
-                    // When StoreKit has no catalogue the plan rows show blank
-                    // prices and the buy button is disabled, and this sentence
-                    // is the only thing on screen that explains why. Rendered
-                    // after `plans` it sat below the fold, behind the pinned
-                    // action bar, so the first — and often only — screen the
-                    // user saw was a dead paywall with no reason given.
-                    if case .unavailable(let why) = subscriptions.productsPhase {
-                        unavailable(why)
-                    }
+                    whatProChanges
+                    comparison
                     plans
                     disclosure
                     Color.clear.frame(height: 132)   // room for the pinned action
@@ -134,12 +132,76 @@ struct PaywallView: View {
                 .foregroundStyle(SavaColor.primary)
 
             // Serif: this is Sava speaking, not the interface labelling itself.
-            Text("Save more. Understand more. Ask more.")
+            Text("Keep saving everything. Understand far more of it.")
                 .font(SavaType.proseTitle)
                 .foregroundStyle(SavaColor.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+
+            if !subscriptions.isPro {
+                Text("You're on Free")
+                    .font(SavaType.caption)
+                    .foregroundStyle(SavaColor.tertiary)
+                    .padding(.horizontal, Space.m)
+                    .padding(.vertical, 5)
+                    .background(SavaColor.fill, in: Capsule())
+            }
         }
         .padding(.bottom, Space.xs)
+    }
+
+    /// The three things a subscription actually changes, before any table.
+    ///
+    /// Deliberately not a feature list: it is the *shape* of the upgrade —
+    /// nothing about saving changes, the intelligence allowances grow, and one
+    /// capability appears. Someone who reads only this should already be able
+    /// to decide.
+    private var whatProChanges: some View {
+        let free = plan("free"), pro = plan("pro")
+        return VStack(alignment: .leading, spacing: Space.m) {
+            SectionHeader(text: "What Pro changes")
+            changeLine("arrow.up.right.circle",
+                       "\(free.approxVideos.formatted(.number)) → "
+                       + "\(pro.approxVideos.formatted(.number)) videos understood a month")
+            changeLine("bubble.left.and.text.bubble.right",
+                       "\(free.askMessages.formatted(.number)) → "
+                       + "\(pro.askMessages.formatted(.number)) Ask messages")
+            changeLine("wand.and.sparkles",
+                       "Deep video analysis, and your saves jump the queue")
+            Text("Saving stays unlimited on both.")
+                .font(SavaType.meta)
+                .foregroundStyle(SavaColor.tertiary)
+        }
+    }
+
+    private func changeLine(_ symbol: String, _ text: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: Space.m) {
+            Image(systemName: symbol)
+                .font(.system(size: 13, weight: .medium))
+                // `accentTint`, not `accent`: at this size the fill token
+                // inverts to ink on paper and the citron family would vanish
+                // from the screen exactly where it identifies the paid plan.
+                .foregroundStyle(SavaColor.accentTint)
+                .frame(width: 18)
+            Text(text)
+                .font(SavaType.callout)
+                .foregroundStyle(SavaColor.primary)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+        }
+    }
+
+    private var comparison: some View {
+        VStack(alignment: .leading, spacing: Space.m) {
+            SectionHeader(text: "Free and Pro, side by side")
+            PlanComparison(free: plan("free"), pro: plan("pro"))
+        }
+    }
+
+    /// The catalogue's entry for a plan, or the launch defaults. Never nil, so
+    /// no surface has to render a half-built comparison.
+    private func plan(_ name: String) -> PricingCatalogue.Plan {
+        subscriptions.catalogue.plan(name)
+            ?? PricingCatalogue.fallback.plan(name)!
     }
 
     // MARK: Plans
@@ -155,83 +217,49 @@ struct PaywallView: View {
     /// Monthly and Annual buy *identical* things; the only difference is
     /// cadence and price. So the shared list is stated once, and the rows carry
     /// only what actually differs. All three fit above the action bar.
+    /// Monthly and Annual — and *only* when the App Store has actually priced
+    /// them.
+    ///
+    /// When the catalogue is unavailable the selector is replaced outright
+    /// rather than rendered with blank price slots. Two selectable rows whose
+    /// prices are missing look like a half-loaded screen and invite the user to
+    /// tap a button that cannot work; a sentence saying purchasing is
+    /// unavailable, with a retry, is the truth and is actionable. The
+    /// comparison above stays either way, so the screen still explains what
+    /// Sava Pro is even when it cannot sell it.
     private var plans: some View {
         VStack(spacing: Space.m) {
-            PlanRow(
-                title: "Free",
-                price: "$0",
-                detail: freeDetail,
-                badge: nil,
-                isSelected: false,
-                isCurrent: !subscriptions.isPro,
-                isSelectable: false,
-                action: nil)
+            if case .unavailable(let why) = subscriptions.productsPhase {
+                unavailable(why)
+            } else {
+                SectionHeader(text: "Choose a plan")
+                    .frame(maxWidth: .infinity, alignment: .leading)
 
-            PlanRow(
-                title: "Monthly",
-                price: subscriptions.localizedPrice(for: .monthly),
-                detail: "per month",
-                badge: nil,
-                isSelected: selection == .monthly,
-                isCurrent: currentProduct == SavaProducts.proMonthly,
-                isSelectable: subscriptions.monthly != nil,
-                isLoading: catalogueIsLoading) {
-                    select(.monthly)
-                }
-
-            PlanRow(
-                title: "Annual",
-                price: subscriptions.localizedPrice(for: .annual),
-                detail: annualDetailLine,
-                badge: "Best value",
-                isSelected: selection == .annual,
-                isCurrent: currentProduct == SavaProducts.proAnnual,
-                isSelectable: subscriptions.annual != nil,
-                isLoading: catalogueIsLoading) {
-                    select(.annual)
-                }
-
-            proFeatures
-        }
-    }
-
-    /// "Understand 120 videos a month · 150 Ask messages"
-    private var freeDetail: String {
-        let plan = subscriptions.catalogue.plan("free")
-        let videos = plan?.approxVideos ?? 120
-        let asks = plan?.askMessages ?? 150
-        return "\(videos.formatted(.number)) videos · \(asks.formatted(.number)) Ask messages"
-    }
-
-    /// What both paid plans include. Stated once, and read from the server —
-    /// so raising an allowance is a backend environment variable rather than an
-    /// App Store release, and the paywall can never advertise a number the
-    /// backend will not honour.
-    private var proFeatures: some View {
-        VStack(alignment: .leading, spacing: Space.m) {
-            SectionHeader(text: "Monthly and Annual include")
-            VStack(alignment: .leading, spacing: 7) {
-                ForEach(subscriptions.features(for: "pro"), id: \.self) { feature in
-                    HStack(alignment: .firstTextBaseline, spacing: Space.s) {
-                        Image(systemName: "checkmark")
-                            .font(.system(size: 10, weight: .bold))
-                            // `accentTint`, not `accent`: these are 10pt
-                            // glyphs, and the fill token inverts to ink on
-                            // paper — the ticks would come out black in light
-                            // mode and the citron family would vanish from the
-                            // screen exactly where it identifies the paid plan.
-                            .foregroundStyle(SavaColor.accentTint)
-                            .frame(width: 12)
-                        Text(feature)
-                            .font(SavaType.callout)
-                            .foregroundStyle(SavaColor.secondary)
-                        Spacer(minLength: 0)
+                PlanRow(
+                    title: "Monthly",
+                    price: subscriptions.localizedPrice(for: .monthly),
+                    detail: "per month",
+                    badge: nil,
+                    isSelected: selection == .monthly,
+                    isCurrent: currentProduct == SavaProducts.proMonthly,
+                    isSelectable: subscriptions.monthly != nil,
+                    isLoading: catalogueIsLoading) {
+                        select(.monthly)
                     }
-                }
+
+                PlanRow(
+                    title: "Annual",
+                    price: subscriptions.localizedPrice(for: .annual),
+                    detail: annualDetailLine,
+                    badge: "Best value",
+                    isSelected: selection == .annual,
+                    isCurrent: currentProduct == SavaProducts.proAnnual,
+                    isSelectable: subscriptions.annual != nil,
+                    isLoading: catalogueIsLoading) {
+                        select(.annual)
+                    }
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.top, Space.s)
     }
 
     /// "per year · ~$6.67/mo · Save 33%" — every part derived from StoreKit.
@@ -339,6 +367,11 @@ struct PaywallView: View {
 
     private var primaryTitle: String {
         if subscriptions.isPro { return "You're on Sava Pro" }
+        // With no catalogue there is no plan selector on screen, so naming a
+        // cadence the user cannot see and did not choose reads as a bug.
+        if case .unavailable = subscriptions.productsPhase {
+            return "Purchasing unavailable"
+        }
         switch selection {
         case .monthly: return "Start Monthly"
         case .annual: return "Start Annual"

@@ -8,8 +8,7 @@ struct CapturedLink {
 
     enum Source: String {
         case direct       // passed in by the Shortcut (e.g. TikTok on-screen URL)
-        case clipboard    // copy-link fallback
-        case resolved     // returned by the backend screenshot resolver
+        case clipboard    // copy-link fallback — the Action Button journey
     }
 
     /// Accepts only well-formed http(s) URLs. The backend makes the final
@@ -55,9 +54,6 @@ struct CaptureInput {
     var candidateURLs: [String] = []
     /// The URL finally selected from `candidateURLs` (or passed directly).
     var providedURL: String?
-    /// A screenshot the Shortcut took, supplied ONLY when it found no URL.
-    /// Held in memory and never written to the Photos library.
-    var screenshot: Data?
     /// What the client believes is on screen, when the Shortcut can say.
     var platformHint: Platform?
     /// Names of the inputs the intent actually received — DEBUG diagnostics.

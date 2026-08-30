@@ -2,39 +2,46 @@ import SwiftUI
 
 /// Sava's first run.
 ///
-/// ── What this is trying to avoid ────────────────────────────────────────
+/// ── One job per screen ──────────────────────────────────────────────────
 ///
-/// The default onboarding is four screens of centred text with an illustration
-/// above it, and everyone swipes through it without reading a word. It teaches
-/// nothing because there is nothing to do.
+///   01  WHY SAVA      a live constellation of content you can drag into Sava
+///   02  HOW TO SAVE   TikTok / Instagram / YouTube × share sheet / button
+///   03  FIND ANYTHING search narrows a real library, then Ask answers
+///   04  YOU'RE READY  setup status, and the door
 ///
-/// So each stage here has one thing you can *touch*, and that thing is the
-/// lesson: a pile of saves you can push around (Sava holds many kinds of
-/// content), a real Shortcut button (this is how saving works), a search that
-/// types itself and resolves (you do not have to remember where you saw it),
-/// and then the actual actions. The copy is short because the interaction is
-/// carrying the meaning.
+/// The previous version explained the Shortcut twice — once as one of three
+/// "ways to save" and again on the final screen — which made the tour feel
+/// longer than it was and taught the Shortcut as a *saving method*, which it is
+/// not. It now appears once, inside the Action Button path, where it is
+/// visibly a prerequisite rather than an alternative.
 ///
 /// ── Rules it holds to ───────────────────────────────────────────────────
 ///
-///   * **No paywall.** Stage 3 says Sava understands what you save; it does not
-///     mention plans, prices, or limits. First run is not a funnel.
-///   * **No permission prompts.** Nothing here asks for notifications, photos,
-///     or tracking. Sava asks when it needs something, in context.
-///   * **Never a trap.** Every stage can be left — "Skip" on the first three,
-///     and Stage 4's actions are all optional.
+///   * **No paywall.** Nothing here mentions plans, prices or limits. First run
+///     is not a funnel.
+///   * **No permission prompts.** Nothing asks for notifications, photos or
+///     tracking. Sava asks in context, when it needs something.
+///   * **Never a trap.** Every stage can be left, and Stage 4's setup is
+///     optional in full.
+///   * **Nothing is faked.** The Shortcut CTA opens Apple's own installation
+///     sheet; Settings opens through the supported system API. No screen
+///     claims Sava can capture anything it was not given a link to.
 ///   * **Reduce Motion is a real path**, not a degraded one: every demo has a
-///     still composition that reads correctly with no animation at all.
+///     finished still composition that says the whole thing in one frame.
 struct OnboardingView: View {
     let userID: Int?
     /// Called when the tour is finished or skipped. The caller persists.
     let onFinish: () -> Void
 
     @State private var stage = 0
-    @State private var appeared = false
+    @State private var savedInDemo: Set<String> = []
+    @State private var demoPlatform: DemoPlatform = .tiktok
+    @State private var demoMethod: SaveMethod = .shareSheet
+    @State private var shortcutOpened = false
+    @State private var settingsOpened = false
+
     @Environment(\.openURL) private var openURL
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @Environment(\.dynamicTypeSize) private var typeSize
 
     private let stageCount = 4
 
@@ -44,9 +51,9 @@ struct OnboardingView: View {
 
             VStack(spacing: 0) {
                 header
-                // The stages themselves scroll: at the largest Dynamic Type
-                // sizes on the smallest phone, no fixed layout fits, and a
-                // clipped headline is worse than a scroll bar.
+                // The stages scroll. At the largest Dynamic Type sizes on the
+                // smallest phone no fixed layout fits, and a clipped headline is
+                // worse than a scroll indicator.
                 ScrollView {
                     VStack(alignment: .leading, spacing: Space.xl) {
                         stageContent
@@ -57,15 +64,13 @@ struct OnboardingView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .scrollBounceBehavior(.basedOnSize)
+                .devScrollAnchor()
                 footer
             }
         }
         .onAppear {
             if let forced = DevFlags.onboardingStage {
                 stage = max(0, min(stageCount - 1, forced))
-            }
-            withAnimation(Motion.respecting(Motion.standard, reduceMotion)) {
-                appeared = true
             }
         }
     }
@@ -96,116 +101,115 @@ struct OnboardingView: View {
 
     @ViewBuilder private var stageContent: some View {
         switch stage {
-        case 0: stageIdea
-        case 1: stageSaving
-        case 2: stageMagic
-        default: stageActivate
+        case 0: stageWhy
+        case 1: stageHowToSave
+        case 2: stageFind
+        default: stageReady
         }
     }
 
-    /// Stage 1 — what Sava is.
-    private var stageIdea: some View {
-        VStack(alignment: .leading, spacing: Space.xl) {
-            headline("Save anything.\nFind it later.",
-                     lede: "TikToks, Reels, videos, articles, screenshots. "
-                         + "Sava keeps them and reads them.")
-            OnboardingCardFan(cards: OnboardingCard.showcase, appeared: $appeared)
-            if !reduceMotion {
-                Text("Drag the pile")
-                    .font(SavaType.meta)
-                    .foregroundStyle(SavaColor.tertiary)
-                    .frame(maxWidth: .infinity, alignment: .center)
+    /// 01 — why Sava.
+    private var stageWhy: some View {
+        VStack(alignment: .leading, spacing: Space.l) {
+            StageHeadline(
+                title: "Everything you\nscroll past.\nKept.",
+                lede: "TikToks, Reels, YouTube, articles — Sava holds them and "
+                    + "reads them, so you can find them again.")
+            // Tall enough for two rows of cards plus the save target beneath
+            // them; `ContentUniverse` lays out in fractions of whatever it is
+            // given, and below about 380 the rows start to touch.
+            ContentUniverse(savedIDs: $savedInDemo)
+                .frame(height: 420)
+        }
+    }
+
+    /// 02 — how to save. The most useful screen in the tour.
+    private var stageHowToSave: some View {
+        VStack(alignment: .leading, spacing: Space.l) {
+            StageHeadline(
+                title: "Two ways in.",
+                lede: "You never have to open Sava to save something.")
+            SaveFlowDemo(platform: $demoPlatform, method: $demoMethod)
+
+            if demoMethod == .shareSheet {
+                // The Action Button path fills this space with `ShortcutChain`.
+                // Rather than leave the share path visibly emptier — which
+                // reads as the lesser option when it is in fact the one that
+                // needs no setup — say where it works. It is the question
+                // people actually have next.
+                VStack(alignment: .leading, spacing: Space.m) {
+                    SectionHeader(text: "Works anywhere there's a share button")
+                    ShareTargets()
+                }
+                .transition(.opacity)
+            }
+
+            if demoMethod == .actionButton {
+                VStack(alignment: .leading, spacing: Space.m) {
+                    SectionHeader(text: "The Shortcut is what makes that work")
+                    ShortcutChain()
+                    Button(action: addShortcut) {
+                        Text(shortcutOpened ? "Open the Shortcut again"
+                                            : "Add Sava Shortcut")
+                            .font(SavaType.caption)
+                            .foregroundStyle(SavaColor.onAccentTint)
+                            .frame(maxWidth: .infinity)
+                            .frame(minHeight: 44)
+                            .background(SavaColor.accentTint, in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    Text("Opens Apple's Shortcuts app, which asks you to confirm. "
+                         + "You can also do this later from Profile.")
+                        .font(SavaType.meta)
+                        .foregroundStyle(SavaColor.tertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .transition(.opacity)
             }
         }
+        .animation(Motion.respecting(Motion.standard, reduceMotion), value: demoMethod)
     }
 
-    /// Stage 2 — the three real ways in. The most useful screen in the tour.
-    private var stageSaving: some View {
+    /// 03 — find anything.
+    private var stageFind: some View {
+        // Tighter than the other stages, and a two-line headline rather than
+        // three: this screen carries a search field, six cards and an Ask
+        // exchange, and at three lines the answer — the actual payoff — was
+        // pushed off the bottom of an iPhone 17 Pro.
         VStack(alignment: .leading, spacing: Space.l) {
-            headline("Save from anywhere.",
-                     lede: "You never have to open Sava to save something.")
-            SaveMethodRow(
-                symbol: "square.and.arrow.up",
-                title: "The share sheet",
-                detail: "In TikTok, Instagram, YouTube or Safari: Share, then Sava.")
-            SaveMethodRow(
-                symbol: "bolt.fill",
-                title: "The Sava Shortcut",
-                detail: "Adds “\(AppConfig.officialSaveShortcutName)” to your "
-                    + "Shortcuts library. Apple will ask you to confirm.",
-                accent: true,
-                action: addShortcut,
-                actionTitle: "Add Sava Shortcut")
-            SaveMethodRow(
-                symbol: "button.horizontal.top.press",
-                title: "The Action Button",
-                detail: "One press. Saved. Assign the Shortcut in Settings.",
-                badge: "Optional")
+            StageHeadline(
+                title: "Find it by what\nyou remember.",
+                lede: "Not where you saw it. Then ask Sava about what it found.")
+            FindDemo()
         }
     }
 
-    /// Stage 3 — why it is worth saving into Sava rather than a notes app.
-    private var stageMagic: some View {
-        VStack(alignment: .leading, spacing: Space.xl) {
-            headline("You don't need to remember\nwhere you saw it.",
-                     lede: "Search by what you remember — the words, or just the gist.")
-            SearchDemo()
-            VStack(alignment: .leading, spacing: Space.m) {
-                SectionHeader(text: "Then ask about it")
-                AskDemo()
-            }
-        }
-    }
-
-    /// Stage 4 — real actions, none of them required.
-    private var stageActivate: some View {
+    /// 04 — you're ready. Activation, and nothing is required.
+    private var stageReady: some View {
         VStack(alignment: .leading, spacing: Space.l) {
-            headline("Save your first thing.",
-                     lede: "Add the Shortcut now, or just start using Sava.")
-            SaveMethodRow(
-                symbol: "bolt.fill",
-                title: "Add the Sava Shortcut",
-                detail: "The fastest way to save without opening the app.",
-                accent: true,
-                action: addShortcut,
-                actionTitle: "Add Sava Shortcut")
-            SaveMethodRow(
-                symbol: "button.horizontal.top.press",
-                title: "Set up the Action Button",
-                detail: "Settings → Action Button → Shortcut → "
-                    + "“\(AppConfig.officialSaveShortcutName)”.",
-                badge: "Optional",
-                action: openSettings,
-                actionTitle: "Open Settings")
-            Text("Everything here lives in Profile → Learn Sava, so you can come "
+            StageHeadline(
+                title: "You're ready.",
+                lede: "Sharing works now. The rest is optional.")
+            SetupChecklist(
+                shortcutOpened: shortcutOpened,
+                settingsOpened: settingsOpened,
+                onAddShortcut: addShortcut,
+                onOpenSettings: openSettings)
+
+            Text("All of this lives in Profile → Learn Sava, so you can come "
                  + "back to it whenever you like.")
                 .font(SavaType.meta)
                 .foregroundStyle(SavaColor.tertiary)
                 .fixedSize(horizontal: false, vertical: true)
         }
+        .animation(Motion.respecting(Motion.standard, reduceMotion), value: settingsOpened)
     }
 
-    // MARK: Shared bits
-
-    private func headline(_ title: String, lede: String) -> some View {
-        VStack(alignment: .leading, spacing: Space.m) {
-            Text(title)
-                .font(SavaType.display)
-                .tracking(Tracking.tight)
-                .foregroundStyle(SavaColor.primary)
-                .fixedSize(horizontal: false, vertical: true)
-            Text(lede)
-                // Serif: this is Sava explaining itself, which is its voice.
-                .font(SavaType.prose)
-                .foregroundStyle(SavaColor.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .accessibilityElement(children: .combine)
-    }
+    // MARK: Footer
 
     private var footer: some View {
         VStack(spacing: Space.s) {
-            SavaButton(title: stage == stageCount - 1 ? "Continue to Sava" : "Continue") {
+            SavaButton(title: stage == stageCount - 1 ? "Start using Sava" : "Continue") {
                 advance()
             }
             if stage == stageCount - 1 {
@@ -230,14 +234,8 @@ struct OnboardingView: View {
     private func advance() {
         guard stage < stageCount - 1 else { finish(); return }
         Haptics.tap()
-        // `appeared` is reset and re-set so each stage's staggered entrance
-        // plays on arrival rather than only on the very first screen.
-        appeared = false
         withAnimation(Motion.respecting(Motion.standard, reduceMotion)) {
             stage += 1
-        }
-        withAnimation(Motion.respecting(Motion.standard, reduceMotion).delay(0.05)) {
-            appeared = true
         }
     }
 
@@ -249,11 +247,19 @@ struct OnboardingView: View {
     /// Opens the official iCloud Shortcut. Apple shows its own Add Shortcut
     /// sheet; Sava never writes to the Shortcuts library and does not pretend to.
     private func addShortcut() {
+        Haptics.tap()
+        shortcutOpened = true
         openURL(AppConfig.saveShortcutURL)
     }
 
+    /// Opens Settings through the only URL Apple supports, which lands on
+    /// Sava's own Settings page rather than on Action Button. The trail shown
+    /// alongside is the rest of the walk. See `ActionButtonSupport`.
     private func openSettings() {
-        guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
-        openURL(url)
+        Haptics.tap()
+        withAnimation(Motion.respecting(Motion.standard, reduceMotion)) {
+            settingsOpened = true
+        }
+        if let url = ActionButtonSupport.appSettingsURL { openURL(url) }
     }
 }

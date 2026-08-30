@@ -9,9 +9,14 @@ import AppIntents
 /// who opens Settings → Action Button → Shortcut and expects to see "Save to
 /// Sava" without first having to build a Shortcut by hand.
 ///
-/// Kept to two entries. Apple allows ten, and every extra one dilutes the two
-/// that people actually want; a provider listing four variants of "save" is how
-/// Siri ends up asking which one you meant.
+/// Kept to one entry. Apple allows ten, and every extra one dilutes the one
+/// people actually want; a provider listing four variants of "save" is how Siri
+/// ends up asking which one you meant.
+///
+/// There used to be a second entry for saving a screenshot. Sava saves links
+/// now — a screenshot cannot establish which video it shows, so it could only
+/// ever produce a guess — and an action nobody should use does not belong in
+/// Spotlight or in the Action Button picker.
 struct SavaShortcuts: AppShortcutsProvider {
     static var appShortcuts: [AppShortcut] {
         // The one people look for. Takes a URL, text containing one, or falls
@@ -33,16 +38,6 @@ struct SavaShortcuts: AppShortcutsProvider {
             systemImageName: "bookmark.fill"
         )
 
-        // The screenshot path, which is what the full capture Shortcut uses in
-        // its Otherwise branch and what "save this screen" means by voice.
-        AppShortcut(
-            intent: SaveScreenshotToSavaIntent(),
-            phrases: [
-                "Save this screen to \(.applicationName)",
-            ],
-            shortTitle: "Save Screenshot to Sava",
-            systemImageName: "camera.viewfinder"
-        )
     }
 
     static var shortcutTileColor: ShortcutTileColor = .navy

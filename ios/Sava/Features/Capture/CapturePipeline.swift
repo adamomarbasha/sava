@@ -2,33 +2,32 @@ import Foundation
 
 /// Decides *how* to capture what the user is looking at, then saves it.
 ///
-/// The Shortcut assigned to the Action Button gathers foreground evidence
-/// ("Get What's On Screen" → "Get URLs" → count) and passes it in. This decides
-/// what to do with it:
+/// Sava saves **links**. There are two ways one arrives, and they are the two
+/// workflows the app teaches:
 ///
-///   1. DIRECT URL         — the Shortcut found a supported content URL on
-///                           screen. Always wins. YouTube and TikTok.
-///   2. CLIPBOARD LINK     — a validated supported URL the user copied. This is
-///                           the Instagram journey, not an emergency: Instagram
-///                           does not expose the post URL on screen, so Copy
-///                           Link is the only path to real identity.
-///   3. SCREENSHOT RESOLVE — last, and only when no URL exists anywhere. It can
-///                           support enrichment but never establishes identity.
-///   4. HONEST FAILURE     — describes a Shortcut misconfiguration; never tells
-///                           the user to go and copy a link.
+///   1. DIRECT URL      — the share sheet, or a Shortcut that ran "Get What's
+///                        On Screen". TikTok and YouTube put the post URL on
+///                        screen, so this is the common path.
+///   2. CLIPBOARD LINK  — a validated supported URL the user copied. This is
+///                        the Action Button journey, and the only path that
+///                        works on Instagram, which never exposes the post URL
+///                        on screen. Copy Link, then press the button.
+///   3. HONEST FAILURE  — describes what was missing. Never blames the user.
 ///
-/// Platform notes for the screenshot branch: YouTube prints its title on screen
-/// and that title is searchable, so resolution genuinely works. TikTok and
-/// Instagram expose no public search that maps a handle/caption to an exact
-/// video id, so the server reports honestly rather than guessing. In the
-/// intended flow those platforms never reach the screenshot branch.
+/// ── Why there is no screenshot branch ───────────────────────────────────
+///
+/// There used to be a third source: screenshot the screen, upload it, and have
+/// a vision model guess which video it showed. It was removed because it could
+/// not do the one thing a save has to do — establish *identity*. TikTok and
+/// Instagram expose no public search mapping a caption or handle to an exact
+/// post id, so the best possible outcome was a confident-looking guess at the
+/// wrong video, and the honest outcome was a failure message after spending a
+/// vision call. A copied link is free, instant, and exactly right.
 struct CapturePipeline {
     let bookmarks: BookmarkService
-    let resolver: ContentResolverService
 
     enum Path: String {
         case directURL = "direct_url"
-        case screenshotResolution = "screenshot_resolution"
         case clipboardFallback = "clipboard_fallback"
         case failed
     }
@@ -36,70 +35,34 @@ struct CapturePipeline {
     struct Outcome {
         let link: CapturedLink?
         let path: Path
-        let resolverReason: String?
-        let resolverConfidence: Double?
         let failureMessage: String?
-        /// Set when the server already persisted a partial capture.
-        var partialSave: String? = nil
     }
 
     /// Work out what to save, without saving. Pure decision logic.
     func resolve(_ input: CaptureInput, clipboard: String?) async -> Outcome {
-        // ── 1. Direct URL. Highest priority; never take a screenshot for this.
+        // ── 1. A URL that was on screen, or handed straight to the intent.
         if let link = CapturedLink(rawURL: input.providedURL, source: .direct) {
-            return Outcome(link: link, path: .directURL, resolverReason: nil,
-                           resolverConfidence: nil, failureMessage: nil)
+            return Outcome(link: link, path: .directURL, failureMessage: nil)
         }
 
         // ── 2. A validated clipboard link.
         //
-        // Ahead of the screenshot, deliberately. This is the Instagram contract:
-        // the user copied the link, so the clipboard holds *authoritative*
-        // identity, while a screenshot can only ever support a guess. Running
-        // the resolver first would spend a vision call to produce something
-        // weaker than what is already in hand.
+        // The user copied it, so the clipboard holds *authoritative* identity.
+        // Whatever is read is still validated before use: a clipboard entry has
+        // no provenance — it may be hours old and about something else — so
+        // anything that is not unmistakably a supported post is discarded by
+        // `SupportedContentURL` before it reaches here.
         if let link = CapturedLink(rawURL: clipboard, source: .clipboard) {
-            return Outcome(link: link, path: .clipboardFallback, resolverReason: nil,
-                           resolverConfidence: nil, failureMessage: nil)
+            return Outcome(link: link, path: .clipboardFallback, failureMessage: nil)
         }
 
-        // ── 3. Screenshot resolution, only when no URL is available anywhere.
-        var resolverReason: String?
-        var resolverRead: String?
-        if let screenshot = input.screenshot, !screenshot.isEmpty {
-            switch await resolver.resolve(screenshot: screenshot,
-                                          platformHint: input.platformHint) {
-            case .resolved(let url, let confidence):
-                if let link = CapturedLink(rawURL: url, source: .resolved) {
-                    return Outcome(link: link, path: .screenshotResolution,
-                                   resolverReason: "matched", resolverConfidence: confidence,
-                                   failureMessage: nil)
-                }
-            case .partiallySaved(let what):
-                return Outcome(link: nil, path: .screenshotResolution,
-                               resolverReason: "partial_capture",
-                               resolverConfidence: nil,
-                               failureMessage: nil, partialSave: what)
-            case .notConfident(let reason, let read):
-                resolverReason = reason
-                resolverRead = read
-            case .unavailable(let reason):
-                resolverReason = reason
-            }
-        }
-
-        // ── 4. Honest, platform-specific failure.
-        return Outcome(link: nil, path: .failed, resolverReason: resolverReason,
-                       resolverConfidence: nil,
-                       failureMessage: message(for: input, reason: resolverReason,
-                                               read: resolverRead))
+        return Outcome(link: nil, path: .failed,
+                       failureMessage: message(for: input))
     }
 
     /// What happened to the save.
     enum SaveResult {
         case saved(Bookmark)
-        /// Saved server-side from screenshot evidence, without a canonical URL.
-        case partiallySaved(String)
         /// Already in the library. From the user's point of view pressing the
         /// button on something they already saved succeeded — the content is
         /// there — so this is NOT an error.
@@ -111,12 +74,9 @@ struct CapturePipeline {
         guard SavaClient.hasStoredToken else { throw CaptureError.notSignedIn }
 
         let outcome = await resolve(input, clipboard: clipboard)
-        if let what = outcome.partialSave {
-            return (.partiallySaved(what), outcome)
-        }
         guard let link = outcome.link else {
             throw CaptureError.noContent(outcome.failureMessage
-                ?? "Couldn't tell what you're watching.", outcome)
+                ?? "Couldn't find a link to save.", outcome)
         }
         do {
             let bookmark = try await bookmarks.create(url: link.url)
@@ -130,26 +90,15 @@ struct CapturePipeline {
 
     // MARK: Messaging
 
-    /// An honest message for the rare case where the Shortcut supplied nothing
-    /// usable. The normal journey never reaches here, so these must describe a
-    /// Shortcut misconfiguration rather than blame the user for not copying.
-    private func message(for input: CaptureInput, reason: String?, read: String?) -> String {
-        let sawNothing = input.candidateURLs.isEmpty && (input.screenshot?.isEmpty ?? true)
-        if sawNothing {
-            return "Sava didn't receive anything from the Shortcut. Check that it runs “Get What's On Screen” and passes the result to Save to Sava."
+    /// An honest message for when nothing usable arrived.
+    ///
+    /// Both branches describe a *next action the user can actually take*. The
+    /// second is the one that matters on Instagram, where there is no on-screen
+    /// URL and copying the link is not a fallback but the intended route.
+    private func message(for input: CaptureInput) -> String {
+        if input.candidateURLs.isEmpty {
+            return "Nothing to save yet. Copy the link to the post first, then press again."
         }
-        if let read, !read.isEmpty {
-            return "Sava saw “\(read)” but couldn't match it exactly. Try again in a moment."
-        }
-        switch reason {
-        case "screen_not_readable":
-            return "Couldn't read what's on screen. Make sure the title or caption is visible, then press again."
-        case "no_search_available_for_platform":
-            return "Couldn't identify that from a screenshot. Try again once the link is on screen."
-        case "ambiguous_match", "low_confidence":
-            return "Sava wasn't confident enough to save the right video. Try again."
-        default:
-            return "Couldn't identify what's on screen. Try again."
-        }
+        return "Sava couldn't find a supported link there. Use Copy Link on the post, then press again."
     }
 }

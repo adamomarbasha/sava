@@ -7,8 +7,9 @@ import SwiftUI
 /// subscriber, a billing problem that needs attention, nothing at all for a
 /// Free account that is not near a limit.
 ///
-/// It does not nag. A Free user who is using 3 of 30 units sees "Free plan" and
-/// a chevron, because there is nothing to tell them yet.
+/// It does not nag. A Free account well inside its allowance is told what it
+/// *includes* rather than how close it is to a wall; the remaining-videos line
+/// only appears once the allowance is genuinely nearly gone.
 struct SubscriptionRow: View {
     @EnvironmentObject private var subscriptions: SubscriptionManager
     let onOpen: () -> Void
@@ -79,10 +80,18 @@ struct SubscriptionRow: View {
         }
         if !entitlement.isPro {
             let units = subscriptions.usage.processingUnits
-            // Only speak up once it is actually relevant.
+            // Escalating: what you have, then what is left, then what stopped.
             if units.exhausted { return "Video understanding paused until reset" }
             if units.fraction >= 0.8, let left = units.approxVideosRemaining {
                 return "About \(left) more videos this month"
+            }
+            // Otherwise say what Free *includes*. A row that reads "Free ›" and
+            // nothing else invites the assumption that Free is a trial, when in
+            // fact saving is unlimited on it — which is the single most useful
+            // fact about the plan and was going unsaid everywhere.
+            let plan = subscriptions.catalogue.plan("free")
+            if let videos = plan?.approxVideos {
+                return "Unlimited saves · \(videos.formatted(.number)) videos a month"
             }
         }
         return nil

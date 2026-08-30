@@ -90,21 +90,24 @@ def test_install_button_opens_the_configured_url_not_a_literal():
     """The CTA resolves through AppConfig rather than carrying its own copy."""
     view = (IOS / "Sava" / "Features" / "Profile" / "SaveAnywhereView.swift").read_text()
     assert "AppConfig.saveShortcutURL" in view
-    assert "Add Save to Sava" in view
+    assert "Add Sava Shortcut" in view
     # openURL, not the pasteboard, is the primary action.
     assert "openURL(shortcut)" in view
 
 
-def test_native_intents_are_still_registered():
+def test_the_link_intents_are_still_registered():
     """The Shortcut is a wrapper. Removing what it wraps breaks every install.
 
-    The published Shortcut calls these three by name; they are a contract with
+    The published Shortcut calls these by name; they are a contract with
     something already installed on users' phones, not internal symbols.
+
+    `SaveToSavaIntent` is the one the Action Button runs: its input is optional,
+    so an empty invocation falls through to the clipboard, which is exactly the
+    "Copy Link, then press" workflow.
     """
     capture = IOS / "Sava" / "Features" / "Capture"
     intents = (capture / "SaveToSavaIntent.swift").read_text()
-    for name in ("SaveToSavaIntent", "SaveLinkToSavaIntent",
-                 "SaveScreenshotToSavaIntent"):
+    for name in ("SaveToSavaIntent", "SaveLinkToSavaIntent"):
         assert f"struct {name}: AppIntent" in intents, f"{name} is no longer an AppIntent"
 
     provider = (capture / "SavaShortcuts.swift").read_text()
@@ -112,6 +115,45 @@ def test_native_intents_are_still_registered():
     assert "Save to Sava" in provider, (
         "the App Shortcut phrase is what puts Sava in the Action Button picker"
     )
+
+
+def test_the_screenshot_intent_is_gone():
+    """Sava saves links. A screenshot cannot say *which* post it shows.
+
+    TikTok and Instagram expose no public search mapping a caption or a handle
+    to an exact post id, so the screenshot action's best case was a confident
+    guess at the wrong video. It was removed along with the upload path that
+    served it.
+
+    NOTE: the published iCloud Shortcut must be republished without its
+    screenshot branch, or that branch will fail on devices that already have it.
+    """
+    capture = IOS / "Sava" / "Features" / "Capture"
+    intents = (capture / "SaveToSavaIntent.swift").read_text()
+    assert "struct SaveScreenshotToSavaIntent" not in intents
+    assert "SaveScreenshotToSavaIntent" not in (capture / "SavaShortcuts.swift").read_text()
+
+    for gone in ("ScreenshotTransport.swift", "ContentResolverService.swift"):
+        assert not (capture / gone).exists(), f"{gone} should have been deleted"
+
+
+def test_no_capture_path_uploads_an_image():
+    """The client must not send image bytes to be identified any more."""
+    capture = IOS / "Sava" / "Features" / "Capture"
+    for swift in capture.glob("*.swift"):
+        body = swift.read_text()
+        assert "api/resolve" not in body, f"{swift.name} still calls the resolver"
+        assert "public.image" not in body, f"{swift.name} still accepts an image"
+
+
+def test_the_share_extension_accepts_only_links_and_text():
+    """Images were never accepted here, and must not start being."""
+    plist = (IOS / "SavaShare-Info.plist").read_text()
+    assert "NSExtensionActivationSupportsWebURLWithMaxCount" in plist
+    assert "NSExtensionActivationSupportsText" in plist
+    for forbidden in ("SupportsImageWithMaxCount", "SupportsMovieWithMaxCount",
+                      "SupportsFileWithMaxCount"):
+        assert forbidden not in plist, forbidden
 
 
 def test_link_intent_accepts_text_not_only_urls():

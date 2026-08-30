@@ -1,22 +1,26 @@
 import SwiftUI
 import UIKit
 
-/// How to save from anywhere: install the official Shortcut, then put it on the
-/// Action Button.
+/// **Learn Sava** — everything the tour teaches, kept permanently.
 ///
-/// One screen, two honest claims. The Shortcut is **installed by Apple** — this
-/// opens the iCloud link and stops there, because there is no API to add a
-/// Shortcut to somebody's library and there should not be. The Action Button is
-/// **assigned by the user** — likewise no API, public or private: the button
-/// belongs to the person holding the phone. So this screen does the one thing
-/// an app can do (open the two places) and never claims to have done anything
-/// itself.
+/// Reached from Profile → Learn Sava. Onboarding happens once, in the minute
+/// somebody is least able to absorb it; this is the same material without the
+/// pacing, plus the two things the tour cannot do (reinstall the Shortcut, get
+/// back into Settings) and the tour itself on a button.
 ///
-/// The Shortcut is a wrapper, not a second implementation. It gathers what
-/// Shortcuts can see and an App Intent cannot — the foreground app's URLs, the
-/// clipboard, a screenshot — and hands it to `SaveLinkToSavaIntent` /
-/// `SaveScreenshotToSavaIntent`. Every save still goes through `CapturePipeline`
-/// and the same backend call the share extension and in-app save use.
+/// It shares `SaveFlowDemo` with Stage 2 rather than restating it in prose. One
+/// definition of "how you save from Instagram" means the tour and the help
+/// screen cannot drift apart — and the last time they were written separately,
+/// they disagreed about whether the Shortcut was required.
+///
+/// ── Two honest claims ───────────────────────────────────────────────────
+///
+/// The Shortcut is **installed by Apple** — this opens the iCloud link and
+/// stops, because there is no API to add a Shortcut to somebody's library and
+/// there should not be. The Action Button is **assigned by the user** —
+/// likewise no API, public or private: the button belongs to the person holding
+/// the phone. So this screen does the one thing an app can do, opens the two
+/// places, and never claims to have done anything itself.
 struct SaveAnywhereView: View {
     @Environment(\.openURL) private var openURL
     @Environment(\.dismiss) private var dismiss
@@ -27,16 +31,19 @@ struct SaveAnywhereView: View {
     @State private var couldNotOpen = false
     @State private var copiedLink = false
     @State private var showTour = false
+    @State private var demoPlatform: DemoPlatform = .tiktok
+    @State private var demoMethod: SaveMethod = .shareSheet
     @EnvironmentObject private var session: SessionStore
 
     private var shortcut: URL { AppConfig.saveShortcutURL }
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: Space.xl) {
+            VStack(alignment: .leading, spacing: Space.xxl) {
                 hero
-                install
-                actionButton
+                howToSave
+                shortcutSection
+                if ActionButtonSupport.isAvailable { actionButtonSection }
                 elsewhere
                 replayTour
             }
@@ -44,12 +51,14 @@ struct SaveAnywhereView: View {
             .padding(.top, Space.l)
             .padding(.bottom, Space.xxl)
         }
-        .background(SavaColor.ground)
-        .navigationTitle("Save from anywhere")
+        .background(SavaColor.ground.ignoresSafeArea())
+        .navigationTitle("Learn Sava")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Button("Done") { dismiss() }
+                    .font(SavaType.caption)
+                    .foregroundStyle(SavaColor.secondary)
             }
         }
         .tint(SavaColor.primary)
@@ -63,62 +72,52 @@ struct SaveAnywhereView: View {
         }
     }
 
-    /// The tour, kept available forever.
-    ///
-    /// Onboarding that can only ever be seen once is a document you are not
-    /// allowed to re-read. Nothing in it is single-use, and the people most
-    /// likely to want it again are the ones who skipped it.
-    private var replayTour: some View {
-        VStack(alignment: .leading, spacing: Space.m) {
-            SectionHeader(text: "The tour")
-            SavaRow(title: "Watch it again",
-                    detail: "About a minute",
-                    symbol: "sparkles.rectangle.stack") {
-                Haptics.tap()
-                showTour = true
-            }
-        }
-    }
-
     // MARK: Hero
 
     private var hero: some View {
-        VStack(alignment: .leading, spacing: Space.l) {
-            HStack(spacing: Space.m) {
-                SavaMark(size: 40)
-                // The Action Button as the system draws it. A real SF Symbol
-                // rather than a drawn illustration: it is the glyph Apple uses
-                // in Settings, so it is the one the user is about to look for.
-                Image(systemName: "button.horizontal.top.press")
-                    .font(.system(size: 26, weight: .regular))
-                    // Glyph, so the tint token rather than the fill token.
-                    .foregroundStyle(SavaColor.accentTint)
-                    .accessibilityHidden(true)
-            }
+        VStack(alignment: .leading, spacing: Space.s) {
+            Text("Save from anywhere.")
+                .font(SavaType.display)
+                .tracking(Tracking.tight)
+                .foregroundStyle(SavaColor.primary)
+                .fixedSize(horizontal: false, vertical: true)
+            Text("TikTok, Instagram, YouTube, the web. Sava saves the link — "
+                 + "you never have to open the app.")
+                .font(SavaType.prose)
+                .foregroundStyle(SavaColor.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .accessibilityElement(children: .combine)
+    }
 
-            VStack(alignment: .leading, spacing: Space.s) {
-                Text("Save from anywhere.")
-                    .font(SavaType.display)
-                    .tracking(Tracking.tight)
-                    .foregroundStyle(SavaColor.primary)
-                    .fixedSize(horizontal: false, vertical: true)
+    // MARK: The demos, same as the tour
 
-                Text("TikTok. Instagram. YouTube. The web.")
-                    .font(SavaType.prose)
-                    .foregroundStyle(SavaColor.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+    private var howToSave: some View {
+        VStack(alignment: .leading, spacing: Space.m) {
+            SectionHeader(text: "How to save")
+            SaveFlowDemo(platform: $demoPlatform, method: $demoMethod)
         }
     }
 
-    // MARK: Install
+    // MARK: The Shortcut
 
-    private var install: some View {
+    private var shortcutSection: some View {
         VStack(alignment: .leading, spacing: Space.m) {
-            SavaButton(title: "Add Save to Sava") { addShortcut() }
+            SectionHeader(text: "The Sava Shortcut")
 
-            Text("One shortcut. Adds “\(AppConfig.officialSaveShortcutName)” to "
-                 + "your Shortcuts library.")
+            Text("Only needed for the Action Button. Sharing works without it.")
+                .font(SavaType.body)
+                .foregroundStyle(SavaColor.primary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            ShortcutChain()
+                .padding(.vertical, Space.s)
+
+            SavaButton(title: "Add Sava Shortcut") { addShortcut() }
+
+            Text("Opens Apple's Shortcuts app, which asks you to confirm. Adds "
+                 + "“\(AppConfig.officialSaveShortcutName)” to your library. "
+                 + "Safe to run again if you removed it.")
                 .font(SavaType.meta)
                 .foregroundStyle(SavaColor.tertiary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -139,58 +138,37 @@ struct SaveAnywhereView: View {
         }
     }
 
-    /// Opens the iCloud link and lets Apple install it.
-    ///
-    /// Sava never writes to the Shortcuts library. There is no API for it, and
-    /// a home-made clone of the Shortcut would be a second thing to keep in
-    /// step with the intents it calls.
-    private func addShortcut() {
-        openURL(shortcut) { accepted in
-            withAnimation(Motion.gentle) { couldNotOpen = !accepted }
-        }
-    }
+    // MARK: The Action Button
 
-    private func copyLink() {
-        UIPasteboard.general.string = shortcut.absoluteString
-        Haptics.press()
-        withAnimation(Motion.gentle) { copiedLink = true }
-        Task {
-            try? await Task.sleep(nanoseconds: 2_000_000_000)
-            withAnimation(Motion.gentle) { copiedLink = false }
-        }
-    }
-
-    // MARK: Action Button
-
-    /// Three steps, and the name the picker actually shows.
+    /// The path, and the name the picker actually shows.
     ///
     /// The installed Shortcut and Sava's built-in action are **two separate
     /// entries** in Settings → Action Button → Shortcut: the Shortcut appears
     /// under Shortcuts by its own name, Sava's action appears under Sava. Both
     /// end at the same save. Naming only one of them is what sends people back
     /// to scroll a list looking for a title that is not in it.
-    private var actionButton: some View {
+    private var actionButtonSection: some View {
         VStack(alignment: .leading, spacing: Space.m) {
-            SectionHeader(text: "Use with Action Button")
+            SectionHeader(text: "Action Button setup")
 
-            VStack(alignment: .leading, spacing: Space.l) {
-                StepRow(number: 1, text: "Open iPhone Settings")
-                StepRow(number: 2, text: "Choose Action Button, then swipe to Shortcut")
-                StepRow(number: 3,
-                        text: "Pick “\(AppConfig.officialSaveShortcutName)” — or "
-                            + "“Save to Sava” under Sava")
-            }
+            Text("Copy a link, press the button, it's saved.")
+                .font(SavaType.body)
+                .foregroundStyle(SavaColor.primary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            SettingsPathTrail()
+
+            Text("Or pick “Save to Sava” under Sava — both end at the same save.")
+                .font(SavaType.meta)
+                .foregroundStyle(SavaColor.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
 
             VStack(spacing: 0) {
-                // Deep-links straight to Sava's own Settings page, which is as
-                // close as iOS lets an app get. There is no URL that opens
-                // Settings > Action Button directly, and inventing one that
-                // silently lands on the Settings root would be worse than
-                // naming the destination and letting the user tap twice.
+                // iOS publishes no URL that opens Settings → Action Button, so
+                // this opens Sava's own Settings page, which is as close as the
+                // supported API gets. See `ActionButtonSupport`.
                 SavaRow(title: "Open iPhone Settings", symbol: "gear") {
-                    if let url = URL(string: UIApplication.openSettingsURLString) {
-                        openURL(url)
-                    }
+                    if let url = ActionButtonSupport.appSettingsURL { openURL(url) }
                 }
                 SavaRow(title: "Open Shortcuts", symbol: "square.stack.3d.up") {
                     if let url = URL(string: "shortcuts://") { openURL(url) }
@@ -222,34 +200,44 @@ struct SaveAnywhereView: View {
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
-}
 
-/// A numbered step.
-///
-/// The numeral sits in a hairline circle rather than a filled citron disc:
-/// three accent marks on one screen is exactly the overuse that stops the
-/// accent meaning anything.
-private struct StepRow: View {
-    let number: Int
-    let text: String
-
-    var body: some View {
-        HStack(alignment: .top, spacing: Space.m) {
-            Text("\(number)")
-                .font(SavaType.numeric)
-                .foregroundStyle(SavaColor.secondary)
-                .frame(width: 26, height: 26)
-                .overlay(Circle().strokeBorder(SavaColor.hairline, lineWidth: 0.5))
-
-            Text(text)
-                .font(SavaType.body)
-                .foregroundStyle(SavaColor.primary)
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(.top, 2)
-
-            Spacer(minLength: 0)
+    /// The tour, kept available forever.
+    ///
+    /// Onboarding that can only ever be seen once is a document you are not
+    /// allowed to re-read. Nothing in it is single-use, and the people most
+    /// likely to want it again are the ones who skipped it.
+    private var replayTour: some View {
+        VStack(alignment: .leading, spacing: Space.m) {
+            SectionHeader(text: "The tour")
+            SavaRow(title: "Watch it again",
+                    detail: "About a minute",
+                    symbol: "sparkles.rectangle.stack") {
+                Haptics.tap()
+                showTour = true
+            }
         }
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("Step \(number). \(text)")
+    }
+
+    // MARK: Actions
+
+    /// Opens the iCloud link and lets Apple install it.
+    ///
+    /// Sava never writes to the Shortcuts library. There is no API for it, and
+    /// a home-made clone of the Shortcut would be a second thing to keep in
+    /// step with the intents it calls.
+    private func addShortcut() {
+        openURL(shortcut) { accepted in
+            withAnimation(Motion.gentle) { couldNotOpen = !accepted }
+        }
+    }
+
+    private func copyLink() {
+        UIPasteboard.general.string = shortcut.absoluteString
+        Haptics.press()
+        withAnimation(Motion.gentle) { copiedLink = true }
+        Task {
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            withAnimation(Motion.gentle) { copiedLink = false }
+        }
     }
 }

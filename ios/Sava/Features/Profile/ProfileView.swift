@@ -69,6 +69,13 @@ struct ProfileView: View {
         VStack(alignment: .leading, spacing: Space.m) {
             SectionHeader(text: "Plan")
             SubscriptionRow { showPaywall = true }
+            // Apple requires a way to reach subscription management, and a
+            // subscriber should not have to open the *paywall* to cancel.
+            if subscriptions.isPro {
+                SavaRow(title: "Manage Subscription", symbol: "creditcard") {
+                    openURL(AppConfig.Links.manageSubscription)
+                }
+            }
         }
     }
 

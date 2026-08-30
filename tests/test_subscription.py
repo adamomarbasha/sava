@@ -13,6 +13,8 @@ Everything else is arithmetic.
 from __future__ import annotations
 
 import json
+import pathlib
+import re
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -785,54 +787,179 @@ class TestLimitStateIsVisibleToTheClient:
         assert _visible_state(fine, cc) == ProcessingState.QUEUED
 
 
-# ─── The paywall when StoreKit has no catalogue ─────────────────────────────
+# ─── The paywall ─────────────────────────────────────────────────────────────
 
-class TestPaywallUnavailableState:
-    """Found by running the paywall against a simulator with no StoreKit
-    configuration, which is what a real device behind a captive portal or a
-    misconfigured storefront looks like: `Product.products(for:)` returns an
-    empty array in ~30ms, so `productsPhase` becomes `.unavailable`.
+def _ios(*parts: str) -> str:
+    import pathlib as _p
+    root = _p.Path(__file__).resolve().parent.parent / "ios"
+    return root.joinpath(*parts).read_text(encoding="utf-8")
 
-    The screen was then a dead end. Prices rendered as shimmer placeholders
-    (which mean "loading"), the buy button was disabled, and the one sentence
-    explaining why — plus its "Try again" — was laid out *after* the plan
-    cards, which put it below the fold behind the pinned action bar. The first
-    screen the user saw offered no reason and no way out.
+
+PAYWALL = ("Sava", "Features", "Paywall", "PaywallView.swift")
+COMPARISON = ("Sava", "Features", "Paywall", "PlanComparison.swift")
+
+
+class TestPaywallExplainsBeforeItSells:
+    """Reported from a physical device: the screen led with Monthly/Annual and
+    a bullet list of what Pro includes, which never said what **Free** could do.
+
+    The reader was asked to choose a price before being told the shape of the
+    thing, and the most persuasive true fact about Sava — saving is unlimited on
+    both plans — appeared nowhere at all.
     """
 
-    @staticmethod
-    def _paywall() -> str:
-        import pathlib
-        root = pathlib.Path(__file__).resolve().parent.parent / "ios"
-        return (root / "Sava" / "Features" / "Paywall"
-                / "PaywallView.swift").read_text(encoding="utf-8")
+    def test_the_comparison_comes_before_the_plan_selector(self):
+        source = _ios(*PAYWALL)
+        body = source[source.index("var body: some View"):source.index("// MARK: Hero")]
+        assert body.index("whatProChanges") < body.index("comparison") \
+            < body.index("plans"), "understand, then choose"
 
-    def test_the_explanation_is_rendered_before_the_plan_cards(self):
-        """Ordering *is* the fix: below `plans` it was off-screen."""
-        source = self._paywall()
-        notice = source.index("if case .unavailable(let why) = subscriptions.productsPhase")
-        plans = source.index("\n                    plans\n")
-        assert notice < plans, \
-            "the unavailable notice must render above the plan cards, not below"
+    def test_the_hero_does_not_lead_with_a_price(self):
+        source = _ios(*PAYWALL)
+        hero = source[source.index("private var hero:"):source.index("What Pro changes")]
+        assert "$" not in hero
 
-    def test_the_unavailable_state_still_offers_a_retry(self):
-        assert "Try again" in self._paywall()
+    def test_saving_is_stated_to_be_unlimited_on_both_plans(self):
+        assert "Saving stays unlimited on both." in _ios(*PAYWALL)
+        assert "Save as much as you like" in _ios(*COMPARISON)
+
+    def test_free_capabilities_are_shown_not_only_pro_ones(self):
+        """A comparison with an empty Free column is a feature list wearing a
+        table's clothes."""
+        source = _ios(*COMPARISON)
+        for row in ("TikTok, Instagram, YouTube, web",
+                    "Share sheet, Shortcut, Action Button",
+                    "Search, collections, summaries"):
+            assert row in source, row
+        # Each of those is `.yes, .yes` — included on both plans.
+        assert source.count("Row(") >= 8
+
+
+class TestComparisonMatchesTheEntitlementModel:
+    """Every row must map to something the backend actually enforces."""
+
+    def test_numbers_come_from_the_catalogue_not_from_literals(self):
+        """`/api/pricing` serves `api/plans.py`, so an env-var change reaches
+        the paywall without a client release — and the paywall can never
+        advertise an allowance the backend will not honour."""
+        source = _ios(*COMPARISON)
+        assert "free.approxVideos" in source and "pro.approxVideos" in source
+        assert "free.askMessages" in source and "pro.askMessages" in source
+        for hardcoded in ('"120"', '"460"', '"150"', '"1,500"', '"1500"'):
+            assert hardcoded not in source, f"{hardcoded} must come from the server"
+
+    def test_the_metered_allowances_are_the_two_the_backend_meters(self):
+        from api import plans
+        free, pro = plans.limits_for("free"), plans.limits_for("pro")
+        assert free.processing_units < pro.processing_units
+        assert free.ask_messages < pro.ask_messages
+
+    def test_deep_analysis_is_a_real_pro_capability(self):
+        from api import plans
+        assert plans.limits_for("free").enhanced_analysis is False
+        assert plans.limits_for("pro").enhanced_analysis is True
+        assert "Deep video analysis" in _ios(*COMPARISON)
+
+    def test_priority_and_concurrency_are_real_differences(self):
+        from api import plans
+        free, pro = plans.limits_for("free"), plans.limits_for("pro")
+        assert pro.job_priority < free.job_priority, "lower number is claimed sooner"
+        assert pro.concurrent_jobs > free.concurrent_jobs
+        source = _ios(*COMPARISON)
+        assert "Processing queue" in source
+        assert "Saves processed at once" in source
+
+    def test_saving_really_is_unmetered(self):
+        """`PlanLimits` carries no item ceiling, and at quota the save is still
+        stored — so "unlimited saves" is a fact, not marketing."""
+        from api import plans
+        for name in plans.PLAN_NAMES:
+            limits = plans.limits_for(name)
+            assert not hasattr(limits, "saved_items")
+            assert not hasattr(limits, "collections")
+        save = (pathlib.Path(__file__).resolve().parent.parent
+                / "api" / "services" / "save.py").read_text()
+        assert "ProcessingState.LIMIT_REACHED" in save, \
+            "a save over quota must be stored, not refused"
+
+    def test_no_internal_accounting_reaches_the_user(self):
+        """Units, route names and token costs are internal."""
+        for parts in (PAYWALL, COMPARISON,
+                      ("Sava", "Features", "Profile", "SubscriptionSection.swift")):
+            source = _ios(*parts)
+            shown = " ".join(re.findall(r'"([^"\\\n]*)"', source)).lower()
+            for forbidden in ("processing unit", "light_vision", "deep_vision",
+                              "token", "route", "credit"):
+                assert forbidden not in shown, f"{parts[-1]} says {forbidden!r}"
+
+
+class TestStoreKitStates:
+
+    def test_prices_always_come_from_storekit(self):
+        code = "\n".join(line for line in _ios(*PAYWALL).splitlines()
+                         if not line.strip().startswith("//"))
+        assert "localizedPrice" in code
+        assert "$9.99" not in code and "$79.99" not in code
+
+    def test_annual_value_is_derived_from_storekit_prices(self):
+        source = _ios(*PAYWALL)
+        assert "annualPerMonth" in source and "annualSavingsPercent" in source
+
+    def test_unavailable_replaces_the_selector_rather_than_blanking_it(self):
+        """Two selectable rows with missing prices look like a half-loaded
+        screen and invite a tap on a button that cannot work."""
+        source = _ios(*PAYWALL)
+        plans_block = source[source.index("private var plans: some View"):]
+        plans_block = plans_block[:plans_block.index("private var annualDetailLine")]
+        assert "case .unavailable" in plans_block
+        assert plans_block.index("unavailable(why)") < plans_block.index('title: "Monthly"')
+
+    def test_the_comparison_survives_an_unavailable_catalogue(self):
+        """The screen must still explain what Sava Pro is when it cannot sell
+        it — the comparison is outside the StoreKit-gated branch."""
+        source = _ios(*PAYWALL)
+        # Only the content stack — not the whole body, which also holds the
+        # `.task` that reloads a catalogue that previously failed.
+        start = source.index("VStack(alignment: .leading, spacing: Space.xl)")
+        stack = source[start:source.index("actionBar", start)]
+        assert "comparison" in stack
+        assert "unavailable" not in stack, \
+            "the notice belongs inside `plans`, so the comparison is unconditional"
+
+    def test_the_cta_is_disabled_and_renamed_when_nothing_can_be_bought(self):
+        source = _ios(*PAYWALL)
+        assert "selectedProduct != nil" in source, "CTA must require a real product"
+        assert "Purchasing unavailable" in source
+
+    def test_retry_is_offered(self):
+        assert "Try again" in _ios(*PAYWALL)
 
     def test_a_missing_price_only_shimmers_while_it_is_loading(self):
         """A skeleton that never resolves reads as a hung screen."""
-        source = self._paywall()
-        assert "action != nil && isLoading" in source, \
-            "the price placeholder must be gated on the loading phase"
+        assert "action != nil && isLoading" in _ios(*PAYWALL)
 
-    def test_the_loading_flag_comes_from_the_products_phase(self):
-        source = self._paywall()
-        assert "private var catalogueIsLoading: Bool" in source
-        assert "if case .loading = subscriptions.productsPhase" in source
-        assert source.count("isLoading: catalogueIsLoading") == 2, \
-            "both the monthly and annual rows must be gated"
+    def test_restore_and_legal_are_present(self):
+        source = _ios(*PAYWALL)
+        assert "Restore Purchases" in source
+        assert "Terms of Use" in source and "Privacy Policy" in source
 
-    def test_the_buy_button_is_still_disabled_without_a_product(self):
-        """The notice explains; it must not make a dead button look alive."""
-        source = self._paywall()
-        assert "isSelectable: subscriptions.monthly != nil" in source
-        assert "isSelectable: subscriptions.annual != nil" in source
+
+class TestProfilePlanSurface:
+
+    def test_free_accounts_are_told_what_they_have(self):
+        source = _ios("Sava", "Features", "Profile", "SubscriptionSection.swift")
+        assert "Unlimited saves" in source
+
+    def test_usage_is_expressed_in_videos_and_messages(self):
+        source = _ios("Sava", "Features", "Profile", "SubscriptionSection.swift")
+        assert "Videos understood" in source
+        assert "Ask messages" in source
+
+    def test_there_is_a_reset_date(self):
+        assert "resetDescription" in _ios("Sava", "Features", "Profile",
+                                          "SubscriptionSection.swift")
+
+    def test_subscribers_can_reach_management_without_the_paywall(self):
+        source = _ios("Sava", "Features", "Profile", "ProfileView.swift")
+        assert "Manage Subscription" in source
+        assert "AppConfig.Links.manageSubscription" in source
