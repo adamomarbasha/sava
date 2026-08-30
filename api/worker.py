@@ -8,7 +8,10 @@ Run alongside the API:
 
 Deployment: one unfiltered worker process is the right shape until a specific
 workload needs different hardware. Claiming is atomic, so running several is
-safe — on Postgres via FOR UPDATE SKIP LOCKED, on SQLite via serialised writes.
+safe — on Postgres via FOR UPDATE SKIP LOCKED, elsewhere via a compare-and-swap
+UPDATE. Two workers cannot take the same job, and a per-content lease
+(`api/concurrency.py`) stops two jobs for the same item from both paying for the
+download and the AI.
 
 Pools, when scale demands them:
 
