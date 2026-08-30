@@ -25,12 +25,10 @@ final class SearchViewModel: ObservableObject {
     @Published var platform: Platform?
     @Published private(set) var state: State = .idle
     /// Semantic matches the keyword pass did not already return.
-    @Published private(set) var alsoRelated: [RelatedSave] = []
     @Published private(set) var recents: [String] = []
 
     private let recentsKey = "sava.recentSearches"
     private var searchTask: Task<Void, Never>?
-    private var semanticTask: Task<Void, Never>?
 
     init() {
         recents = UserDefaults.standard.stringArray(forKey: recentsKey) ?? []
@@ -43,8 +41,6 @@ final class SearchViewModel: ObservableObject {
     /// Debounced live search as the user types.
     func queryChanged(bookmarks: BookmarkService, intelligence: IntelligenceService) {
         searchTask?.cancel()
-        semanticTask?.cancel()
-        alsoRelated = []
 
         guard !trimmedQuery.isEmpty else {
             state = .idle
@@ -61,7 +57,6 @@ final class SearchViewModel: ObservableObject {
     /// Immediate search (submit, tap a recent, change a filter).
     func submit(bookmarks: BookmarkService, intelligence: IntelligenceService) {
         searchTask?.cancel()
-        semanticTask?.cancel()
         guard !trimmedQuery.isEmpty else { return }
         let term = trimmedQuery
         remember(term)
@@ -91,34 +86,32 @@ final class SearchViewModel: ObservableObject {
 
     // MARK: - Running
 
+    /// One search, one ranked list.
+    ///
+    /// This used to run two passes — a keyword query against the bookmark rows
+    /// for the grid, then a second semantic query whose extra hits went into an
+    /// "Also related" strip underneath. That split was the search bug: the
+    /// first pass only reads `bookmarks.title/author/description/note`, so a
+    /// save whose text lives on the canonical row or in the derived
+    /// understanding could never reach the primary results. Searching "Speed"
+    /// reported "No matches" and then listed a TikTok whose title starts with
+    /// the word.
+    ///
+    /// `GET /api/search` already does lexical *and* semantic retrieval, fuses
+    /// them into one ranking, and dedupes by canonical id. Splitting its output
+    /// back into two buckets discarded that ranking and demoted real matches.
     private func run(_ term: String, bookmarks: BookmarkService,
                      intelligence: IntelligenceService) async {
         state = .searching
         do {
-            let items = try await bookmarks.list(platform: platform, query: term, limit: 100)
+            let items = try await intelligence.searchLibrary(
+                query: term, platform: platform, limit: 60)
             guard !Task.isCancelled else { return }
             state = items.isEmpty ? .empty : .results(items)
-            runSemanticPass(term, found: Set(items.map(\.id)), intelligence: intelligence)
         } catch is CancellationError {
             // Superseded.
         } catch {
             state = .failed((error as? APIError)?.userMessage ?? "Search failed. Try again.")
-        }
-    }
-
-    /// The second pass. Failure here is silent on purpose: the keyword results
-    /// are already a complete, useful answer, and a semantic outage should not
-    /// turn a working search into an error screen.
-    private func runSemanticPass(_ term: String, found: Set<Int>,
-                                 intelligence: IntelligenceService) {
-        semanticTask = Task {
-            guard let response = try? await intelligence.search(query: term,
-                                                                platform: platform,
-                                                                limit: 12),
-                  !Task.isCancelled else { return }
-            let extras = response.results.filter { !found.contains($0.id) }
-            guard !extras.isEmpty else { return }
-            withAnimation(Motion.gentle) { alsoRelated = extras }
         }
     }
 

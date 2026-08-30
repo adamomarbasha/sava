@@ -20,7 +20,6 @@ struct SearchView: View {
                 content
                     .transition(.opacity)
                     .animation(Motion.gentle, value: model.state)
-                alsoRelated
             }
             .padding(.top, Space.s)
             .padding(.bottom, Space.xl)
@@ -101,27 +100,6 @@ struct SearchView: View {
                            actionTitle: "Try again") {
                 model.submit(bookmarks: bookmarks, intelligence: intelligence)
             }
-        }
-    }
-
-    /// Semantic matches that the exact-match pass missed. Kept visually
-    /// secondary — these are "you might also mean", not results.
-    @ViewBuilder private var alsoRelated: some View {
-        if !model.alsoRelated.isEmpty {
-            VStack(alignment: .leading, spacing: Space.s) {
-                SectionHeader(text: "Also related")
-                VStack(spacing: 0) {
-                    ForEach(model.alsoRelated) { save in
-                        NavigationLink(value: save) {
-                            InlineMediaReference(save: save)
-                        }
-                        .buttonStyle(.plain)
-                        .hairline()
-                    }
-                }
-            }
-            .screenPadding()
-            .transition(.opacity)
         }
     }
 

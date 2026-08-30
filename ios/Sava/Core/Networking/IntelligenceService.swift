@@ -104,6 +104,31 @@ struct IntelligenceService {
         return try await client.send(Endpoint(path: "api/search", method: .get, query: items))
     }
 
+    /// `GET /api/search`, decoded as library items — **the** search.
+    ///
+    /// Search used to run two passes: `GET /api/bookmarks?q=` for the primary
+    /// grid, then this endpoint for a secondary "Also related" strip. The first
+    /// only matches `bookmarks.title/author/description/note`, so anything whose
+    /// text lives on the canonical row or in the derived understanding —
+    /// transcript summary, topics, entities — could not appear in the primary
+    /// results at all, and surfaced under "Also related" instead. Searching
+    /// "Speed" showed "No matches" above a saved TikTok titled "Speed was
+    /// convinced…".
+    ///
+    /// One endpoint, one ranked list. The server already fuses lexical and
+    /// semantic retrieval and dedupes by canonical id; splitting that back into
+    /// two buckets on the client threw the ranking away and hid real matches.
+    func searchLibrary(query: String, platform: Platform? = nil,
+                       limit: Int = 60) async throws -> [Bookmark] {
+        struct Response: Decodable { let results: [Bookmark] }
+        var items = [URLQueryItem(name: "q", value: query),
+                     URLQueryItem(name: "limit", value: String(limit))]
+        if let platform { items.append(URLQueryItem(name: "platform", value: platform.rawValue)) }
+        let response: Response = try await client.send(
+            Endpoint(path: "api/search", method: .get, query: items))
+        return response.results
+    }
+
     /// `GET /api/bookmarks/{id}/related` — vector similarity, zero inference.
     func related(bookmarkID: Int, limit: Int = 8) async throws -> [RelatedSave] {
         struct Response: Decodable { let results: [RelatedSave] }

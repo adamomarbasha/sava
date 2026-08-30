@@ -28,6 +28,11 @@ logger = logging.getLogger(__name__)
 # A hit must score at least this fraction of the best hit to count as a match.
 RELEVANCE_RATIO = 0.55
 
+#: The score floor for any result with a literal match. Above 0.72, which is the
+#: most a perfect semantic similarity can contribute, so lexical hits are always
+#: ranked ahead of similarity-only ones and are never cut by the relevance floor.
+LEXICAL_BAND = 1.0
+
 _USER_SCOPE = (
     "canonical_content_id IN (SELECT canonical_content_id FROM bookmarks "
     "WHERE user_id = :uid AND canonical_content_id IS NOT NULL)"
@@ -212,11 +217,27 @@ def search_library(
     if restrict_to is not None:
         candidates &= restrict_to
 
+    # Lexical matches occupy a band above every pure-semantic score.
+    #
+    # The old formula was `0.72*s + 0.42*k`, which let a semantic near-miss
+    # outrank a literal one: an unrelated video scoring 0.8 similarity landed at
+    # 0.576, while a save whose *title contains the query word* scored 0.42 with
+    # no vector hit. Searching "Speed" therefore ranked a saved TikTok titled
+    # "Speed was convinced…" below things that merely felt related — and the
+    # relevance floor below then cut it entirely.
+    #
+    # Someone who types a word that is literally in a title is not asking for
+    # word2vec. Any lexical hit starts at LEXICAL_BAND, above the 0.72 ceiling a
+    # perfect semantic score can reach, so it can never be displaced by
+    # similarity alone. Within the band, lexical quality leads and semantic
+    # similarity breaks ties.
     fused: Dict[int, float] = {}
     for cid in candidates:
         s, k = semantic.get(cid, 0.0), keyword.get(cid, 0.0)
-        # Semantic leads; keyword guarantees exact-match recall.
-        fused[cid] = 0.72 * s + 0.42 * k
+        if k > 0:
+            fused[cid] = LEXICAL_BAND + 0.42 * k + 0.30 * s
+        else:
+            fused[cid] = 0.72 * s
 
     if not fused:
         return []
@@ -232,22 +253,43 @@ def search_library(
     # one of these is about food"). A *relative* floor adapts to the query: a
     # sharp question has one dominant score and everything else falls away, while
     # a broad one has a flat distribution and keeps its whole set.
-    best = ranked[0][1]
-    ranked = [(cid, score) for cid, score in ranked
-              if score >= max(0.0, best * RELEVANCE_RATIO)] or ranked[:1]
+    # The floor applies to the semantic tail only, and is measured against the
+    # best *semantic* score rather than the overall best.
+    #
+    # Measuring against the overall best would mean one lexical hit (>= 1.0)
+    # raising the bar to ~0.77 and silently deleting every semantic result,
+    # since a perfect semantic score is only 0.72. And filtering lexical hits at
+    # all is what hid the literal title match in the first place: a save that
+    # contains the query word is a result, however lonely its score looks next
+    # to a stronger one.
+    lexical = [(cid, score) for cid, score in ranked if cid in keyword]
+    semantic_only = [(cid, score) for cid, score in ranked if cid not in keyword]
+    if semantic_only:
+        best_semantic = semantic_only[0][1]
+        semantic_only = [(cid, score) for cid, score in semantic_only
+                         if score >= max(0.0, best_semantic * RELEVANCE_RATIO)]
+    ranked = (lexical + semantic_only) or ranked[:1]
     ranked = ranked[: limit * 3]
 
+    # Diversify the semantic tail only. MMR trades relevance for variety, which
+    # is right for "things like this" and wrong for "the one containing this
+    # word" — a lexical hit demoted for resembling another lexical hit is the
+    # result the user came for, pushed off the end of the list.
     if diversify and qvec is not None and len(ranked) > limit:
-        vecs = {}
-        for cid, _ in ranked:
-            row = db.execute(sql_text(
-                "SELECT embedding FROM content_embeddings WHERE canonical_content_id = :c"
-            ), {"c": cid}).first()
-            if row and row[0] is not None:
-                v = normalize(from_storage(row[0]))
-                if v is not None:
-                    vecs[cid] = v
-        ranked = mmr(ranked, vecs, k=limit, lambda_=0.75)
+        keep = lexical[:limit]
+        remaining = limit - len(keep)
+        if remaining > 0 and semantic_only:
+            vecs = {}
+            for cid, _ in semantic_only:
+                row = db.execute(sql_text(
+                    "SELECT embedding FROM content_embeddings WHERE canonical_content_id = :c"
+                ), {"c": cid}).first()
+                if row and row[0] is not None:
+                    v = normalize(from_storage(row[0]))
+                    if v is not None:
+                        vecs[cid] = v
+            keep = keep + mmr(semantic_only, vecs, k=remaining, lambda_=0.75)
+        ranked = keep[:limit]
     else:
         ranked = ranked[:limit]
 
