@@ -274,7 +274,16 @@ class TestSaveStorm:
 
         assert calls == [], f"save path made {len(calls)} external calls"
         assert db.query(Bookmark).count() == 50
-        assert all(b.processing_state == "queued" for b in db.query(Bookmark).all())
+
+        # Every save landed, and none of them failed. Fifty YouTube videos at
+        # 2 units each is well past a Free account's 30-unit monthly allowance,
+        # so the later ones are stored with their AI processing withheld — which
+        # is the point: running out of AI budget costs you the *analysis*, never
+        # the save. Nothing is rejected, nothing is deleted, nothing is FAILED.
+        states = {b.processing_state for b in db.query(Bookmark).all()}
+        assert states <= {"queued", "limit_reached"}, states
+        assert "failed" not in states
+        assert all(b.url for b in db.query(Bookmark).all())
 
     def test_save_latency_is_flat(self, clean_db, monkeypatch):
         from api.services.save import create_save
