@@ -17,7 +17,7 @@ from .ai import telemetry
 from .ai.base import Mode
 from .ai.router import describe_modes, get_router
 from .auth import get_current_user
-from . import quota
+from . import billing, entitlements, plans, quota
 from .authz import owned_bookmark, require_admin
 from .db import get_db
 from .jobs import enqueue, queue_stats
@@ -47,6 +47,32 @@ def _mode(value: Optional[str]) -> Mode:
 _owned_bookmark = owned_bookmark
 
 
+def _spend_ask(db, user_id: int):
+    """Charge one Ask message against the plan allowance, or refuse.
+
+    Two ceilings apply to Ask and they mean different things. `quota.check`
+    above is the abuse ceiling — a rolling daily cap far above any real use,
+    there to stop a loop. This is the *plan* allowance, and reaching it is an
+    ordinary product event that should offer an upgrade rather than an error.
+
+    Returns the entitlement so the caller can refund on failure.
+    """
+    entitlement = entitlements.for_user(db, user_id)
+    allowed, used, limit, resets_at = billing.consume_ask(
+        db, user_id, entitlement=entitlement)
+    if allowed:
+        return entitlement
+
+    telemetry.record(db, operation="paywall.quota_reached_ask", user_id=user_id,
+                     success=False)
+    raise entitlements.UpgradeRequired(
+        f"You've used all {limit} Ask messages this month."
+        if entitlement.is_pro else
+        f"You've used all {limit} Ask messages this month. "
+        "Sava Pro includes 1,500.",
+        capability="ask")
+
+
 # ─── Model picker (provider-neutral) ─────────────────────────────────────────
 
 @router.get("/api/ai/modes")
@@ -67,9 +93,14 @@ def processing_status(bookmark_id: int,
                 "level": 0, "stages": {}, "linked": False}
     cc = db.query(CanonicalContent).get(bm.canonical_content_id)
     import json as _json
+    # Same rule as the list endpoint: a per-user `limit_reached` outranks the
+    # shared canonical state, which cannot express it. Polling this endpoint is
+    # how the detail screen decides whether to keep waiting, and telling it
+    # "queued" would make it wait for work that is never going to be scheduled.
+    from .main import _visible_state
     return {
         "bookmark_id": bm.id, "canonical_id": cc.id, "linked": True,
-        "state": cc.processing_state, "level": cc.processing_level,
+        "state": _visible_state(bm, cc), "level": cc.processing_level,
         "content_type": cc.content_type,
         "stages": _json.loads(cc.stage_status or "{}"),
         "error": cc.last_error,
@@ -82,6 +113,7 @@ def processing_status(bookmark_id: int,
 
 @router.post("/api/bookmarks/{bookmark_id}/reprocess")
 def reprocess(bookmark_id: int, force: bool = Query(False),
+              deep: bool = Query(False, description="Deep visual analysis (Sava Pro)"),
               current_user: dict = Depends(get_current_user),
               db: Session = Depends(get_db)):
     quota.check(db, current_user["id"], "reprocess")
@@ -93,13 +125,50 @@ def reprocess(bookmark_id: int, force: bool = Query(False),
             raise HTTPException(status_code=422, detail="Cannot resolve this URL")
         bm.canonical_content_id = cc.id
         db.commit()
+    # Reprocessing re-runs the whole expensive ladder on content that has
+    # already been understood, so it costs Processing Units like any other run.
+    # `reserve_units` opens a new attempt rather than finding the original
+    # save's settled reservation, which is what stops this being a free button.
+    entitlement = entitlements.for_user(db, current_user["id"])
+
+    # Deep visual analysis is the one route that is never chosen automatically.
+    # It is a Pro capability and it is opt-in even there, because it is the most
+    # expensive thing Sava can do to a video.
+    if deep and not entitlement.limits.enhanced_analysis:
+        raise entitlements.UpgradeRequired(
+            "Deep video analysis is part of Sava Pro.", capability="deep_analysis")
+
+    cc = db.query(CanonicalContent).get(bm.canonical_content_id)
+    # Charge for the route this run will take, not the one the last run took.
+    units = (plans.units_for_route("deep_vision") if deep
+             else plans.units_for_content(cc))
+    reservation = billing.reserve_units(
+        db, current_user["id"], units=units, entitlement=entitlement,
+        canonical_content_id=bm.canonical_content_id, bookmark_id=bm.id,
+        reason="reprocess")
+
+    if not reservation.granted:
+        telemetry.record(db, operation="paywall.quota_reached_processing",
+                         user_id=current_user["id"],
+                         canonical_content_id=bm.canonical_content_id,
+                         success=False)
+        raise entitlements.UpgradeRequired(
+            f"Reprocessing this needs {units} AI units and you have "
+            f"{reservation.units_remaining} left this month.",
+            capability="processing")
+
     job = enqueue(db, "content.process",
                   {"canonical_id": bm.canonical_content_id,
-                   "user_id": current_user["id"], "force": force},
-                  idempotency_key=f"content.process:{bm.canonical_content_id}:{int(force)}",
-                  force=force, priority=50)
+                   "user_id": current_user["id"], "force": force, "deep": deep},
+                  idempotency_key=(f"content.process:{bm.canonical_content_id}"
+                                   f":{int(force)}:{int(deep)}"),
+                  force=force or deep, priority=entitlement.limits.job_priority,
+                  user_id=current_user["id"])
     return {"queued": True, "job_id": job.id if job else None,
-            "canonical_id": bm.canonical_content_id}
+            "canonical_id": bm.canonical_content_id,
+            "deep": deep,
+            "units_charged": units,
+            "units_remaining": max(0, reservation.units_limit - reservation.units_used)}
 
 
 # ─── Search (no generative model) ────────────────────────────────────────────
@@ -196,6 +265,7 @@ def ask_this(bookmark_id: int, body: AskIn,
     bm = _owned_bookmark(db, bookmark_id, current_user["id"])
     if not (body.question or "").strip():
         raise HTTPException(status_code=422, detail="A question is required")
+    _spend_ask(db, current_user["id"])
 
     thread, history = _thread_and_history(
         db, current_user["id"], body.thread_id, scope="save",
@@ -205,6 +275,7 @@ def ask_this(bookmark_id: int, body: AskIn,
                                    user_id=current_user["id"],
                                    mode=_mode(body.mode), history=history)
     if not result.get("ok"):
+        billing.refund_ask(db, current_user["id"])
         return {**result, "thread_id": thread.id}
 
     _persist_turn(db, thread.id, body.question, result, _mode(body.mode))
@@ -249,6 +320,7 @@ def ask_sava(body: AskSavaIn,
     quota.check(db, current_user["id"], "ask")
     if not (body.question or "").strip():
         raise HTTPException(status_code=422, detail="A question is required")
+    _spend_ask(db, current_user["id"])
 
     if body.collection_id is not None:
         owns = (db.query(Collection)
@@ -267,6 +339,9 @@ def ask_sava(body: AskSavaIn,
                                    collection_id=body.collection_id,
                                    carry_over_ids=_recent_sources(db, thread.id))
     if not result.get("ok"):
+        # Nothing was produced, so nothing is charged. Billing the user for our
+        # own failure is the fastest way to make an outage feel like a scam.
+        billing.refund_ask(db, current_user["id"])
         return {**result, "thread_id": thread.id}
 
     _persist_turn(db, thread.id, body.question, result, _mode(body.mode))
@@ -875,8 +950,26 @@ def my_usage(current_user: dict = Depends(get_current_user),
     Deliberately per-user and not admin-gated: someone who hits a ceiling should
     be able to see why. It reports their own counts and nothing about the
     installation.
+
+    Both layers are reported side by side because they are genuinely different
+    limits: `plan` is the monthly allowance a subscription buys, `abuse` is the
+    rolling operational ceiling that exists to stop a runaway loop. A user who
+    is confused about why something stopped needs to be able to tell which one
+    they hit.
     """
-    return quota.status_for(db, current_user["id"])
+    entitlement = entitlements.for_user(db, current_user["id"])
+    abuse = quota.status_for(db, current_user["id"])
+    return {
+        # The existing payload, unchanged and still at the top level. Callers
+        # that read `limits.ask.used` keep working; this endpoint gained fields
+        # rather than a new shape.
+        **abuse,
+        "plan": entitlement.public(),
+        "usage": billing.usage_for(db, current_user["id"], entitlement=entitlement),
+        # The same abuse figures under a name that says what they are, so a new
+        # client does not have to know that the unprefixed keys are the old ones.
+        "abuse": abuse,
+    }
 
 
 @router.get("/api/ops/usage")

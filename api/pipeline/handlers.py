@@ -25,7 +25,9 @@ def process_content_job(payload: Dict[str, Any], db) -> None:
         canonical_id, db,
         force=bool(payload.get("force")),
         user_id=payload.get("user_id"),
+        deep=bool(payload.get("deep")),
     )
+    _settle_units(db, canonical_id, payload.get("user_id"))
     _sync_bookmark_states(db, canonical_id)
     try:
         from ..services.save import sync_bookmarks_for_canonical
@@ -97,6 +99,29 @@ def collection_match_job(payload: Dict[str, Any], db) -> None:
         db, int(payload["collection_id"]),
         auto_add=bool(payload.get("auto_add")),
     )
+
+
+def _settle_units(db, canonical_id: int, user_id) -> None:
+    """Close the reservation now the real route is known.
+
+    At save time nothing is known about how this item will be understood —
+    `create_save` does no network I/O — so it reserved the cheap route. By here
+    the pipeline has chosen and run a route, and `units_for_content` reads it off
+    the row, so the account is charged for the work that actually happened.
+
+    This is the "partial escalation debit": a save that stayed on captions costs
+    its 1 reserved unit and settles to 1. One that had to download video and read
+    frames settles up to 8. Nobody pays for frames that were never read.
+    """
+    if not user_id:
+        return
+    try:
+        from .. import billing, plans
+        cc = db.query(CanonicalContent).get(canonical_id)
+        billing.settle(db, user_id=int(user_id), canonical_content_id=canonical_id,
+                       actual_units=plans.units_for_content(cc))
+    except Exception as e:
+        logger.warning("unit settlement failed for canonical %s: %s", canonical_id, e)
 
 
 def _sync_bookmark_states(db, canonical_id: int) -> None:

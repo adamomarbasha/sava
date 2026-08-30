@@ -64,6 +64,7 @@ def enqueue(
     delay_seconds: int = 0,
     max_attempts: int = JOB_MAX_ATTEMPTS,
     force: bool = False,
+    user_id: Optional[int] = None,
 ) -> Optional[Job]:
     """Enqueue idempotently.
 
@@ -87,6 +88,12 @@ def enqueue(
         existing.last_error = None
         existing.locked_by = None
         existing.locked_at = None
+        # Reviving is a fresh request by a possibly different user. Take the
+        # better priority rather than keeping the original: if a Pro subscriber
+        # asks for content a Free user queued last week, it is now Pro work.
+        existing.priority = min(int(existing.priority or 100), int(priority))
+        if user_id is not None:
+            existing.user_id = user_id
         db.commit()
         if INLINE_JOBS:
             run_job_now(existing.id)
@@ -95,7 +102,7 @@ def enqueue(
     job = Job(
         kind=kind, idempotency_key=key[:200], payload=json.dumps(payload, default=str),
         platform=(platform or None), state="queued", priority=priority,
-        max_attempts=max_attempts,
+        max_attempts=max_attempts, user_id=user_id,
         run_after=_now() + timedelta(seconds=delay_seconds),
     )
     db.add(job)
@@ -124,6 +131,47 @@ def _unavailable_platforms() -> Dict[str, float]:
     return blocked
 
 
+def _saturated_users(db) -> List[int]:
+    """Users who already have as many jobs running as their plan allows.
+
+    Concurrency is a plan limit (1 job for Free, 3 for Pro), and this is where
+    it is enforced — at claim time rather than at enqueue time. Enqueue-time
+    enforcement would have to reject or delay the save itself, whereas here the
+    work simply waits its turn: nothing is lost, nothing is failed, and the
+    queue drains in plan order.
+
+    The count is bounded by total worker concurrency (a couple of processes
+    times `WORKER_CONCURRENCY`), so this is a handful of rows and one plan
+    lookup each, not a scan.
+    """
+    try:
+        rows = db.execute(text(
+            "SELECT user_id, COUNT(*) AS n FROM jobs "
+            "WHERE state = 'running' AND user_id IS NOT NULL GROUP BY user_id"
+        )).mappings().all()
+    except Exception as e:
+        # Never let fairness accounting stop work from being claimed.
+        logger.debug("concurrency check skipped: %s", e)
+        return []
+
+    if not rows:
+        return []
+
+    from .entitlements import for_user
+
+    saturated = []
+    for row in rows:
+        user_id = int(row["user_id"])
+        running = int(row["n"] or 0)
+        try:
+            allowed = for_user(db, user_id).limits.concurrent_jobs
+        except Exception:
+            allowed = 1
+        if running >= max(1, int(allowed)):
+            saturated.append(user_id)
+    return saturated
+
+
 def claim_next(db, *, worker_id: str = WORKER_ID,
                skip_platforms: Optional[Dict[str, float]] = None,
                kinds: Optional[List[str]] = None,
@@ -143,23 +191,38 @@ def claim_next(db, *, worker_id: str = WORKER_ID,
     stale = now - timedelta(seconds=JOB_LEASE_SECONDS)
     blocked = _unavailable_platforms() if skip_platforms is None else skip_platforms
     blocked_names = [p for p in blocked] or None
+    busy = _saturated_users(db) or None
 
     if IS_POSTGRES:  # pragma: no cover - needs live Postgres
+        # Every array parameter is CAST explicitly.
+        #
+        # Postgres infers a parameter's type from how it is used, and `NULL`
+        # inside `= ANY($n)` gives it nothing to work from. With four such
+        # parameters it could still resolve them; adding the fifth (`busy`)
+        # tipped it into `AmbiguousParameter: could not determine data type of
+        # parameter $4` and the whole queue stopped claiming — on Postgres only,
+        # which is to say in production only. The casts remove the inference
+        # problem rather than relying on it happening to succeed.
         row = db.execute(text("""
             UPDATE jobs SET state='running', locked_by=:w, locked_at=:now, attempts=attempts+1
             WHERE id = (
                 SELECT id FROM jobs
                 WHERE ((state='queued' AND run_after <= :now)
                     OR (state='running' AND locked_at < :stale))
-                  AND (:skip IS NULL OR platform IS NULL OR NOT (platform = ANY(:skip)))
-                  AND (:kinds IS NULL OR kind = ANY(:kinds))
-                  AND (:plats IS NULL OR platform = ANY(:plats))
+                  AND (CAST(:skip AS text[]) IS NULL OR platform IS NULL
+                       OR NOT (platform = ANY(CAST(:skip AS text[]))))
+                  AND (CAST(:kinds AS text[]) IS NULL
+                       OR kind = ANY(CAST(:kinds AS text[])))
+                  AND (CAST(:plats AS text[]) IS NULL
+                       OR platform = ANY(CAST(:plats AS text[])))
+                  AND (CAST(:busy AS integer[]) IS NULL OR user_id IS NULL
+                       OR NOT (user_id = ANY(CAST(:busy AS integer[]))))
                 ORDER BY priority ASC, run_after ASC, id ASC
                 FOR UPDATE SKIP LOCKED LIMIT 1
             ) RETURNING id
         """), {"w": worker_id, "now": now, "stale": stale,
                "skip": blocked_names, "kinds": kinds or None,
-               "plats": platforms or None}).first()
+               "plats": platforms or None, "busy": busy}).first()
         db.commit()
         return db.query(Job).get(row.id) if row else None
 
@@ -177,6 +240,8 @@ def claim_next(db, *, worker_id: str = WORKER_ID,
             q = q.filter(Job.kind.in_(kinds))
         if platforms:
             q = q.filter(Job.platform.in_(platforms))
+        if busy:
+            q = q.filter((Job.user_id.is_(None)) | (~Job.user_id.in_(busy)))
         job = q.order_by(Job.priority.asc(), Job.run_after.asc(), Job.id.asc()).first()
         if not job:
             return None
@@ -192,6 +257,30 @@ def claim_next(db, *, worker_id: str = WORKER_ID,
         return None
 
 
+def _release_units(db, job: Job) -> None:
+    """Hand Processing Units back for work that died without costing anything.
+
+    Called only when a job is declared dead — never on an intermediate failure,
+    because a job that is going to be retried is still going to do the work it
+    was paid for. `billing.refund` applies the refund rule (see its docstring);
+    if any money was already spent on this content the units stay spent.
+    """
+    if job.kind != "content.process":
+        return
+    try:
+        payload = json.loads(job.payload or "{}")
+        canonical_id = payload.get("canonical_id")
+        user_id = job.user_id or payload.get("user_id")
+        if not (canonical_id and user_id):
+            return
+        from .billing import refund
+        refund(db, user_id=int(user_id), canonical_content_id=int(canonical_id),
+               reason="job_dead")
+    except Exception as e:
+        # A refund failing must never stop the queue from moving on.
+        logger.warning("could not release units for job %s: %s", job.id, e)
+
+
 def finish(db, job: Job, *, ok: bool, error: Optional[str] = None) -> None:
     if ok:
         job.state = "done"
@@ -202,6 +291,7 @@ def finish(db, job: Job, *, ok: bool, error: Optional[str] = None) -> None:
             job.state = "dead"
             logger.error("job %s (%s) dead after %s attempts: %s",
                          job.id, job.kind, job.attempts, job.last_error)
+            _release_units(db, job)
         else:
             job.state = "queued"
             # Exponential backoff: 30s, 2m, 8m, 32m

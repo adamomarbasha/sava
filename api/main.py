@@ -31,6 +31,7 @@ from .config import (API_DIR, ASYNC_SAVE, DOCS_ENABLED, ENVIRONMENT,
 from .migrations import run_migrations
 from .routes_intelligence import router as intelligence_router
 from .routes_playback import router as playback_router
+from .routes_subscription import router as subscription_router
 from .pipeline import handlers as _job_handlers  # noqa: F401 (registers job handlers)
 from . import auth_guard, quota
 from .authz import owned_bookmark
@@ -567,8 +568,19 @@ def serialize_bookmark(bookmark, cc=None):
         "published_at": published.isoformat() if published else None,
         "created_at": bookmark.created_at.isoformat() if bookmark.created_at else None,
         "canonical_id": bookmark.canonical_content_id,
-        "processing_state": (cc.processing_state if cc
-                             else bookmark.processing_state) or "ready",
+        # Canonical state normally wins — it is the shared truth about whether
+        # the content has been understood.
+        #
+        # `limit_reached` is the exception, and it has to be: it is a fact about
+        # *this user's allowance*, not about the content. The canonical row is
+        # still `queued` because nobody has paid to process it, so deferring to
+        # it would show this user "Saving…" forever while nothing was ever going
+        # to run. The per-user state is the honest one here.
+        #
+        # It stays correct for everyone else too: another user who saved the
+        # same item with units to spare has their own bookmark row in `queued`
+        # and sees the canonical state as usual.
+        "processing_state": _visible_state(bookmark, cc),
         "content_type": cc.content_type if cc else None,
         "duration_seconds": cc.duration_seconds if cc else None,
         "creator_handle": cc.creator_handle if cc else None,
@@ -599,6 +611,22 @@ def serialize_bookmark(bookmark, cc=None):
         payload["meta"]["duration_seconds"] = payload["duration_seconds"]
 
     return payload
+
+
+def _visible_state(bookmark, cc) -> str:
+    """What this user should be told about this save's processing.
+
+    See the note at the call site: a per-user limit outranks the shared
+    canonical state, because the canonical state cannot express it.
+    """
+    from .models import ProcessingState
+    if bookmark.processing_state == ProcessingState.LIMIT_REACHED:
+        # Unless the content has since been processed for somebody else, in
+        # which case this user gets the result for free and the hold is moot.
+        if cc is None or cc.processing_state not in (ProcessingState.READY,
+                                                     ProcessingState.PARTIAL):
+            return ProcessingState.LIMIT_REACHED
+    return (cc.processing_state if cc else bookmark.processing_state) or "ready"
 
 
 @app.get("/api/bookmarks")
@@ -1170,3 +1198,4 @@ app.include_router(intelligence_router)
 
 # Short-form playback: descriptor + the one proxied media route.
 app.include_router(playback_router)
+app.include_router(subscription_router)

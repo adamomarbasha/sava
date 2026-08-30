@@ -47,7 +47,8 @@ class DuplicateSave(ValueError):
 
 
 def _response(bookmark: Bookmark, cc: Optional[CanonicalContent],
-              *, reused: bool) -> Dict[str, Any]:
+              *, reused: bool,
+              limit_info: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Legacy-compatible payload, enriched from canonical content when present."""
     meta: Dict[str, Any] = {}
     if bookmark.youtube_details:
@@ -77,6 +78,10 @@ def _response(bookmark: Bookmark, cc: Optional[CanonicalContent],
         "processing_state": bookmark.processing_state or ProcessingState.QUEUED,
         "canonical_id": bookmark.canonical_content_id,
         "reused_canonical": reused,
+        # Present only when the save landed but its AI processing did not start
+        # because the allowance is spent. The save itself succeeded either way —
+        # this is what the client draws "AI processing limit reached" from.
+        **({"limit": limit_info} if limit_info else {}),
     }
 
 
@@ -141,6 +146,7 @@ def create_save(db, *, url: str, user_id: int, note: Optional[str] = None,
     db.refresh(bookmark)
 
     reused = False
+    limit_info: Optional[Dict[str, Any]] = None
     if cc is not None:
         # Cache hit: the content is already understood. Copy the public
         # metadata onto this user's save and return it fully populated.
@@ -154,17 +160,148 @@ def create_save(db, *, url: str, user_id: int, note: Optional[str] = None,
         else:
             if cc.title and not bookmark.title:
                 _apply_cached_metadata(db, bookmark, cc)
-            # One job per canonical item, regardless of how many users save it.
-            enqueue(db, "content.process",
-                    {"canonical_id": cc.id, "user_id": user_id},
-                    idempotency_key=f"content.process:{cc.id}",
-                    platform=cc.platform, priority=50)
-            from ..ai import telemetry
-            telemetry.record(db, operation="save.queued", user_id=user_id,
-                             canonical_content_id=cc.id, bookmark_id=bookmark.id,
-                             platform=cc.platform, cache_hit=not created)
+            limit_info = _schedule_processing(db, bookmark, cc, user_id=user_id,
+                                              newly_created=created)
 
-    return _response(bookmark, cc, reused=reused)
+    return _response(bookmark, cc, reused=reused, limit_info=limit_info)
+
+
+def _existing_job_for(db, canonical_id: int):
+    """A `content.process` job already queued or running for this content."""
+    from ..models import Job
+    return (db.query(Job)
+            .filter(Job.idempotency_key == f"content.process:{canonical_id}",
+                    Job.state.in_(("queued", "running")))
+            .first())
+
+
+def _schedule_processing(db, bookmark: Bookmark, cc: CanonicalContent, *,
+                         user_id: int, newly_created: bool
+                         ) -> Optional[Dict[str, Any]]:
+    """Charge Processing Units and queue the work, or record that we could not.
+
+    Returns limit information when the save landed but processing did not start.
+
+    ── What is and is not charged ──────────────────────────────────────────
+
+    Units pay for Sava doing expensive work. If the work is *already under way*
+    for this content — somebody else saved the same TikTok a minute ago — then
+    this save causes no marginal cost, so it costs no units. That is the same
+    principle as the cache hit above, applied one step earlier, and it is the
+    honest rule: a unit is spent when Sava has to understand something new.
+
+    It also improves as the library grows. At launch the dedup ratio is ~1.0 and
+    almost every save is charged; as content overlaps between users, the free
+    rides become margin rather than a leak.
+    """
+    from .. import billing, entitlements, plans
+    from ..ai import telemetry
+    from ..jobs import enqueue
+
+    entitlement = entitlements.for_user(db, user_id)
+
+    # Somebody else is already paying for this. Ride along free.
+    existing_job = _existing_job_for(db, cc.id)
+    if existing_job is not None:
+        enqueue(db, "content.process", {"canonical_id": cc.id, "user_id": user_id},
+                idempotency_key=f"content.process:{cc.id}",
+                platform=cc.platform, priority=entitlement.limits.job_priority,
+                user_id=existing_job.user_id or user_id)
+        telemetry.record(db, operation="save.queued", user_id=user_id,
+                         canonical_content_id=cc.id, bookmark_id=bookmark.id,
+                         platform=cc.platform, cache_hit=True)
+        return None
+
+    units = plans.units_for_content(cc)
+    reservation = billing.reserve_units(
+        db, user_id, units=units, entitlement=entitlement,
+        canonical_content_id=cc.id, bookmark_id=bookmark.id,
+        reason="content.process")
+
+    if not reservation.granted:
+        # THE IMPORTANT CASE. The save is already committed and stays in the
+        # library — it keeps its URL, its note, its collections, its thumbnail
+        # and everything else. Only the expensive understanding is withheld, and
+        # it is withheld in a state that can be resumed rather than one that
+        # looks like breakage.
+        bookmark.processing_state = ProcessingState.LIMIT_REACHED
+        db.commit()
+        telemetry.record(db, operation="save.limit_reached", user_id=user_id,
+                         canonical_content_id=cc.id, bookmark_id=bookmark.id,
+                         platform=cc.platform, success=False,
+                         error=f"needs {units}u, {reservation.units_remaining}u left")
+        logger.info("save %s stored without processing: user %s needs %su, has %su",
+                    bookmark.id, user_id, units, reservation.units_remaining)
+        return {
+            "reason": "processing_units_exhausted",
+            "message": "AI processing limit reached",
+            "units_required": units,
+            "units_used": reservation.units_used,
+            "units_limit": reservation.units_limit,
+            "units_remaining": reservation.units_remaining,
+            "resets_at": (reservation.period_end.isoformat()
+                          if reservation.period_end else None),
+            "plan": entitlement.plan,
+            "upgrade_available": not entitlement.is_pro,
+        }
+
+    # One job per canonical item, regardless of how many users save it.
+    enqueue(db, "content.process", {"canonical_id": cc.id, "user_id": user_id},
+            idempotency_key=f"content.process:{cc.id}",
+            platform=cc.platform, priority=entitlement.limits.job_priority,
+            user_id=user_id)
+    telemetry.record(db, operation="save.queued", user_id=user_id,
+                     canonical_content_id=cc.id, bookmark_id=bookmark.id,
+                     platform=cc.platform, cache_hit=not newly_created)
+    return None
+
+
+def resume_limited_saves(db, user_id: int, *, limit: int = 50) -> Dict[str, int]:
+    """Queue the saves that were held back, now that there is allowance again.
+
+    Called after an upgrade and after a period reset. Walks this user's
+    `limit_reached` saves oldest-first and pays for as many as fit, which is the
+    fair order — the thing they saved first is the thing they have been waiting
+    on longest.
+
+    Stops at the first item it cannot afford rather than skipping to a cheaper
+    one further down: hopping over an expensive video to process a later article
+    would quietly reorder somebody's library for them.
+    """
+    from .. import billing, entitlements, plans
+    from ..models import CanonicalContent
+
+    stats = {"scanned": 0, "queued": 0, "still_limited": 0}
+    entitlement = entitlements.for_user(db, user_id)
+
+    rows = (db.query(Bookmark)
+            .filter(Bookmark.user_id == user_id,
+                    Bookmark.processing_state == ProcessingState.LIMIT_REACHED)
+            .order_by(Bookmark.created_at.asc())
+            .limit(limit).all())
+
+    for bm in rows:
+        stats["scanned"] += 1
+        cc = (db.query(CanonicalContent).get(bm.canonical_content_id)
+              if bm.canonical_content_id else None)
+        if cc is None:
+            continue
+        if cc.processing_state in (ProcessingState.READY, ProcessingState.PARTIAL):
+            # Processed for somebody else while this one waited. Free.
+            _apply_cached_metadata(db, bm, cc)
+            stats["queued"] += 1
+            continue
+
+        info = _schedule_processing(db, bm, cc, user_id=user_id, newly_created=False)
+        if info is not None:
+            stats["still_limited"] += 1
+            break
+        bm.processing_state = cc.processing_state or ProcessingState.QUEUED
+        db.commit()
+        stats["queued"] += 1
+
+    logger.info("resume for user %s: %s", user_id, stats)
+    return stats
 
 
 def _apply_cached_metadata(db, bookmark: Bookmark, cc: CanonicalContent) -> None:
