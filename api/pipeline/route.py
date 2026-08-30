@@ -203,6 +203,10 @@ class Signals:
     asr_available: bool = False
     #: The user explicitly asked for deep analysis.
     force_deep: bool = False
+    #: Lazy escalation: somebody asked a question that needs the visual channel
+    #: and this item has none cached. Forces at least the light frames route,
+    #: without the cost of `force_deep`.
+    force_vision: bool = False
 
     @property
     def visual(self) -> float:
@@ -236,6 +240,23 @@ def decide(signals: Signals) -> RoutePlan:
             return RoutePlan(Route.COVER, "deep requested but media analysis is off")
         return RoutePlan(Route.DEEP_VISION, "user requested deep analysis",
                          DEEP_FRAME_BUDGET)
+
+    # ── Lazy escalation from a question ─────────────────────────────────────
+    #
+    # Somebody asked what colour the shirt is. Text routing was the right call
+    # at save time and stays the right call for the other 95% of saves; this is
+    # the one item, now, that turned out to need frames.
+    #
+    # Light, never deep: the question is "what is on screen", and four sparse
+    # frames answer that. Deep stays an explicit, paid, Pro-only request.
+    if signals.force_vision:
+        if not signals.media_allowed:
+            return RoutePlan(Route.COVER,
+                             "visual answer needed but media analysis is off")
+        if signals.media_kind in ("image", "carousel"):
+            return RoutePlan(Route.COVER, "visual answer from stored imagery")
+        return RoutePlan(Route.LIGHT_VISION, "visual answer needed for a question",
+                         LIGHT_FRAME_BUDGET)
 
     # ── Content with no audio track ─────────────────────────────────────────
     # An image or a carousel has nothing to transcribe. Its stored slides are

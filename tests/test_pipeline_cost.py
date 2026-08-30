@@ -381,3 +381,85 @@ class TestAskNeverReprocesses:
             intelligence.get_or_create_summary(clean_db, bm, user_id=user.id)
 
         assert rec.calls == before, "answering re-acquired the source media"
+
+
+class TestLazyVisualEscalation:
+    """The escalation job, end to end through the real pipeline.
+
+    `test_visual_ask.py` covers the decision; this covers what the worker
+    actually does when it picks the job up.
+    """
+
+    def test_want_vision_downloads_and_caches_frames(self, clean_db,
+                                                     monkeypatch, user):
+        install_fake_router(monkeypatch, FakeRouter())
+        rec = Recorder(monkeypatch, metadata={"duration": 30})
+        _classify_as(monkeypatch, visual_dependency=0.2)   # would never escalate itself
+        _cover_says(monkeypatch, "[cover] text")
+        monkeypatch.setattr(ingest.frames_mod, "extract_frames",
+                            lambda path, ts, **k: [
+                                ingest.frames_mod.Frame(ts_ms=int(t * 1000), path="/tmp/f.jpg")
+                                for t in ts])
+        monkeypatch.setattr(ingest.frames_mod, "deduplicate", lambda f, **k: f)
+        monkeypatch.setattr(
+            ingest.frames_mod, "analyze_frames",
+            lambda frames, **kw: ([_seen(f) for f in frames], None))
+        monkeypatch.setattr(ingest.frames_mod, "cleanup_frames", lambda f: None)
+
+        cc = _content(clean_db, "tiktok:lazy1", description="x" * 400)
+        ingest.process_content(cc.id, clean_db, user_id=user.id)
+        assert not rec.downloaded_video, "save-time run must stay cheap"
+
+        # Now the question arrives.
+        result = ingest.process_content(cc.id, clean_db, user_id=user.id,
+                                        want_vision=True)
+        assert rec.downloaded_video, rec.calls
+        assert result["route"] == "light_vision"
+        frames = (clean_db.query(ContentFrame)
+                  .filter(ContentFrame.canonical_content_id == cc.id,
+                          ContentFrame.ts_ms > 0).count())
+        assert frames > 0, "visual intelligence must be cached"
+
+    def test_a_second_escalation_is_a_no_op(self, clean_db, monkeypatch, user):
+        """A retried job, or a third visual question, must not re-download."""
+        install_fake_router(monkeypatch, FakeRouter())
+        rec = Recorder(monkeypatch, metadata={"duration": 30})
+        _classify_as(monkeypatch, visual_dependency=0.2)
+        _cover_says(monkeypatch, "[cover] text")
+
+        cc = _content(clean_db, "tiktok:lazy2", description="y" * 400)
+        ingest.process_content(cc.id, clean_db, user_id=user.id)
+        clean_db.add(ContentFrame(canonical_content_id=cc.id, ts_ms=4000,
+                                  ocr_text="ALREADY READ"))
+        clean_db.commit()
+        before = list(rec.calls)
+
+        result = ingest.process_content(cc.id, clean_db, user_id=user.id,
+                                        want_vision=True)
+        assert result.get("cache_hit") is True
+        assert rec.calls == before, "re-escalation re-acquired media"
+
+    def test_escalation_does_not_re_fetch_metadata_or_transcript(
+            self, clean_db, monkeypatch, user):
+        """It pays for frames, not for work already done and cached."""
+        install_fake_router(monkeypatch, FakeRouter())
+        rec = Recorder(monkeypatch, metadata={"duration": 30})
+        _classify_as(monkeypatch, visual_dependency=0.2)
+        _no_cover(monkeypatch)
+        monkeypatch.setattr(ingest.frames_mod, "extract_frames", lambda *a, **k: [])
+
+        cc = _content(clean_db, "tiktok:lazy3", description="#fyp")
+        ingest.process_content(cc.id, clean_db, user_id=user.id)  # audio route
+        assert rec.downloaded_audio
+        rec.calls.clear()
+
+        ingest.process_content(cc.id, clean_db, user_id=user.id, want_vision=True)
+        assert "metadata" not in rec.calls, rec.calls
+        assert "download_audio" not in rec.calls, rec.calls
+        assert "asr" not in rec.calls, rec.calls
+
+
+def _seen(frame):
+    frame.ocr_text = "ON SCREEN TEXT"
+    frame.vision_caption = "a person in a blue shirt"
+    return frame

@@ -232,6 +232,20 @@ class CanonicalContent(Base):
     stage_status = Column(Text, nullable=False, default="{}")   # per-stage ok/failed/skipped
     last_error = Column(Text)
 
+    # ── Processing lease ─────────────────────────────────────────────────────
+    # Which worker is currently running the pipeline for this item, and since
+    # when. Taken with a compare-and-swap UPDATE (see `api/concurrency.py`), so
+    # two workers that claim two different jobs for the *same* content cannot
+    # both download the video and both pay for ASR.
+    #
+    # Not a state, deliberately: `processing_state` describes the content and is
+    # shown to users, while this describes a worker and is invisible. Overloading
+    # one field with both meanings is how "processing" ends up meaning "stuck"
+    # after a crash. An expired lease is stealable, so a killed worker costs one
+    # delayed retry rather than an item that can never be processed again.
+    processing_lock_owner = Column(String(64))
+    processing_lock_at = Column(DateTime(timezone=True))
+
     # Which pipeline route actually ran, and why.
     #
     # Recorded rather than inferred because it is the number the whole cost
@@ -523,7 +537,8 @@ class Job(Base):
     Deliberately not Celery/Redis: a transactional queue in the database we
     already run needs no extra infrastructure, survives restarts, and makes
     idempotency a UNIQUE constraint rather than application logic. On Postgres
-    the claim uses FOR UPDATE SKIP LOCKED; on SQLite a short transaction.
+    the claim uses FOR UPDATE SKIP LOCKED; elsewhere a compare-and-swap UPDATE
+    guarded on (state, attempts, locked_at). Both let exactly one worker win.
     """
     __tablename__ = "jobs"
 
@@ -776,6 +791,22 @@ class UnitReservation(Base):
     #: queued -> the work has not finished; settled -> spent; refunded -> given back.
     state = Column(String(12), nullable=False, default="queued")
     reason = Column(String(64))
+
+    #: Units an *earlier* run already paid toward the route this reservation is
+    #: completing. Zero for a fresh run.
+    #
+    # Only lazy visual escalation sets it. When an Ask upgrades a text-routed
+    # item (1 unit, already settled) to frames (8 units), `_escalate` reserves
+    # the 7-unit difference and records the 1 that was already paid. Without
+    # that record, settlement compares the 8-unit route against a 7-unit
+    # reservation and tops it up by 1 — the account pays 9 for an 8-unit item.
+    #
+    # A period-wide sum would fix that and break something worse: a reprocess is
+    # a genuinely new run of the same route, and reconciling it against the
+    # earlier run's charge makes every reprocess after the first cost nothing
+    # while still downloading the video. The distinction is *intent*, which only
+    # the caller knows, so the caller states it here.
+    baseline_units = Column(Integer, nullable=False, default=0)
 
     #: Which run of this content this reservation paid for. 0 is the original
     #: save; a reprocess opens attempt 1, and so on.

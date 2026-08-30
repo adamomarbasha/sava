@@ -248,6 +248,26 @@ def ask_this(db, bookmark: Bookmark, question: str, *, user_id: int,
         if payload.get("entities"):
             ctx.append(f"MENTIONED: {json.dumps(payload['entities'])[:1200]}")
 
+    # ── Does this question need the picture? ────────────────────────────────
+    #
+    # Decided before the model runs, deterministically and for free. Three
+    # outcomes: the item has visual intelligence and it goes into the context;
+    # it does not and a frames job is queued; or it cannot be looked at and we
+    # say so. In every case the model is told whether it can see, because the
+    # measured failure was it inventing on-screen text — with a timestamp —
+    # from spoken words.
+    from . import visual_ask
+    visual = visual_ask.prepare(db, cc, user_id=user_id, question=question)
+
+    if visual.required and visual.available:
+        # Make sure the cached visual reading is actually in the prompt rather
+        # than relying on it winning a top-k similarity race against transcript
+        # chunks. It is the whole reason the question can be answered.
+        seen = {c["text"] for c in chunks}
+        cached_visual = _visual_text(db, cc.id) if cc is not None else ""
+        if cached_visual and cached_visual not in seen:
+            ctx.append("WHAT SAVA SAW ON SCREEN:\n" + cached_visual[:4000])
+
     if chunks:
         rendered = []
         for c in chunks:
@@ -263,6 +283,10 @@ def ask_this(db, bookmark: Bookmark, question: str, *, user_id: int,
             "know little beyond the title and creator above. Answer helpfully from "
             "general knowledge, and do not claim specifics about what happens in it."
         )
+
+    note = visual_ask.context_note(visual)
+    if note:
+        ctx.append(note)
 
     task = resolve_task(TaskType.ASK_THIS_SIMPLE, question=question,
                         source_count=1, mode=mode)
@@ -290,6 +314,9 @@ def ask_this(db, bookmark: Bookmark, question: str, *, user_id: int,
             "source": c.get("modality"), "text": (c.get("text") or "")[:200],
         } for c in chunks[:4]],
         "grounded_in": len(chunks),
+        # Additive: lets the client say "Sava is watching this now" or offer an
+        # upgrade. Older clients ignore the extra keys.
+        **visual.public(),
     }
 
 
