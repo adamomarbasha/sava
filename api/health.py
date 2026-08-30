@@ -111,6 +111,15 @@ def _check_queue(db) -> Dict[str, Any]:
         return {"ok": False, "error": type(e).__name__}
 
 
+def _optional_providers() -> Dict[str, Any]:
+    """Which optional ingestion providers loaded, and why the others did not."""
+    try:
+        from .ingestors.registry import provider_status
+        return provider_status()
+    except Exception as e:  # never let a diagnostic break the health endpoint
+        return {"error": type(e).__name__, "detail": str(e)}
+
+
 def health_report(db) -> Dict[str, Any]:
     """The full picture. `ok` is false if anything a user depends on is broken."""
     from .config import ENVIRONMENT
@@ -125,4 +134,11 @@ def health_report(db) -> Dict[str, Any]:
         "environment": ENVIRONMENT,
         "uptime_seconds": round(time.time() - _STARTED_AT),
         "checks": checks,
+        # Reported, deliberately not part of `ok`. These providers depend on
+        # packages the production image does not install on purpose, so their
+        # absence is a configuration fact rather than an outage — and the whole
+        # point of isolating them is that a missing one does not make Sava
+        # unhealthy. It is here so "why is TikTok not extracting" is answerable
+        # without reading container logs.
+        "optional_providers": _optional_providers(),
     }

@@ -20,7 +20,7 @@ load_dotenv()
 
 from .db import get_db, init_db, migrate_from_sqlite
 from .models import User, Bookmark
-from .ingestors import add_bookmark, refresh_bookmark
+from .ingestors import ProviderUnavailable, add_bookmark, refresh_bookmark
 from .email_validation import validate_email_comprehensive
 from .transcript_service import get_youtube_transcript, get_available_transcript_languages, get_transcript
 from .comment_service import youtube_comment_service
@@ -449,6 +449,11 @@ async def create_youtube_bookmark(
         
     except HTTPException:
         raise
+    except ProviderUnavailable as e:
+        # 503 and the platform's name: one provider is unavailable on this
+        # deployment, the rest of Sava is fine, and a retry may succeed later.
+        logger.warning(f"Provider unavailable: {e}")
+        raise HTTPException(status_code=503, detail=str(e))
     except ValueError as e:
         logger.error(f"Validation error creating YouTube bookmark: {e}")
         error_msg = str(e)
@@ -513,6 +518,11 @@ async def create_bookmark(
         
     except HTTPException:
         raise
+    except ProviderUnavailable as e:
+        # 503 and the platform's name: one provider is unavailable on this
+        # deployment, the rest of Sava is fine, and a retry may succeed later.
+        logger.warning(f"Provider unavailable: {e}")
+        raise HTTPException(status_code=503, detail=str(e))
     except ValueError as e:
         error_msg = str(e)
         if "already" in error_msg.lower() and "bookmarked" in error_msg.lower():
@@ -753,6 +763,9 @@ async def refresh_bookmark_endpoint(
     try:
         updated = await refresh_bookmark(bookmark_id, current_user["id"], db)
         return updated
+    except ProviderUnavailable as e:
+        logger.warning(f"Provider unavailable refreshing {bookmark_id}: {e}")
+        raise HTTPException(status_code=503, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:

@@ -7,10 +7,16 @@ import os
 from typing import Dict, Any, Optional, List
 from datetime import datetime
 from urllib.parse import urlparse
-from TikTokApi import TikTokApi
 from .base import BaseIngestor
+from .optional import ProviderUnavailable, module_available, optional_import
 
 logger = logging.getLogger(__name__)
+
+# `TikTokApi` drives a real browser through Playwright and is deliberately not
+# in the production image (see the header of requirements.txt). Importing it at
+# module scope made that deliberate omission fatal to the whole API, so the
+# import happens in `_ensure_initialized`, where TikTok is actually being used.
+DEPENDENCY = "TikTokApi"
 
 try:
     from ..whisper_transcript_service import get_tiktok_transcript
@@ -28,9 +34,18 @@ class TikTokApiIngestor(BaseIngestor):
         self.api = None
         self._initialized = False
         self._api_available = True
-    
+
+    @staticmethod
+    def dependencies_available() -> bool:
+        """Can this provider run at all here? Asked before it is offered."""
+        return module_available(DEPENDENCY)
+
     async def _ensure_initialized(self):
         if not self._initialized and self._api_available:
+            # Raises ProviderUnavailable if the package is absent — a TikTok
+            # answer, not an ImportError from the middle of a request.
+            TikTokApi = optional_import(DEPENDENCY, provider="tiktok",
+                                        attr="TikTokApi")
             try:
                 self.api = TikTokApi()
                 self._initialized = True
@@ -135,6 +150,10 @@ class TikTokApiIngestor(BaseIngestor):
                     logger.warning(f"Unexpected video_data type: {type(video_data)}")
                     raise ValueError(f"Unexpected data type returned from TikTokApi: {type(video_data)}")
                 
+        except ProviderUnavailable:
+            # Not a failure of this URL: the backend is not installed. Keep the
+            # provider-specific error intact all the way to the caller.
+            raise
         except Exception as e:
             logger.error(f"TikTokApi failed for {url}: {e}")
             self._api_available = False

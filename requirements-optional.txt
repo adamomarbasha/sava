@@ -1,0 +1,48 @@
+# Sava — optional ingestion backends. NOT installed in the production image.
+#
+# These are the packages `requirements.txt` documents as deliberately excluded.
+# They were previously undeclared anywhere except `api/requirements.txt`, which
+# is a stale development list, so "which version does this code work with" had
+# no answer in the repository. It has one now.
+#
+# Versions are the ones this code is developed and tested against, taken from
+# the working development environment — not chosen from a changelog:
+#
+#     $ pip show TikTokApi   → 7.1.0
+#     $ pip show playwright  → 1.55.0
+#
+# TikTokApi 7.x is the API this code is written for: `TikTokApi()` used as an
+# async context manager, `api.create_sessions(ms_tokens=..., num_sessions=...,
+# sleep_after=...)`, and `api.video(url=...).info()` in
+# api/ingestors/tiktok_api.py are all 7.x signatures. 6.x has neither
+# `create_sessions` nor that constructor shape, so the pin is a lower bound with
+# meaning rather than a preference.
+#
+# ── Why these are not in requirements.txt ────────────────────────────────────
+#
+# They are not what production TikTok support runs on. The default save path
+# (SAVA_ASYNC_SAVE=1) is api/services/save.py → api/pipeline/*, which acquires
+# TikTok content with yt-dlp — already a production dependency. The two
+# providers below are the legacy synchronous path (SAVA_ASYNC_SAVE=0) only.
+#
+# And installing them is not just `pip install`: TikTokApi drives a real
+# browser through Playwright, so the image would also need
+#
+#     playwright install --with-deps chromium
+#
+# — several hundred megabytes of browser and system libraries in a container
+# that currently needs none of it, to serve a code path production does not
+# take. Adding that silently to the web service is a much larger change than
+# the deployment failure warranted.
+#
+# ── Installing them anyway ───────────────────────────────────────────────────
+#
+#     pip install -r requirements-optional.txt
+#     playwright install --with-deps chromium
+#
+# Nothing else changes: both providers are discovered at runtime, so they become
+# available the moment they are importable, and Sava reports which of them
+# loaded at `GET /health` → `optional_providers`.
+
+TikTokApi==7.1.0
+playwright==1.55.0

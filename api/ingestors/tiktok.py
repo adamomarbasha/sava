@@ -6,10 +6,16 @@ from typing import Dict, Any, Optional, List
 from datetime import datetime
 from urllib.parse import urlparse
 import httpx
-from playwright.async_api import async_playwright
 from .base import BaseIngestor
+from .optional import module_available, optional_import
 
 logger = logging.getLogger(__name__)
+
+# Playwright is an optional dependency (see the header of requirements.txt): it
+# needs a browser binary installed alongside it, which the production image does
+# not ship. Imported where it is used so its absence disables TikTok scraping
+# and nothing else.
+DEPENDENCY = "playwright"
 
 class TikTokIngestor(BaseIngestor):
     
@@ -85,9 +91,21 @@ class TikTokIngestor(BaseIngestor):
         except:
             return None
     
+    @staticmethod
+    def dependencies_available() -> bool:
+        """Can this provider run at all here? Asked before it is offered."""
+        return module_available("playwright.async_api")
+
     async def extract_metadata(self, url: str) -> Dict[str, Any]:
         await self._ensure_initialized()
-        
+
+        # Raises ProviderUnavailable if Playwright is absent — a TikTok answer,
+        # not an ImportError from the middle of a request.
+        async_playwright = optional_import("playwright.async_api",
+                                           provider="tiktok",
+                                           dependency=DEPENDENCY,
+                                           attr="async_playwright")
+
         try:
             logger.info(f"Extracting TikTok metadata from: {url}")
             

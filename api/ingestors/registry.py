@@ -1,15 +1,15 @@
 import os
 from dotenv import load_dotenv
 load_dotenv()
+import importlib
 import logging
 import json
-from typing import Dict, Any, Optional
+from typing import Dict, Any, List, Optional
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 from .base import BaseIngestor
+from .optional import ProviderUnavailable
 from .youtube import YouTubeIngestor
-from .tiktok_api import TikTokApiIngestor 
-from .tiktok import TikTokIngestor 
 from .social import (
     InstagramIngestor, 
     TwitterIngestor,
@@ -25,10 +25,23 @@ import asyncio
 
 logger = logging.getLogger(__name__)
 
-INGESTORS = [
-    YouTubeIngestor(),
-    TikTokApiIngestor(), 
-    TikTokIngestor(),   
+# ── Provider loading ─────────────────────────────────────────────────────────
+#
+# Two classes of provider, loaded two different ways on purpose.
+#
+# **Core** providers depend only on packages `requirements.txt` installs, so
+# they are imported at module scope exactly as before. If `yt_dlp` is missing
+# the deployment is broken and must say so at startup — isolating that would be
+# hiding a real fault, not containing an optional one.
+#
+# **Optional** providers depend on packages the production image deliberately
+# does not ship (TikTokApi, Playwright). They are imported on first use, and a
+# failure to load one removes that provider and nothing else. This is the whole
+# fix for the outage: a provider Sava chose not to install must not be able to
+# stop Uvicorn from importing the application.
+
+_CORE_YOUTUBE = YouTubeIngestor()
+_CORE_SOCIAL = [
     # Instagram is handled by api/services/instagram.py, behind a provider
     # interface, and deliberately not by an operator-account ingestor.
     InstagramIngestor(), 
@@ -40,15 +53,88 @@ INGESTORS = [
     FacebookIngestor(),
 ]
 
+# (module, class, platform, package). Order is resolution order.
+_OPTIONAL_SPECS = (
+    (".tiktok_api", "TikTokApiIngestor", "tiktok", "TikTokApi"),
+    (".tiktok", "TikTokIngestor", "tiktok", "playwright"),
+)
+
+# Resolved once per process: an instance, or None with the reason recorded.
+_optional_cache: Dict[str, Optional[BaseIngestor]] = {}
+_optional_reasons: Dict[str, str] = {}
+
+
+def _load_optional(module: str, cls: str, platform: str, package: str) -> Optional[BaseIngestor]:
+    """Import and construct one optional provider. Never raises."""
+    if cls in _optional_cache:
+        return _optional_cache[cls]
+
+    instance: Optional[BaseIngestor] = None
+    try:
+        loaded = getattr(importlib.import_module(module, __package__), cls)
+        available = getattr(loaded, "dependencies_available", None)
+        if available is not None and not available():
+            _optional_reasons[cls] = f"{package} is not installed"
+        else:
+            instance = loaded()
+            logger.info("Optional %s provider %s is available", platform, cls)
+    except Exception as exc:  # a provider's own code failing is that
+        # provider's problem: record it and carry on without it.
+        _optional_reasons[cls] = f"{type(exc).__name__}: {exc}"
+
+    if instance is None:
+        logger.warning("Optional %s provider %s unavailable: %s",
+                       platform, cls, _optional_reasons.get(cls))
+    _optional_cache[cls] = instance
+    return instance
+
+
+def _optional(module: str, cls: str, platform: str, package: str) -> List[BaseIngestor]:
+    instance = _load_optional(module, cls, platform, package)
+    return [instance] if instance is not None else []
+
+
+def available_ingestors() -> List[BaseIngestor]:
+    """Every provider that can actually run here, in resolution order.
+
+    The order is unchanged from the previous static `INGESTORS` list; the only
+    difference is that a provider whose optional dependency is missing is
+    absent from it rather than fatal to importing this module.
+    """
+    return [
+        _CORE_YOUTUBE,
+        *_optional(*_OPTIONAL_SPECS[0]),
+        *_optional(*_OPTIONAL_SPECS[1]),
+        *_CORE_SOCIAL,
+    ]
+
+
+def provider_status() -> Dict[str, Dict[str, Any]]:
+    """Which optional providers loaded, and why the others did not.
+
+    Surfaced by `/health` so "TikTok is not extracting" is answerable from
+    outside the container instead of by reading logs.
+    """
+    status: Dict[str, Dict[str, Any]] = {}
+    for module, cls, platform, package in _OPTIONAL_SPECS:
+        loaded = _load_optional(module, cls, platform, package) is not None
+        entry: Dict[str, Any] = {"platform": platform, "package": package,
+                                 "available": loaded}
+        if not loaded:
+            entry["reason"] = _optional_reasons.get(cls, "unknown")
+        status[cls] = entry
+    return status
+
+
 def get_ingestor(url: str) -> Optional[BaseIngestor]:
-    for ingestor in INGESTORS:
+    for ingestor in available_ingestors():
         if ingestor.can_handle(url):
             return ingestor
     return None
 
 def get_tiktok_ingestors(url: str) -> list:
     tiktok_ingestors = []
-    for ingestor in INGESTORS:
+    for ingestor in available_ingestors():
         if ingestor.platform == "tiktok" and ingestor.can_handle(url):
             tiktok_ingestors.append(ingestor)
     return tiktok_ingestors
@@ -62,15 +148,24 @@ async def add_bookmark(url: str, user_id: int, db: Session = None) -> Dict[str, 
     try:
         if "tiktok.com" in url.lower():
             tiktok_ingestors = get_tiktok_ingestors(url)
-            if tiktok_ingestors:
-                for ingestor in tiktok_ingestors:
-                    try:
-                        logger.info(f"Trying {type(ingestor).__name__} for TikTok URL: {url}")
-                        return await _create_new_bookmark(ingestor, url, user_id, db)
-                    except Exception as e:
-                        logger.warning(f"{type(ingestor).__name__} failed: {e}")
-                        continue
-                raise ValueError("All TikTok ingestors failed")
+            if not tiktok_ingestors:
+                # Every TikTok backend is missing its optional dependency. Say
+                # that, specifically, instead of silently writing a bookmark
+                # with no metadata or returning an anonymous 500.
+                raise ProviderUnavailable(
+                    "tiktok",
+                    " or ".join(package for _, _, _, package in _OPTIONAL_SPECS),
+                    "; ".join(f"{cls}: {reason}"
+                              for cls, reason in _optional_reasons.items()),
+                )
+            for ingestor in tiktok_ingestors:
+                try:
+                    logger.info(f"Trying {type(ingestor).__name__} for TikTok URL: {url}")
+                    return await _create_new_bookmark(ingestor, url, user_id, db)
+                except Exception as e:
+                    logger.warning(f"{type(ingestor).__name__} failed: {e}")
+                    continue
+            raise ValueError("All TikTok ingestors failed")
         
         ingestor = get_ingestor(url)
         
@@ -88,6 +183,10 @@ async def add_bookmark(url: str, user_id: int, db: Session = None) -> Dict[str, 
         else:
             return await _create_new_bookmark(ingestor, url, user_id, db)
             
+    except ProviderUnavailable as e:
+        # One platform is unavailable. That is not "failed to add bookmark".
+        logger.warning(f"Provider unavailable for {url}: {e}")
+        raise
     except ValueError as e:
         logger.error(f"Validation error adding bookmark: {e}")
         raise
@@ -111,6 +210,9 @@ async def refresh_bookmark(bookmark_id: int, user_id: int, db: Session) -> Dict[
         
         logger.info(f"Refreshing bookmark {bookmark_id} using {ingestor.platform} ingestor")
         return await _update_existing_bookmark(bookmark, ingestor, bookmark.url, db)
+    except ProviderUnavailable as e:
+        logger.warning(f"Provider unavailable refreshing bookmark {bookmark_id}: {e}")
+        raise
     except Exception as e:
         logger.error(f"Failed to refresh bookmark {bookmark_id}: {e}")
         raise RuntimeError(f"Failed to refresh bookmark: {str(e)}")

@@ -13,6 +13,13 @@
 # only used by paths that are off by default:
 #   faster-whisper / openai-whisper   local ASR (SAVA_ASR_PROVIDER=local)
 #   playwright, instagrapi, TikTokApi  legacy/experimental ingestion paths
+#
+# Excluding them is only safe because nothing imports them at module scope any
+# more. `TikTokApi` was excluded here while api/ingestors/tiktok_api.py still
+# imported it at the top of the file, and the API could not start at all:
+# uvicorn failed importing api.main. The optional ingestion backends now resolve
+# their dependencies at use time (api/ingestors/optional.py) and are declared,
+# with pinned versions, in requirements-optional.txt.
 bcrypt==4.3.0
 beautifulsoup4==4.13.5
 email-validator==2.3.0
