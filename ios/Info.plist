@@ -23,5 +23,16 @@
 
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>Sava uses photos you choose to set a collection cover.</string>
+
+	<!-- The published "Save to Sava" iCloud Shortcut, once one exists.
+
+	     Deliberately a sentinel: an iCloud share id only exists after somebody
+	     presses Share on a real Shortcut, so it cannot be predicted, and a
+	     plausible-looking placeholder would give users a button that 404s.
+	     AppConfig rejects anything that is not an https icloud.com URL, and the
+	     Action Button screen falls back to the native App Shortcut instructions
+	     while it is unset. See docs/ACTION_BUTTON.md. -->
+	<key>SAVA_SHARED_SHORTCUT_URL</key>
+	<string>REPLACE_WITH_ICLOUD_SHORTCUT_URL</string>
 </dict>
 </plist>

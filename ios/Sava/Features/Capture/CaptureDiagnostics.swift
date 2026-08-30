@@ -202,3 +202,163 @@ extension CaptureDiagnostics {
     }
 }
 #endif
+
+#if DEBUG
+extension CaptureDiagnostics {
+    /// Verifies `SaveToSavaIntent` finds the right link in whatever it is given.
+    ///
+    /// This is the parsing that makes the general-purpose action work at all:
+    /// Shortcuts hands over text far more often than a typed URL, and every
+    /// case below is a real shape it produces — a bare link, a shared caption
+    /// with a trailing link, a link inside a sentence, a link in parentheses,
+    /// a message with several links where only one is the content.
+    ///
+    /// Run on every Debug launch alongside the selector check, because a
+    /// regression here is silent: the intent still succeeds, it just saves the
+    /// wrong thing or nothing at all.
+    static func runIntentInputSelfCheck() {
+        let cases: [(name: String, input: String?, expect: String?)] = [
+            ("bare URL",
+             "https://www.tiktok.com/@u/video/7234567890123456789",
+             "https://www.tiktok.com/@u/video/7234567890123456789"),
+
+            ("URL with surrounding whitespace",
+             "   https://youtu.be/dQw4w9WgXcQ   ",
+             "https://youtu.be/dQw4w9WgXcQ"),
+
+            ("shared caption then link (TikTok share sheet)",
+             "Check this out 😂 https://vm.tiktok.com/ZMhqK1abc/",
+             "https://vm.tiktok.com/ZMhqK1abc/"),
+
+            ("link mid-sentence with trailing punctuation",
+             "watch https://www.youtube.com/watch?v=aircAruvnKk, it's great.",
+             "https://www.youtube.com/watch?v=aircAruvnKk"),
+
+            ("profile and video together -> video wins",
+             "https://www.instagram.com/zendaya/ and https://www.instagram.com/reel/DPMnXPeEoIi/",
+             "https://www.instagram.com/reel/DPMnXPeEoIi/"),
+
+            ("multi-line message",
+             "hey\nlook at this\nhttps://www.youtube.com/shorts/dQw4w9WgXcQ\nlol",
+             "https://www.youtube.com/shorts/dQw4w9WgXcQ"),
+
+            // Falls through to the clipboard inside CaptureRunner rather than
+            // failing here — an empty action is a valid way to run this intent.
+            ("empty -> no candidates", "", nil),
+            ("nil -> no candidates", nil, nil),
+            ("plain text, no link", "just some words", nil),
+            ("non-http scheme is ignored", "mailto:hi@sava.app", nil),
+        ]
+
+        var passed = 0
+        for c in cases {
+            let (candidates, _) = SaveToSavaIntent.candidates(from: c.input)
+            let got = URLSelector.best(from: candidates)
+            let ok = got == c.expect
+            if ok { passed += 1 }
+            NSLog("[Sava selftest] %@ intent-input: %@ -> %@",
+                  ok ? "PASS" : "FAIL", c.name, got ?? "nil")
+            if !ok { NSLog("[Sava selftest]   expected: %@", c.expect ?? "nil") }
+        }
+        NSLog("[Sava selftest] SaveToSavaIntent input %d/%d passed",
+              passed, cases.count)
+    }
+}
+#endif
+
+#if DEBUG
+extension CaptureDiagnostics {
+    /// Verifies the official Shortcut link is present and points at Apple.
+    ///
+    /// The install button is one tap with no confirmation, so a link that has
+    /// been mistyped, blanked, or overridden to somewhere else is a button that
+    /// sends users off Sava's promised path without ever failing loudly. Cheap
+    /// to check at launch; the matching CI check is
+    /// `tests/test_ios_shortcut.py`, which also proves there is only one copy
+    /// of the URL in the tree.
+    static func runShortcutConfigSelfCheck() {
+        let resolved = AppConfig.saveShortcutURL
+        let isOfficial = resolved == AppConfig.officialSaveShortcutURL
+
+        NSLog("[Sava selftest] shortcut link: %@  (%@)",
+              resolved.absoluteString,
+              isOfficial ? "official" : "OVERRIDDEN by SAVA_SHARED_SHORTCUT_URL")
+
+        // A junk override must be ignored, not honoured. Each of these would be
+        // a tap that leaves Sava's control if the validator let it through.
+        let rejects = [nil, "", "   ",
+                       "http://www.icloud.com/shortcuts/abc",   // not https
+                       "https://www.icloud.com",                // no shortcut
+                       "https://icloud.com.evil.test/shortcuts/abc",
+                       "https://example.com/shortcuts/abc"]
+        var passed = 0
+        for raw in rejects where AppConfig.validatedShortcutURL(raw) == nil { passed += 1 }
+        NSLog("[Sava selftest] shortcut override validation %d/%d rejected",
+              passed, rejects.count)
+
+        let accepted = AppConfig.validatedShortcutURL(
+            AppConfig.officialSaveShortcutURL.absoluteString) != nil
+        NSLog("[Sava selftest] official link validates: %@",
+              accepted ? "PASS" : "FAIL")
+    }
+}
+#endif
+
+#if DEBUG
+extension CaptureDiagnostics {
+    /// Verifies `SaveLinkToSavaIntent` — the action the official Shortcut
+    /// actually calls — copes with what that Shortcut sends it.
+    ///
+    /// Two branches send two very different shapes. The on-screen branch sends
+    /// a list of URLs. The clipboard branch sends the clipboard's *contents*,
+    /// which is whatever the user last copied: usually a link, often a link
+    /// wrapped in a caption, sometimes nothing useful at all. Both arrive here
+    /// as text, and a regression is silent — the action still succeeds, it just
+    /// saves the wrong thing or nothing.
+    static func runLinkIntentInputSelfCheck() {
+        let cases: [(name: String, input: [String], expect: String?)] = [
+            ("on-screen URL list -> video wins",
+             ["https://www.tiktok.com/@mystery_jj",
+              "https://www.tiktok.com/music/original-sound-7234567890",
+              "https://www.tiktok.com/@mystery_jj/video/7234567890123456789"],
+             "https://www.tiktok.com/@mystery_jj/video/7234567890123456789"),
+
+            ("single URL",
+             ["https://youtu.be/dQw4w9WgXcQ"],
+             "https://youtu.be/dQw4w9WgXcQ"),
+
+            // The clipboard branch. A `[URL]` parameter is what made this shape
+            // a coercion error rather than a save.
+            ("clipboard caption carrying a link",
+             ["Check this out 😂 https://vm.tiktok.com/ZMhqK1abc/"],
+             "https://vm.tiktok.com/ZMhqK1abc/"),
+
+            ("clipboard link with whitespace",
+             ["  https://www.instagram.com/reel/DPMnXPeEoIi/  "],
+             "https://www.instagram.com/reel/DPMnXPeEoIi/"),
+
+            ("duplicates collapse",
+             ["https://youtu.be/dQw4w9WgXcQ", "https://youtu.be/dQw4w9WgXcQ"],
+             "https://youtu.be/dQw4w9WgXcQ"),
+
+            ("clipboard with no link", ["just some words"], nil),
+            ("malformed", ["h ttps://not a url"], nil),
+            ("blank entries", ["", "   "], nil),
+            ("nothing at all", [], nil),
+        ]
+
+        var passed = 0
+        for c in cases {
+            let candidates = SaveLinkToSavaIntent.candidates(from: c.input)
+            let got = URLSelector.best(from: candidates)
+            let ok = got == c.expect
+            if ok { passed += 1 }
+            NSLog("[Sava selftest] %@ link-intent: %@ -> %@",
+                  ok ? "PASS" : "FAIL", c.name, got ?? "nil")
+            if !ok { NSLog("[Sava selftest]   expected: %@", c.expect ?? "nil") }
+        }
+        NSLog("[Sava selftest] SaveLinkToSavaIntent input %d/%d passed",
+              passed, cases.count)
+    }
+}
+#endif

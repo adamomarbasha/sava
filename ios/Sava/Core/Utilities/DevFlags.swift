@@ -29,6 +29,8 @@ enum DevFlags {
     ///   `history`           the Ask conversation history
     ///   `search`            the search sheet over the library
     ///   `deleteAccount`     the account-deletion screen
+    ///   `paywall`           the Sava Pro paywall
+    ///   `actionButton`      the Action Button setup screen
     ///   `addTo`             the add-to-collection sheet for the first save
     ///   `shortform`         the swipe viewer on the first playable save
     ///   `shortform:<id>`    the swipe viewer opened on a specific save
@@ -98,6 +100,10 @@ enum DevScreen: Equatable {
     case search
     /// The account-deletion screen (App Store 5.1.1(v)).
     case deleteAccount
+    /// The Sava Pro paywall.
+    case paywall
+    /// The Action Button setup screen.
+    case actionButton
 
     init?(_ raw: String?) {
         guard let raw, !raw.isEmpty else { return nil }
@@ -116,6 +122,8 @@ enum DevScreen: Equatable {
         case "history":    self = .history
         case "search":     self = .search
         case "deleteAccount": self = .deleteAccount
+        case "paywall":    self = .paywall
+        case "actionButton": self = .actionButton
         case "shortform":  self = .shortForm(argument)
         case "shortformIn":
             guard let argument else { return nil }

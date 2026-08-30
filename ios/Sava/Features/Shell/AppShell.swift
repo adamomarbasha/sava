@@ -39,6 +39,8 @@ struct AppShell: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var devShowSearch = false
     @State private var devShowDeleteAccount = false
+    @State private var devShowPaywall = false
+    @State private var devShowSaveAnywhere = false
 
     enum Destination: String, CaseIterable, Hashable {
         case library, collections, scroll, ask
@@ -141,6 +143,12 @@ struct AppShell: View {
             NavigationStack { SearchView() }
                 .environmentObject(library)
                 .environmentObject(shortForm)
+        }
+        .sheet(isPresented: $devShowPaywall) {
+            NavigationStack { PaywallView(context: "dev") }
+        }
+        .sheet(isPresented: $devShowSaveAnywhere) {
+            NavigationStack { SaveAnywhereView() }
         }
     }
 
@@ -246,6 +254,12 @@ struct AppShell: View {
 
         case .deleteAccount:
             devShowDeleteAccount = true
+
+        case .paywall:
+            devShowPaywall = true
+
+        case .actionButton:
+            devShowSaveAnywhere = true
 
         case .shortForm(let id):
             // Publish a real feed first, so the viewer under test is the same

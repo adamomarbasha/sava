@@ -126,6 +126,90 @@ enum AppConfig {
     /// True when the app is talking to a real, secure, remote backend.
     static var isProductionReady: Bool { configurationError == nil && apiBaseURL.scheme == "https" }
 
+    // MARK: Externally hosted links
+
+    /// The official **Save to Sava** Shortcut, published from the Shortcuts app.
+    ///
+    /// This is the one source of truth for the link. Nothing else in the app,
+    /// the docs, or the plists carries the id — replacing the published
+    /// Shortcut means editing this one line, and `tests/test_ios_shortcut.py`
+    /// fails the build if a second copy of it appears anywhere in `ios/`.
+    ///
+    /// Hardcoded rather than read from `Info.plist`, deliberately. A plist
+    /// value would have to be duplicated into `Info.plist` *and*
+    /// `Info-Release.plist` — two places to keep in step, which is exactly the
+    /// drift this constant exists to prevent. It is a public link, not a
+    /// secret, and it is identical in every configuration.
+    ///
+    /// The Shortcut is a thin wrapper: it gathers evidence Shortcuts can see
+    /// and an App Intent cannot (the foreground app's URLs, the clipboard, a
+    /// screenshot) and hands it to Sava's own intents. All save behaviour lives
+    /// in `CapturePipeline`. See `docs/ACTION_BUTTON.md` for its exact actions.
+    static let officialSaveShortcutURL = URL(
+        string: "https://www.icloud.com/shortcuts/c718dbc210a646cea3326d596d1895ef")!
+
+    /// The name the Shortcut installs under, and therefore the name the user
+    /// has to look for in **Settings → Action Button → Shortcut**.
+    ///
+    /// Not "Save to Sava". That is the *App Shortcut*, which the same picker
+    /// lists separately under Sava's own heading. Both work; telling the user
+    /// to look for a name that is not there does not. Read from the published
+    /// Shortcut's own record, not from memory.
+    static let officialSaveShortcutName = "Sava Save"
+
+    /// The Shortcut the install button actually opens.
+    ///
+    /// The official link, unless a build overrides it with
+    /// `SAVA_SHARED_SHORTCUT_URL` (scheme environment variable or Info.plist) —
+    /// an escape hatch for testing an unpublished Shortcut without touching
+    /// tracked source. An override that does not validate is *ignored* rather
+    /// than honoured or fatal: a typo in a plist should cost the tester their
+    /// override, not give every user a button that opens somewhere else.
+    static var saveShortcutURL: URL {
+        let raw = ProcessInfo.processInfo.environment["SAVA_SHARED_SHORTCUT_URL"]
+            ?? Bundle.main.object(forInfoDictionaryKey: "SAVA_SHARED_SHORTCUT_URL") as? String
+        return validatedShortcutURL(raw) ?? officialSaveShortcutURL
+    }
+
+    /// https, and hosted by Apple.
+    ///
+    /// Only Apple can host a Shortcut. Accepting any https URL would turn a
+    /// plist typo — or anything able to write to the plist — into a tap that
+    /// opens an arbitrary website from a trusted-looking button.
+    static func validatedShortcutURL(_ raw: String?) -> URL? {
+        guard let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trimmed.isEmpty,
+              let url = URL(string: trimmed),
+              url.scheme?.lowercased() == "https",
+              let host = url.host?.lowercased(),
+              host == "icloud.com" || host.hasSuffix(".icloud.com"),
+              !url.path.isEmpty, url.path != "/"
+        else { return nil }
+        return url
+    }
+
+    /// Where Sava's public pages live. Used for the subscription disclosures
+    /// Apple requires on a paywall.
+    enum Links {
+        static let privacy = URL(string: "https://sava.app/privacy")!
+        static let support = URL(string: "https://sava.app/support")!
+
+        /// Apple's standard EULA.
+        ///
+        /// Guideline 3.1.2 requires a Terms of Use link on any screen selling a
+        /// subscription. Apple's standard licence is the correct answer until
+        /// Sava publishes its own — linking to a `sava.app/terms` page that does
+        /// not exist would fail review for a broken link rather than pass for
+        /// having one.
+        static let terms = URL(
+            string: "https://www.apple.com/legal/internet-services/itunes/dev/stdeula/")!
+
+        /// Apple's subscription management. An app may not build its own
+        /// cancellation flow; this is where cancelling actually happens.
+        static let manageSubscription = URL(
+            string: "https://apps.apple.com/account/subscriptions")!
+    }
+
     // MARK: Resolution
 
     private static func resolve() -> Result<URL, ConfigurationError> {
