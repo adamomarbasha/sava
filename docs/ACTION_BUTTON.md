@@ -165,19 +165,19 @@ supplies the URL.
 
 ## The simple setup (no Shortcut building)
 
-For most people the full capture Shortcut is more than they need. The shortest
-path that works:
+Nobody has to build the Shortcut above — it is published, and **Profile → Save
+from anywhere** installs it in one tap. See *The official Shortcut* below.
+
+The shortest path that needs no install at all:
 
 ```
 Settings -> Action Button -> swipe to Shortcut -> Choose "Save to Sava"
 ```
 
 Copy a link, press the button, done. The action reads the clipboard when it is
-given nothing, which is exactly what the Action Button gives it.
-
-The seven-action Shortcut above is worth building when you want to capture
-*without* copying — it reads the foreground app instead. Both end at the same
-intent and the same backend save path.
+given nothing, which is exactly what the Action Button gives it. It cannot see
+the foreground app, which is the one thing the Shortcut adds. Both end at the
+same intent and the same backend save path.
 
 ## Signed out, expired session, or offline
 
@@ -202,56 +202,109 @@ intents would be a parallel system with its own bugs.
 With no link at all there is nothing worth keeping, so the honest answer is
 `No link found` (or `Open Sava and sign in to start saving.`).
 
-## Publishing a shared Shortcut (optional)
+## The official Shortcut
 
-Sava can show a **Get Sava Shortcut** button that opens a prebuilt Shortcut you
-publish. It is off until configured, because an iCloud share id only exists once
-somebody presses Share on a real Shortcut — it cannot be predicted or generated,
-and shipping a plausible-looking placeholder would give users a button that 404s.
-
-### Build it
-
-Shortcuts app → **+** → New Shortcut. Four actions, no third-party actions, no
-API keys, no auth tokens:
+Sava ships one published Shortcut, and **Profile → Save from anywhere** offers
+it behind a single **Add Save to Sava** button.
 
 ```
-1.  If  [Shortcut Input]  has any value
-2.      Save to Sava
-            field "Link or text"  <- variable: Shortcut Input
-3.  Otherwise
-4.      Get Clipboard
-5.      Save to Sava
-            field "Link or text"  <- variable: Clipboard
-6.  End If
+https://www.icloud.com/shortcuts/c718dbc210a646cea3326d596d1895ef
 ```
 
-Name it exactly **Save to Sava**. Set its icon to something recognisable
-(bookmark glyph, dark background).
+It installs under the name **Sava Save** — which is the name to look for in the
+Action Button picker, not "Save to Sava". Both exist there and both work; see
+*The picker shows two things* below.
 
-The intent itself already falls back to the clipboard when given nothing, so
-strictly the whole If/Otherwise is optional — a single **Save to Sava** action
-with an empty field behaves identically. The branch is there so the Shortcut
-also works when run *from* a share sheet, where Shortcut Input is populated.
+### What it actually does
 
-The result dialog is the intent's own — `Saved to Sava`, `Already in your Sava
-library`, `Open Sava to finish saving`, or `No link found`. Turn it off per
-action with **Show When Run → Off** if you prefer it silent.
+Decoded from the published record rather than described from memory. Nine
+actions, no third-party actions, no API keys, no auth tokens — the Shortcut
+carries **no save logic at all**. It gathers what Shortcuts can see and an App
+Intent cannot, and hands it straight to Sava's intents:
 
-### Publish it
+```
+1.  Get What's On Screen
+2.  Get URLs from [What's On Screen]        -> set variable SavaURL
+3.  Count [SavaURL]
+4.  If Count > 0
+5.      Save Link to Sava   Link <- SavaURL          <- normal path
+6.  Otherwise
+7.      Get Clipboard -> Get URLs -> Count
+8.      If Count > 0
+9.          Save Link to Sava   Link <- Clipboard    <- clipboard fallback
+10.     Otherwise
+11.         Take Screenshot -> Save Screenshot to Sava
+```
 
-1. Long-press the Shortcut → **Share** → **Copy iCloud Link**.
-2. The link looks like `https://www.icloud.com/shortcuts/<32-hex-id>`.
-3. Put it in `ios/Info.plist` and `ios/Info-Release.plist` as
-   `SAVA_SHARED_SHORTCUT_URL`, or export it in the scheme for a Debug build.
+Three ranked sources, in the order that produces the most reliable identity:
+what is on screen, then what the user deliberately copied, then pixels. Every
+branch ends in a Sava App Intent, which means `CapturePipeline`, which means the
+same canonicalisation, duplicate handling and backend call as the share
+extension and the in-app save. There is exactly one save implementation.
 
-`AppConfig.sharedShortcutURL` validates it: https only, and the host must be
-`icloud.com` or a subdomain. Only Apple can host a Shortcut, so accepting any
-https URL would turn a plist typo into a tap that opens an arbitrary website
-from a trusted-looking button.
+### Why step 9 sends text, not a URL
 
-When it is set, **Profile → Action Button** shows **Get Sava Shortcut** and the
-steps start with installing it. When it is not, the same screen shows the native
-App Shortcut instructions, which need no hosted asset and work on every install.
+Action 9 passes the **Clipboard** output straight into `Link`. That is the
+clipboard's *contents* — often a caption with a link in it, not a tidy URL — and
+Shortcuts must coerce it to the parameter's declared type before Sava runs at
+all. `SaveLinkToSavaIntent.link` is therefore `[String]`, not `[URL]`: text
+always coerces, so the judgement about what counts as a link is made inside Sava
+by `NSDataDetector` where a failure is a handled message rather than a Shortcuts
+coercion error. URL lists still work unchanged — step 5 passes a list of URLs and
+they arrive as their absolute strings.
+
+Verified by `CaptureDiagnostics.runLinkIntentInputSelfCheck()`, run on every
+Debug launch.
+
+### The clipboard is a fallback, not a dependency
+
+Step 5 wins whenever the foreground app puts a URL on screen, which is the
+normal case for TikTok, YouTube and Safari. Only when it does not does step 7
+read the clipboard — and it is **Shortcuts** doing the reading, in the user's own
+tap, not the intent reaching for `UIPasteboard` from a background execution
+context where pasteboard availability has been unreliable. The link then arrives
+as explicit intent input like any other.
+
+### The picker shows two things
+
+**Settings → Action Button → Shortcut** lists the installed Shortcut (**Sava
+Save**, under Shortcuts) *and* Sava's own App Shortcut (**Save to Sava**, under
+Sava). They are separate entries. Both end at the same save:
+
+| Picked | Path |
+|---|---|
+| **Sava Save** | reads the screen, then the clipboard, then a screenshot |
+| **Save to Sava** | takes what it is given; with nothing, reads the clipboard |
+
+The Shortcut is the better default because it can see the foreground app. The
+App Shortcut needs no install and works the moment Sava is on the phone.
+
+`SaveAnywhereView` names both, because sending somebody to scroll a picker for a
+title that is not in it is the failure this section exists to prevent.
+
+### Where the link lives
+
+`AppConfig.officialSaveShortcutURL`, and nowhere else. Not in `Info.plist`, not
+in `Info-Release.plist` — two files to keep in step is exactly the drift a
+constant avoids, and the link is public, not a secret, and identical in every
+configuration.
+
+Replacing the published Shortcut is a one-line edit there.
+`tests/test_ios_shortcut.py` fails CI if a second copy of the URL appears
+anywhere under `ios/`, if the plists start pinning one, or if the intents the
+Shortcut calls stop existing. `AppConfig.validatedShortcutURL` still accepts an
+`SAVA_SHARED_SHORTCUT_URL` override from the scheme or a plist for testing an
+unpublished Shortcut; an override that is not an https `icloud.com` URL is
+ignored rather than honoured, because only Apple can host a Shortcut and a plist
+typo must not become a tap that opens an arbitrary website.
+
+### Installing it
+
+Sava opens the iCloud link and stops there. There is no API to add a Shortcut to
+somebody's library, and there should not be — Apple runs the install sheet, the
+user presses Add. If iOS declines to open the link (no Shortcuts app, a managed
+device, no network) the screen says so and offers the link to copy, rather than
+leaving a dead button.
 
 ## Clipboard
 
