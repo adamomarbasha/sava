@@ -783,3 +783,56 @@ class TestLimitStateIsVisibleToTheClient:
         fine = self._bookmark(clean_db, other.id, cc, ProcessingState.QUEUED)
         assert _visible_state(held, cc) == ProcessingState.LIMIT_REACHED
         assert _visible_state(fine, cc) == ProcessingState.QUEUED
+
+
+# ─── The paywall when StoreKit has no catalogue ─────────────────────────────
+
+class TestPaywallUnavailableState:
+    """Found by running the paywall against a simulator with no StoreKit
+    configuration, which is what a real device behind a captive portal or a
+    misconfigured storefront looks like: `Product.products(for:)` returns an
+    empty array in ~30ms, so `productsPhase` becomes `.unavailable`.
+
+    The screen was then a dead end. Prices rendered as shimmer placeholders
+    (which mean "loading"), the buy button was disabled, and the one sentence
+    explaining why — plus its "Try again" — was laid out *after* the plan
+    cards, which put it below the fold behind the pinned action bar. The first
+    screen the user saw offered no reason and no way out.
+    """
+
+    @staticmethod
+    def _paywall() -> str:
+        import pathlib
+        root = pathlib.Path(__file__).resolve().parent.parent / "ios"
+        return (root / "Sava" / "Features" / "Paywall"
+                / "PaywallView.swift").read_text(encoding="utf-8")
+
+    def test_the_explanation_is_rendered_before_the_plan_cards(self):
+        """Ordering *is* the fix: below `plans` it was off-screen."""
+        source = self._paywall()
+        notice = source.index("if case .unavailable(let why) = subscriptions.productsPhase")
+        plans = source.index("\n                    plans\n")
+        assert notice < plans, \
+            "the unavailable notice must render above the plan cards, not below"
+
+    def test_the_unavailable_state_still_offers_a_retry(self):
+        assert "Try again" in self._paywall()
+
+    def test_a_missing_price_only_shimmers_while_it_is_loading(self):
+        """A skeleton that never resolves reads as a hung screen."""
+        source = self._paywall()
+        assert "action != nil && isLoading" in source, \
+            "the price placeholder must be gated on the loading phase"
+
+    def test_the_loading_flag_comes_from_the_products_phase(self):
+        source = self._paywall()
+        assert "private var catalogueIsLoading: Bool" in source
+        assert "if case .loading = subscriptions.productsPhase" in source
+        assert source.count("isLoading: catalogueIsLoading") == 2, \
+            "both the monthly and annual rows must be gated"
+
+    def test_the_buy_button_is_still_disabled_without_a_product(self):
+        """The notice explains; it must not make a dead button look alive."""
+        source = self._paywall()
+        assert "isSelectable: subscriptions.monthly != nil" in source
+        assert "isSelectable: subscriptions.annual != nil" in source

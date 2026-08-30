@@ -43,6 +43,13 @@ struct PaywallView: View {
 
     @State private var selection: SavaProducts.Cadence = .annual
 
+    /// True only while StoreKit might still answer, so a blank price shows a
+    /// placeholder rather than an indefinite one.
+    private var catalogueIsLoading: Bool {
+        if case .loading = subscriptions.productsPhase { return true }
+        return false
+    }
+
     var body: some View {
         ZStack(alignment: .bottom) {
             SavaColor.ground.ignoresSafeArea()
@@ -51,16 +58,25 @@ struct PaywallView: View {
                 VStack(alignment: .leading, spacing: Space.xl) {
                     if let reason { limitNotice(reason) }
                     hero
-                    plans
+                    // Above the plan cards, not below them.
+                    //
+                    // When StoreKit has no catalogue the plan rows show blank
+                    // prices and the buy button is disabled, and this sentence
+                    // is the only thing on screen that explains why. Rendered
+                    // after `plans` it sat below the fold, behind the pinned
+                    // action bar, so the first — and often only — screen the
+                    // user saw was a dead paywall with no reason given.
                     if case .unavailable(let why) = subscriptions.productsPhase {
                         unavailable(why)
                     }
+                    plans
                     disclosure
                     Color.clear.frame(height: 132)   // room for the pinned action
                 }
                 .screenPadding()
                 .padding(.top, Space.l)
             }
+            .devScrollAnchor()
 
             actionBar
         }
@@ -158,7 +174,8 @@ struct PaywallView: View {
                 badge: nil,
                 isSelected: selection == .monthly,
                 isCurrent: currentProduct == SavaProducts.proMonthly,
-                isSelectable: subscriptions.monthly != nil) {
+                isSelectable: subscriptions.monthly != nil,
+                isLoading: catalogueIsLoading) {
                     select(.monthly)
                 }
 
@@ -169,7 +186,8 @@ struct PaywallView: View {
                 badge: "Best value",
                 isSelected: selection == .annual,
                 isCurrent: currentProduct == SavaProducts.proAnnual,
-                isSelectable: subscriptions.annual != nil) {
+                isSelectable: subscriptions.annual != nil,
+                isLoading: catalogueIsLoading) {
                     select(.annual)
                 }
 
@@ -406,6 +424,8 @@ private struct PlanRow: View {
     let isSelected: Bool
     let isCurrent: Bool
     let isSelectable: Bool
+    /// Whether a missing price is still on its way. See `content`.
+    var isLoading: Bool = false
     let action: (() -> Void)?
 
     var body: some View {
@@ -433,10 +453,15 @@ private struct PlanRow: View {
                     Text(price)
                         .font(SavaType.lede)
                         .foregroundStyle(SavaColor.primary)
-                } else if action != nil {
+                } else if action != nil && isLoading {
                     // Price still loading from StoreKit. A shaped placeholder
                     // rather than a spinner or — worse — a guessed number: the
                     // storefront decides the price and we do not know it yet.
+                    //
+                    // Only while it is genuinely loading: a skeleton that never
+                    // resolves reads as a hung screen, so once the catalogue is
+                    // known to be unavailable the row goes quiet and the notice
+                    // above the plans carries the explanation instead.
                     Skeleton().frame(width: 88, height: 17)
                 }
 

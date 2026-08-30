@@ -41,6 +41,7 @@ struct AppShell: View {
     @State private var devShowDeleteAccount = false
     @State private var devShowPaywall = false
     @State private var devShowSaveAnywhere = false
+    @State private var devShowOnboarding = false
 
     enum Destination: String, CaseIterable, Hashable {
         case library, collections, scroll, ask
@@ -146,6 +147,9 @@ struct AppShell: View {
         }
         .sheet(isPresented: $devShowPaywall) {
             NavigationStack { PaywallView(context: "dev") }
+        }
+        .fullScreenCover(isPresented: $devShowOnboarding) {
+            OnboardingView(userID: user.id) { devShowOnboarding = false }
         }
         .sheet(isPresented: $devShowSaveAnywhere) {
             NavigationStack { SaveAnywhereView() }
@@ -260,6 +264,9 @@ struct AppShell: View {
 
         case .actionButton:
             devShowSaveAnywhere = true
+
+        case .onboarding:
+            devShowOnboarding = true
 
         case .shortForm(let id):
             // Publish a real feed first, so the viewer under test is the same

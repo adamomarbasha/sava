@@ -31,12 +31,21 @@ enum DevFlags {
     ///   `deleteAccount`     the account-deletion screen
     ///   `paywall`           the Sava Pro paywall
     ///   `actionButton`      the Action Button setup screen
+    ///   `onboarding`        the first-run tour, from stage one
     ///   `addTo`             the add-to-collection sheet for the first save
     ///   `shortform`         the swipe viewer on the first playable save
     ///   `shortform:<id>`    the swipe viewer opened on a specific save
     ///   `shortformIn:<id>`  the swipe viewer opened from collection <id>,
     ///                       which is how the feed's source context is tested
     static var screen: DevScreen? { DevScreen(env["SAVA_DEV_SCREEN"]) }
+
+    /// SAVA_DEV_ONBOARDING_STAGE = 0...3 — opens the tour at a given stage.
+    /// There is no way to synthesise a tap on the pinned Continue button from
+    /// the command line, so this is how each stage gets screenshotted and
+    /// reviewed. Compiled out of Release.
+    static var onboardingStage: Int? {
+        Int(env["SAVA_DEV_ONBOARDING_STAGE"] ?? "")
+    }
 
     /// SAVA_DEV_ASK = a question to send automatically on the Ask tab.
     static var askQuestion: String? { env["SAVA_DEV_ASK"] }
@@ -63,6 +72,7 @@ enum DevFlags {
     /// lower half of a design can be captured without driving the UI.
     static var scrollToBottom: Bool { env["SAVA_DEV_SCROLL"] == "bottom" }
     #else
+    static var onboardingStage: Int? { nil }
     static var refreshRuns: Int { 0 }
     static var shortFormAdvance: Int { 0 }
     static var initialTab: String? { nil }
@@ -104,6 +114,12 @@ enum DevScreen: Equatable {
     case paywall
     /// The Action Button setup screen.
     case actionButton
+    /// The first-run tour.
+    case onboarding
+
+    /// The tour is the one screen that must not be skipped past by the
+    /// onboarding bypass in `RootView`.
+    var isOnboarding: Bool { self == .onboarding }
 
     init?(_ raw: String?) {
         guard let raw, !raw.isEmpty else { return nil }
@@ -124,6 +140,7 @@ enum DevScreen: Equatable {
         case "deleteAccount": self = .deleteAccount
         case "paywall":    self = .paywall
         case "actionButton": self = .actionButton
+        case "onboarding": self = .onboarding
         case "shortform":  self = .shortForm(argument)
         case "shortformIn":
             guard let argument else { return nil }

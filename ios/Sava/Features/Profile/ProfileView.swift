@@ -164,6 +164,33 @@ struct ProfileView: View {
                 .buttonStyle(.plain)
                 .hairline()
 
+                NavigationLink {
+                    SaveAnywhereView()
+                } label: {
+                    HStack(spacing: Space.m) {
+                        Image(systemName: "sparkles.rectangle.stack")
+                            .font(.system(size: 15))
+                            .foregroundStyle(SavaColor.secondary)
+                            .frame(width: 22)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Learn Sava")
+                                .font(SavaType.body)
+                                .foregroundStyle(SavaColor.primary)
+                            Text("The tour, and every way to save")
+                                .font(SavaType.meta)
+                                .foregroundStyle(SavaColor.tertiary)
+                        }
+                        Spacer(minLength: Space.s)
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(SavaColor.tertiary)
+                    }
+                    .frame(minHeight: 56)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .hairline()
+
                 SavaRow(title: "Open Shortcuts", symbol: "square.stack.3d.up") {
                     if let url = URL(string: "shortcuts://") { openURL(url) }
                 }

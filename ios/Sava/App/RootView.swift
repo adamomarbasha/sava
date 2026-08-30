@@ -10,6 +10,11 @@ import SwiftUI
 struct RootView: View {
     @EnvironmentObject private var session: SessionStore
     @EnvironmentObject private var subscriptions: SubscriptionManager
+
+    /// Flips once the tour is finished so the shell appears without waiting for
+    /// a phase change. The durable answer lives in `OnboardingState`; this is
+    /// only what makes the current screen swap.
+    @State private var onboardingDone = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @AppStorage(AppTheme.storageKey) private var themeRaw = AppTheme.dark.rawValue
 
@@ -44,6 +49,18 @@ struct RootView: View {
         #endif
     }
 
+    /// Show the tour only to an account that has never finished it.
+    private func showOnboarding(for user: User) -> Bool {
+        #if DEBUG
+        // A dev build asked for a specific screen, and the tour would sit in
+        // front of it: a fresh QA account has never finished onboarding, so
+        // every `SAVA_DEV_SCREEN` hook would open the tour instead of the
+        // screen under test. `onboarding` itself is of course exempt.
+        if let screen = DevFlags.screen, !screen.isOnboarding { return false }
+        #endif
+        return !onboardingDone && !OnboardingState.isComplete(for: user.id)
+    }
+
     var body: some View {
         ZStack {
             SavaColor.ground.ignoresSafeArea()
@@ -64,7 +81,23 @@ struct RootView: View {
                 case .signedOut:
                     AuthFlowView().transition(.opacity)
                 case .signedIn(let user):
-                    AppShell(user: user).transition(.opacity)
+                    // Onboarding sits *inside* the signed-in phase, not before
+                    // sign-in. It is keyed to an account, and showing it to
+                    // somebody who has not signed in would mean either replaying
+                    // it after they do or marking it complete for a user we
+                    // cannot name yet.
+                    if showOnboarding(for: user) {
+                        OnboardingView(userID: user.id) {
+                            OnboardingState.markComplete(for: user.id)
+                            withAnimation(Motion.respecting(Motion.standard,
+                                                            reduceMotion)) {
+                                onboardingDone = true
+                            }
+                        }
+                        .transition(.opacity)
+                    } else {
+                        AppShell(user: user).transition(.opacity)
+                    }
                 }
             }
         }
@@ -80,6 +113,7 @@ struct RootView: View {
                 subscriptions.start(client: session.api)
             case .signedOut:
                 subscriptions.stop()
+                onboardingDone = false
             case .restoring:
                 break
             }

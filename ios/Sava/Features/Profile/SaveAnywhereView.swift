@@ -26,6 +26,8 @@ struct SaveAnywhereView: View {
     /// link offered as text so the user still has a way through.
     @State private var couldNotOpen = false
     @State private var copiedLink = false
+    @State private var showTour = false
+    @EnvironmentObject private var session: SessionStore
 
     private var shortcut: URL { AppConfig.saveShortcutURL }
 
@@ -36,6 +38,7 @@ struct SaveAnywhereView: View {
                 install
                 actionButton
                 elsewhere
+                replayTour
             }
             .screenPadding()
             .padding(.top, Space.l)
@@ -50,6 +53,31 @@ struct SaveAnywhereView: View {
             }
         }
         .tint(SavaColor.primary)
+        // Presented here rather than by flipping durable state and hoping the
+        // root re-evaluates: this screen sits several levels inside a
+        // NavigationStack, and a cover is the honest way to show a full-screen
+        // flow from it. Finishing simply dismisses — completion was already
+        // recorded the first time.
+        .fullScreenCover(isPresented: $showTour) {
+            OnboardingView(userID: session.currentUser?.id) { showTour = false }
+        }
+    }
+
+    /// The tour, kept available forever.
+    ///
+    /// Onboarding that can only ever be seen once is a document you are not
+    /// allowed to re-read. Nothing in it is single-use, and the people most
+    /// likely to want it again are the ones who skipped it.
+    private var replayTour: some View {
+        VStack(alignment: .leading, spacing: Space.m) {
+            SectionHeader(text: "The tour")
+            SavaRow(title: "Watch it again",
+                    detail: "About a minute",
+                    symbol: "sparkles.rectangle.stack") {
+                Haptics.tap()
+                showTour = true
+            }
+        }
     }
 
     // MARK: Hero

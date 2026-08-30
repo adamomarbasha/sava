@@ -14,6 +14,14 @@ final class SessionStore: ObservableObject, AuthTokenProviding {
 
     @Published private(set) var phase: Phase = .restoring
 
+    /// The signed-in account, or nil. Saves callers pattern-matching `phase`
+    /// when all they need is the user — onboarding state is keyed by user id,
+    /// so several screens ask this question.
+    var currentUser: User? {
+        if case .signedIn(let user) = phase { return user }
+        return nil
+    }
+
     private let keychain = KeychainStore()
 
     /// The shared, authenticated API client. Feature services reuse this so
