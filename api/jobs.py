@@ -9,6 +9,7 @@ particular would be sophistication for its own sake here.
 A transactional queue inside the database we already run gives us:
   * durability and crash-safety for free,
   * idempotency as a UNIQUE constraint rather than application bookkeeping,
+  * an atomic claim with no second system to agree with — see `claim_next`,
   * exactly one obvious place to inspect stuck work (`SELECT * FROM jobs`),
   * zero new services to deploy, secure, or pay for.
 
@@ -29,6 +30,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from sqlalchemy import text
 
+from .concurrency import ContentBusy, safe_rollback
 from .config import INLINE_JOBS, IS_POSTGRES, JOB_LEASE_SECONDS, JOB_MAX_ATTEMPTS
 from .db import SessionLocal
 from .models import Job
@@ -39,6 +41,10 @@ logger = logging.getLogger(__name__)
 HANDLERS: Dict[str, Callable[[Dict[str, Any], Any], Any]] = {}
 
 WORKER_ID = f"{socket.gethostname()}:{os.getpid()}"
+
+#: How many candidate rows to try before giving up a claim round. Bounded so a
+#: heavily contended queue cannot spin here; the caller polls again shortly.
+_CLAIM_ATTEMPTS = 5
 
 
 def handler(kind: str):
@@ -226,35 +232,85 @@ def claim_next(db, *, worker_id: str = WORKER_ID,
         db.commit()
         return db.query(Job).get(row.id) if row else None
 
-    # SQLite: a short IMMEDIATE transaction is sufficient — writes serialise.
-    try:
-        q = db.query(Job).filter(
-            ((Job.state == "queued") & (Job.run_after <= now))
-            | ((Job.state == "running") & (Job.locked_at < stale))
-        )
-        if blocked_names:
-            q = q.filter(
-                (Job.platform.is_(None)) | (~Job.platform.in_(blocked_names))
+    # ── SQLite (and any backend without SKIP LOCKED): compare-and-swap ──────
+    #
+    # The previous implementation read a candidate row, mutated the ORM object,
+    # and committed. That is a read and a write with a gap in between, and
+    # SQLite does not take a write lock at the SELECT — it takes one at the
+    # first write. Two threads therefore both read the same queued row, both set
+    # `state='running'`, and both commit successfully. The second commit
+    # overwrites the first, no error is raised anywhere, and the same job runs
+    # twice. The module docstring claimed an IMMEDIATE transaction made this
+    # safe; nothing ever issued one, and adding one would only have serialised
+    # this process's own threads, not a second worker process.
+    #
+    # So the claim is now a conditional UPDATE and the database decides. The
+    # candidate SELECT only proposes; the UPDATE succeeds for exactly one caller
+    # because it re-asserts, in the same statement that writes, everything the
+    # SELECT believed. `rowcount` is the verdict.
+    #
+    # `attempts` doubles as the version counter: every successful claim
+    # increments it, so a row that was claimed and released between our SELECT
+    # and our UPDATE fails the guard even though it is queued again.
+    for _ in range(_CLAIM_ATTEMPTS):
+        try:
+            q = db.query(Job).filter(
+                ((Job.state == "queued") & (Job.run_after <= now))
+                | ((Job.state == "running") & (Job.locked_at < stale))
             )
-        if kinds:
-            q = q.filter(Job.kind.in_(kinds))
-        if platforms:
-            q = q.filter(Job.platform.in_(platforms))
-        if busy:
-            q = q.filter((Job.user_id.is_(None)) | (~Job.user_id.in_(busy)))
-        job = q.order_by(Job.priority.asc(), Job.run_after.asc(), Job.id.asc()).first()
-        if not job:
+            if blocked_names:
+                q = q.filter(
+                    (Job.platform.is_(None)) | (~Job.platform.in_(blocked_names))
+                )
+            if kinds:
+                q = q.filter(Job.kind.in_(kinds))
+            if platforms:
+                q = q.filter(Job.platform.in_(platforms))
+            if busy:
+                q = q.filter((Job.user_id.is_(None)) | (~Job.user_id.in_(busy)))
+            candidate = q.order_by(Job.priority.asc(), Job.run_after.asc(),
+                                   Job.id.asc()).first()
+            if candidate is None:
+                return None
+
+            job_id = candidate.id
+            seen_state = candidate.state
+            seen_attempts = int(candidate.attempts or 0)
+            seen_locked_at = candidate.locked_at
+
+            guard = [Job.id == job_id, Job.state == seen_state,
+                     Job.attempts == seen_attempts]
+            # NULL never equals NULL, so an unlocked row needs IS NULL rather
+            # than `= None` — which would silently match nothing and make every
+            # claim of a fresh job fail.
+            if seen_locked_at is None:
+                guard.append(Job.locked_at.is_(None))
+            else:
+                guard.append(Job.locked_at == seen_locked_at)
+
+            claimed = db.query(Job).filter(*guard).update(
+                {Job.state: "running", Job.locked_by: worker_id,
+                 Job.locked_at: now, Job.attempts: seen_attempts + 1},
+                synchronize_session=False)
+            db.commit()
+
+            if claimed:
+                # Re-read rather than trusting the in-session object: the UPDATE
+                # bypassed the identity map, and the caller is about to run a
+                # handler against these values.
+                db.expire_all()
+                return db.query(Job).get(job_id)
+
+            # Lost this row to another worker. Try the next candidate — the
+            # queue is not empty just because this one is gone.
+            logger.debug("lost claim race on job %s", job_id)
+        except Exception as e:
+            # On SQLite two writers can also collide at the file lock. That is
+            # contention, not corruption: roll back and let the loop retry.
+            safe_rollback(db)
+            logger.debug("claim contention: %s", e)
             return None
-        job.state = "running"
-        job.locked_by = worker_id
-        job.locked_at = now
-        job.attempts = (job.attempts or 0) + 1
-        db.commit()
-        return job
-    except Exception as e:
-        db.rollback()
-        logger.debug("claim contention: %s", e)
-        return None
+    return None
 
 
 def _release_units(db, job: Job) -> None:
@@ -301,6 +357,23 @@ def finish(db, job: Job, *, ok: bool, error: Optional[str] = None) -> None:
     db.commit()
 
 
+def _park(db, job: Job, *, retry_after: float, reason: str) -> None:
+    """Re-queue a job without spending an attempt.
+
+    For the cases where nothing is wrong with the job: the platform is
+    throttled, or another worker is already doing this exact work. Both are
+    "come back later", and neither should count against the retry budget.
+    """
+    safe_rollback(db)
+    job.attempts = max(0, (job.attempts or 1) - 1)
+    job.state = "queued"
+    job.run_after = _now() + timedelta(seconds=retry_after)
+    job.last_error = f"parked: {reason}"[:2000]
+    job.locked_by = None
+    job.locked_at = None
+    db.commit()
+
+
 def execute(db, job: Job) -> bool:
     """Run one job's handler. Returns success."""
     fn = HANDLERS.get(job.kind)
@@ -311,6 +384,15 @@ def execute(db, job: Job) -> bool:
         payload = json.loads(job.payload or "{}")
     except Exception:
         payload = {}
+
+    # Read the identifiers now, while the session is definitely healthy.
+    #
+    # `job` is an ORM object on the session the handler is about to use. If the
+    # handler leaves that session needing a rollback, every attribute access
+    # becomes a lazy load that raises PendingRollbackError — so even *logging*
+    # `job.id` in the error path fails, before anything gets a chance to
+    # recover. Plain locals cannot be invalidated by a failed transaction.
+    job_id, job_kind = job.id, job.kind
     try:
         fn(payload, db)
         finish(db, job, ok=True)
@@ -318,18 +400,33 @@ def execute(db, job: Job) -> bool:
     except PlatformUnavailable as e:
         # Not a failure of the job — the platform is throttled. Park it and
         # give the attempt back so throttling never exhausts the retry budget.
-        job.attempts = max(0, (job.attempts or 1) - 1)
-        job.state = "queued"
-        job.run_after = _now() + timedelta(seconds=e.retry_after)
-        job.last_error = f"parked: {e}"[:2000]
-        job.locked_by = None
-        job.locked_at = None
-        db.commit()
+        _park(db, job, retry_after=e.retry_after, reason=str(e))
         logger.info("job %s parked for %.0fs (%s)", job.id, e.retry_after, e.reason)
         return False
+    except ContentBusy as e:
+        # Another worker holds the processing lease for this content. Same
+        # treatment as a throttled platform: the work is happening, just not
+        # here, so park without spending an attempt. Failing instead would
+        # eventually declare a perfectly healthy item dead for the crime of
+        # being popular.
+        _park(db, job, retry_after=e.retry_after, reason=str(e))
+        logger.info("job %s deferred: %s", job.id, e)
+        return False
     except Exception as e:
-        logger.exception("job %s (%s) failed", job.id, job.kind)
-        finish(db, job, ok=False, error=f"{e}\n{traceback.format_exc()[:1200]}")
+        # Rollback FIRST — before logging, before `finish`, before any attribute
+        # of `job` is read.
+        #
+        # A handler that died on a failed statement (an IntegrityError from a
+        # racing writer, most often) leaves the session needing a rollback, and
+        # SQLAlchemy then refuses every later operation with
+        # PendingRollbackError. That includes the lazy load behind `job.id` in a
+        # log line, which is how the recovery path itself used to raise: the job
+        # stayed 'running' until its lease expired and the log showed a rollback
+        # complaint instead of the cause. The error is already captured in `e`.
+        detail = f"{e}\n{traceback.format_exc()[:1200]}"
+        safe_rollback(db)
+        logger.exception("job %s (%s) failed", job_id, job_kind)
+        finish(db, job, ok=False, error=detail)
         return False
 
 
