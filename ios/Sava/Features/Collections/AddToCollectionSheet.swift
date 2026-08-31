@@ -14,6 +14,7 @@ struct AddToCollectionSheet: View {
 
     @State private var collections: [SavaCollection] = []
     @State private var loading = true
+    @State private var creating = false
     @State private var busyID: Int?
     @State private var addedIDs: Set<Int> = []
     @State private var showCreate = false
@@ -169,20 +170,32 @@ struct AddToCollectionSheet: View {
         }
     }
 
+    /// Create a collection and put this save in it.
+    ///
+    /// Two calls, and the second used to be swallowed by `try?` — so a
+    /// collection could be created, the save silently not added, and the sheet
+    /// would still report success and tick the row. The user closed it
+    /// believing the item was filed.
     private func create() {
         let name = newName.trimmingCharacters(in: .whitespacesAndNewlines)
         newName = ""
-        guard !name.isEmpty else { return }
+        guard !name.isEmpty, !creating else { return }
+        creating = true
         Task {
-            guard let created = try? await intelligence.createCollection(name: name) else {
-                errorMessage = "Couldn't create that collection."
-                return
+            defer { creating = false }
+            do {
+                let created = try await intelligence.createCollection(name: name)
+                try await intelligence.addToCollection(collectionID: created.id,
+                                                      bookmarkIDs: [bookmark.id])
+                addedIDs.insert(created.id)
+                errorMessage = nil
+                Haptics.success()
+                await load()
+            } catch {
+                errorMessage = (error as? APIError)?.userMessage
+                    ?? "Couldn't create “\(name)”."
+                Haptics.error()
             }
-            _ = try? await intelligence.addToCollection(collectionID: created.id,
-                                                        bookmarkIDs: [bookmark.id])
-            addedIDs.insert(created.id)
-            Haptics.success()
-            await load()
         }
     }
 }

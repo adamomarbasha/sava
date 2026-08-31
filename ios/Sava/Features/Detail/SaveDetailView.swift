@@ -24,6 +24,9 @@ struct SaveDetailView: View {
     @State private var showTranscript = false
     @State private var hasTranscript = false
     @State private var retrying = false
+    /// Set once the server has accepted the reprocess — not when it was asked.
+    @State private var queued = false
+    @State private var retryError: String?
     @State private var showPaywall = false
     @State private var summaryRevealed = false
     /// True only when this summary was generated on this request and has never
@@ -206,11 +209,20 @@ struct SaveDetailView: View {
             }
         } else if bookmark.processingState == .failed {
             VStack(alignment: .leading, spacing: Space.m) {
-                noticeLine("Sava couldn't read this one.")
-                Button(retrying ? "Queued" : "Try again") { retryProcessing() }
+                noticeLine(queued ? "Sava will read this again shortly."
+                                  : "Sava couldn't read this one.")
+                if let retryError {
+                    Text(retryError)
+                        .font(SavaType.meta)
+                        .foregroundStyle(SavaColor.danger)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Button(queued ? "Queued" : (retrying ? "Starting…" : "Try again")) {
+                    retryProcessing()
+                }
                     .font(SavaType.button)
                     .foregroundStyle(SavaColor.accent)
-                    .disabled(retrying)
+                    .disabled(retrying || queued)
             }
         } else if let message = understanding?.message {
             noticeLine(message)
@@ -219,12 +231,32 @@ struct SaveDetailView: View {
         }
     }
 
+    /// Ask the server to read this save again.
+    ///
+    /// Two faults here, both invisible. `retrying` was set and never cleared,
+    /// so a single tap disabled the button permanently — including when the
+    /// request had failed and retrying was exactly what the user needed. And
+    /// the error was swallowed by `try?`, so a refused reprocess looked
+    /// identical to an accepted one: the label changed to "Queued" and nothing
+    /// ever happened.
+    ///
+    /// "Queued" is now the truth rather than a guess: it is shown only after
+    /// the server has accepted the job.
     private func retryProcessing() {
         guard !retrying else { return }
         retrying = true
         Haptics.tap()
         Task {
-            try? await intelligence.reprocess(bookmarkID: bookmark.id, force: true)
+            do {
+                try await intelligence.reprocess(bookmarkID: bookmark.id, force: true)
+                queued = true
+                Haptics.success()
+            } catch {
+                retryError = (error as? APIError)?.userMessage
+                    ?? "Couldn't start reading this again."
+                Haptics.error()
+            }
+            retrying = false
         }
     }
 

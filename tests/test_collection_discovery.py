@@ -251,9 +251,14 @@ class TestTheButtonRespondsVisibly:
 
     def test_the_phase_is_actually_rendered(self):
         """The old flag reached only `.disabled()` on a menu item, inside a
-        `Menu` that dismisses on tap."""
+        `Menu` that dismisses on tap.
+
+        The phase is now mapped onto the shared `InlineStatus` component rather
+        than a bespoke banner, so this asserts the mapping and the render.
+        """
         code = code_of(*VIEW)
-        assert "DiscoveryBanner(phase: discovery)" in code
+        assert "discovery.actionStatus" in code
+        assert "InlineStatus(status: status" in code
 
     def test_a_repeated_tap_is_ignored_while_running(self):
         code = code_of(*VIEW)

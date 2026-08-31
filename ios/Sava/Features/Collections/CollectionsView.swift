@@ -23,10 +23,14 @@ struct CollectionsView: View {
     @State private var renaming: SavaCollection?
     @State private var renameText = ""
     @State private var pendingDelete: SavaCollection?
+    /// Guards a double-tap on Create while the first is still in flight.
+    @State private var creating = false
     /// Where discovery is, and what the user is being told about it.
     @State private var discovery: DiscoveryPhase = .idle
     /// Cleared after a moment so a result does not become permanent chrome.
     @State private var discoveryDismiss: Task<Void, Never>?
+    /// Create, rename and delete report through here.
+    @State private var reporter = ActionReporter()
 
     private var intelligence: IntelligenceService { IntelligenceService(client: session.api) }
 
@@ -38,7 +42,14 @@ struct CollectionsView: View {
     var body: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: Space.xxl) {
-                if discovery != .idle { DiscoveryBanner(phase: discovery) { retry() } }
+                if let status = discovery.actionStatus {
+                    InlineStatus(status: status,
+                                 onRetry: discovery.isFailure ? { retry() } : nil)
+                        .screenPadding()
+                }
+                if let status = reporter.status {
+                    InlineStatus(status: status).screenPadding()
+                }
                 content
             }
             .padding(.top, Space.s)
@@ -172,14 +183,25 @@ struct CollectionsView: View {
         loading = false
     }
 
+    /// Create a collection, and say whether it worked.
+    ///
+    /// This used to swallow the error with `try?` and then play
+    /// `Haptics.success()` unconditionally — a failed create buzzed as though
+    /// it had succeeded and nothing appeared, which is the app asserting
+    /// something untrue rather than merely staying quiet.
     private func create() {
         let name = newName.trimmingCharacters(in: .whitespacesAndNewlines)
         newName = ""
-        guard !name.isEmpty else { return }
+        guard !name.isEmpty, !creating else { return }
+        creating = true
         Task {
-            _ = try? await intelligence.createCollection(name: name)
+            await reporter.run(working: "Creating “\(name)”…",
+                               success: "Created “\(name)”",
+                               failure: "Couldn't create that collection.") {
+                _ = try await intelligence.createCollection(name: name)
+            }
             await load()
-            Haptics.success()
+            creating = false
         }
     }
 
@@ -189,9 +211,12 @@ struct CollectionsView: View {
         renaming = nil
         guard !name.isEmpty, name != target.name else { return }
         Task {
-            _ = try? await intelligence.renameCollection(id: target.id, name: name)
+            await reporter.run(working: "Renaming…",
+                               success: "Renamed to “\(name)”",
+                               failure: "Couldn't rename this collection.") {
+                _ = try await intelligence.renameCollection(id: target.id, name: name)
+            }
             await load()
-            Haptics.success()
         }
     }
 
@@ -200,11 +225,26 @@ struct CollectionsView: View {
         pendingDelete = nil
         // Removed from the shelf immediately; the reload confirms it. Waiting
         // for a round trip to make a deletion visible feels broken.
-        collections.removeAll { $0.id == target.id }
+        //
+        // The optimism has to be undone out loud, though. Previously a failed
+        // delete was swallowed and `load()` simply put the collection back —
+        // it vanished, reappeared, and nothing said why.
+        let restore = collections
+        withAnimation(Motion.standard) {
+            collections.removeAll { $0.id == target.id }
+        }
         Task {
-            _ = try? await intelligence.deleteCollection(id: target.id)
-            await load()
-            Haptics.tap()
+            do {
+                _ = try await intelligence.deleteCollection(id: target.id)
+                reporter.report(.success("Deleted “\(target.name)”"))
+                Haptics.tap()
+                await load()
+            } catch {
+                withAnimation(Motion.standard) { collections = restore }
+                reporter.report(.failure((error as? APIError)?.userMessage
+                                         ?? "Couldn't delete this collection."))
+                Haptics.error()
+            }
         }
     }
 
@@ -318,84 +358,25 @@ struct CollectionCard: View {
     }
 }
 
-/// What Sava is doing, said in place.
+/// The discovery phase, as an `ActionStatus`.
 ///
-/// Inline at the top of the grid rather than a modal or a lone spinner: the
-/// answer is about *this list*, and the new groups appear directly underneath
-/// it. A HUD would cover the very thing the user is waiting to see.
-///
-/// The three running phases share one layout so advancing between them changes
-/// only the words — no reflow, no spinner appearing and disappearing.
-private struct DiscoveryBanner: View {
-    let phase: DiscoveryPhase
-    let onRetry: () -> Void
-
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-    var body: some View {
-        HStack(spacing: Space.m) {
-            mark
-            Text(phase.message ?? "")
-                .font(SavaType.callout)
-                .foregroundStyle(textColor)
-                .fixedSize(horizontal: false, vertical: true)
-                .contentTransition(.opacity)
-            Spacer(minLength: Space.s)
-            if phase.isFailure {
-                Button("Try again", action: onRetry)
-                    .font(SavaType.caption)
-                    .foregroundStyle(SavaColor.onAccentTint)
-                    .padding(.horizontal, Space.m)
-                    .frame(minHeight: 34)
-                    .background(SavaColor.accentTint, in: Capsule())
-                    .buttonStyle(.plain)
-            }
-        }
-        .padding(Space.m)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(SavaColor.surface,
-                    in: RoundedRectangle(cornerRadius: Radius.control, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
-            .strokeBorder(borderColor, lineWidth: 0.5))
-        .screenPadding()
-        .transition(.opacity.combined(with: .move(edge: .top)))
-        .animation(Motion.respecting(Motion.standard, reduceMotion), value: phase)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(phase.message ?? "")
-        .accessibilityAddTraits(phase.isRunning ? .updatesFrequently : [])
-    }
-
-    @ViewBuilder private var mark: some View {
-        switch phase {
+/// `DiscoveryBanner` used to be its own view with its own glyphs, colours and
+/// layout — a second implementation of "say what happened" that would drift
+/// from the first the moment either was touched. It is now a mapping onto
+/// `InlineStatus`, so there is one component and one set of rules about which
+/// results fade.
+extension DiscoveryPhase {
+    var actionStatus: ActionStatus? {
+        switch self {
+        case .idle: return nil
+        case .starting, .analyzing, .grouping, .saving:
+            return .working(message ?? "")
         case .complete:
-            Image(systemName: "checkmark.circle.fill")
-                .font(.system(size: 16))
-                .foregroundStyle(SavaColor.accentTint)
-        case .failed:
-            Image(systemName: "exclamationmark.triangle")
-                .font(.system(size: 15))
-                .foregroundStyle(SavaColor.danger)
+            return .success(message ?? "")
         case .noNewGroups, .notEnoughContent:
-            Image(systemName: "sparkle.magnifyingglass")
-                .font(.system(size: 15))
-                .foregroundStyle(SavaColor.tertiary)
-        default:
-            ProgressView()
-                .controlSize(.small)
-                .tint(SavaColor.secondary)
-                .frame(width: 16, height: 16)
+            return .info(message ?? "")
+        case .failed:
+            return .failure(message ?? "")
         }
-    }
-
-    private var textColor: Color {
-        switch phase {
-        case .failed: return SavaColor.primary
-        case .noNewGroups, .notEnoughContent: return SavaColor.secondary
-        default: return SavaColor.primary
-        }
-    }
-
-    private var borderColor: Color {
-        phase.isFailure ? SavaColor.danger.opacity(0.4) : SavaColor.hairline
     }
 }
