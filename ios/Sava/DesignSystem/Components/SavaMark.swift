@@ -28,9 +28,24 @@ struct SavaMark: View {
             .fill(SavaColor.accent)
             .frame(width: size, height: size)
             .overlay {
+                // A template, tinted with `onAccent` — not a fixed-colour PNG.
+                //
+                // The artwork is a single near-black silhouette (#0B0C0D), which
+                // is correct on the citron tile of dark mode and invisible in
+                // light mode, where `accent` inverts to ink and the mark became
+                // a black glyph on a black tile. It looked like the logo "did
+                // not switch"; in fact the tile switched and the glyph could
+                // not, because a PNG has no appearance to switch to.
+                //
+                // `onAccent` is defined as "what sits on the accent fill" and
+                // already inverts with it, so tinting the silhouette makes the
+                // mark correct in both appearances from one asset, and it
+                // re-resolves with the trait collection like every other token.
                 Image("SavaMark")
+                    .renderingMode(.template)
                     .resizable()
                     .scaledToFit()
+                    .foregroundStyle(SavaColor.onAccent)
                     // Matches the optical inset used when generating the app
                     // icon, so the two are the same composition.
                     .frame(width: size * 0.56)

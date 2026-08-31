@@ -34,18 +34,26 @@ enum AppTheme: String, CaseIterable, Identifiable {
         }
     }
 
-    /// `.unspecified` hands the decision back to the system.
-    var interfaceStyle: UIUserInterfaceStyle {
-        switch self {
-        case .automatic: return .unspecified
-        case .light:     return .light
-        case .dark:      return .dark
-        }
+    /// The shared representation. `AppTheme` is the app's UI-facing enum —
+    /// labels, symbols, the picker — while the *preference* itself lives in
+    /// `SavaShared` so the share extension can read the same value.
+    var preference: AppearancePreference {
+        AppearancePreference(rawValue: rawValue) ?? .dark
     }
+
+    /// `.unspecified` hands the decision back to the system.
+    var interfaceStyle: UIUserInterfaceStyle { preference.interfaceStyle }
 
     /// The stored preference. Read wherever it is needed; written only by the
     /// picker in Profile.
-    static let storageKey = "sava.appearance"
+    static let storageKey = AppearancePreference.storageKey
+
+    /// The app-group store, so the app and the share extension read one value.
+    ///
+    /// This was `UserDefaults.standard`, which is per-process — the extension
+    /// could not see the preference and rendered in the system appearance
+    /// regardless of what the user had chosen.
+    static var store: UserDefaults { AppearancePreference.store }
 
     /// Apply the appearance to the whole app, not just the SwiftUI tree.
     ///
@@ -70,20 +78,19 @@ enum AppTheme: String, CaseIterable, Identifiable {
     /// view.
     @MainActor
     static func apply(_ theme: AppTheme, animated: Bool = true) {
+        let style = theme.interfaceStyle
         let windows = UIApplication.shared.connectedScenes
             .compactMap { $0 as? UIWindowScene }
             .flatMap(\.windows)
 
-        for window in windows where window.overrideUserInterfaceStyle != theme.interfaceStyle {
+        for window in windows where window.overrideUserInterfaceStyle != style {
             guard animated, !UIAccessibility.isReduceMotionEnabled else {
-                window.overrideUserInterfaceStyle = theme.interfaceStyle
+                window.overrideUserInterfaceStyle = style
                 continue
             }
             UIView.transition(with: window, duration: 0.28,
                               options: [.transitionCrossDissolve, .allowAnimatedContent],
-                              animations: {
-                window.overrideUserInterfaceStyle = theme.interfaceStyle
-            })
+                              animations: { window.overrideUserInterfaceStyle = style })
         }
     }
 }

@@ -3,6 +3,14 @@ import SwiftUI
 @main
 struct SavaApp: App {
     init() {
+        // Before anything reads the preference.
+        //
+        // The appearance moved from `UserDefaults.standard` to the app group so
+        // the share extension can see it. `@AppStorage` reads the group store
+        // directly, so without this an upgrading user's stored choice — still
+        // sitting in the old per-process store — is simply not found, and they
+        // silently revert to the default on first launch of this build.
+        AppearancePreference.migrateIfNeeded()
         SavaAppearance.apply()
         // So the share extension talks to the same backend this build does.
         AppConfig.publishOriginForExtension()

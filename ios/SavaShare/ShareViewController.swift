@@ -29,7 +29,23 @@ final class ShareViewController: UIViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .clear
+        applyAppearance()
         Task { await handleShare() }
+    }
+
+    /// Honour the user's Sava appearance in this process too.
+    ///
+    /// The extension runs in its own process with its own window, so nothing
+    /// the app does at runtime reaches it. The preference used to live in
+    /// `UserDefaults.standard`, which is per-process, so this could not even be
+    /// read: somebody pinned to Dark, on a phone set to Light, got a light
+    /// share sheet. It lives in the app group now, and is applied here.
+    ///
+    /// Set on this view controller rather than on the window: an extension does
+    /// not own the host app's window, and overriding it would change the
+    /// appearance of whatever presented the share sheet.
+    private func applyAppearance() {
+        overrideUserInterfaceStyle = AppearancePreference.current.interfaceStyle
     }
 
     private func handleShare() async {

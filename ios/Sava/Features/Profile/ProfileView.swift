@@ -6,7 +6,8 @@ import SwiftUI
 /// not a page of cards. The one thing worth explaining — how to put Sava on the
 /// Action Button — gets a sentence, and everything else is a row.
 struct ProfileView: View {
-    @AppStorage(AppTheme.storageKey) private var themeRaw = AppTheme.dark.rawValue
+    @AppStorage(AppTheme.storageKey, store: AppTheme.store)
+    private var themeRaw = AppTheme.dark.rawValue
     let user: User
 
     @EnvironmentObject private var session: SessionStore

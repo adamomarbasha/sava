@@ -16,7 +16,8 @@ struct RootView: View {
     /// only what makes the current screen swap.
     @State private var onboardingDone = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @AppStorage(AppTheme.storageKey) private var themeRaw = AppTheme.dark.rawValue
+    @AppStorage(AppTheme.storageKey, store: AppTheme.store)
+    private var themeRaw = AppTheme.dark.rawValue
 
     /// Dark remains the default — the palette and every contrast ratio were
     /// authored against ink — but it is now a default rather than a lock.
@@ -127,6 +128,19 @@ struct RootView: View {
         // would read as a flash.
         .onAppear { AppTheme.apply(theme, animated: false) }
         .onChange(of: theme) { _, new in AppTheme.apply(new) }
+        // Re-apply when a scene activates.
+        //
+        // `apply` walks the windows that exist *at the moment it is called*, so
+        // any window created afterwards — a scene connecting late, a second
+        // scene, the app returning from the background with its window
+        // rebuilt — keeps the system appearance while the rest of the app
+        // honours the preference. That is a genuinely stale surface rather
+        // than a redraw problem, and re-asserting on activation closes it
+        // without polling.
+        .onReceive(NotificationCenter.default.publisher(
+            for: UIScene.didActivateNotification)) { _ in
+            AppTheme.apply(theme, animated: false)
+        }
         .task { await devFlipAppearanceIfRequested() }
         .animation(Motion.respecting(Motion.standard, reduceMotion), value: session.phase)
         .task { await session.restore() }
