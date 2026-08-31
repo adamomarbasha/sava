@@ -7,7 +7,7 @@ import Foundation
 /// success, "found nothing", and a server error were indistinguishable, and all
 /// three looked like the button doing nothing.
 struct CollectionDiscovery: Decodable {
-    /// `ok`, `empty_library`, `not_enough_content`.
+    /// `ok`, `empty_library`, `not_enough_content`, `awaiting_understanding`.
     let status: String
     let savesConsidered: Int
     /// Groupings the algorithm proposed before reconciliation.
@@ -44,6 +44,11 @@ struct CollectionDiscovery: Decodable {
 
     /// Nothing moved. Not a failure — the library simply has no new patterns in
     /// it, which is the honest and common answer.
+    /// The library has saves, but almost none of them have been read yet, so
+    /// there is nothing for the grouping to work from. Distinct from "no
+    /// patterns" — the fix is processing, not a different threshold.
+    var awaitingUnderstanding: Bool { status == "awaiting_understanding" }
+
     var foundNothingNew: Bool {
         status == "ok" && created == 0 && updated == 0 && removed == 0
     }
@@ -63,6 +68,8 @@ enum DiscoveryPhase: Equatable {
     case complete(created: Int, updated: Int)
     case noNewGroups
     case notEnoughContent(minimum: Int)
+    /// Saves exist, but Sava has not finished reading them.
+    case awaitingUnderstanding
     case failed(String)
 
     var isRunning: Bool {
@@ -93,6 +100,8 @@ enum DiscoveryPhase: Equatable {
             return "No new groups yet"
         case .notEnoughContent:
             return "Save a few more things and Sava can find patterns"
+        case .awaitingUnderstanding:
+            return "Sava is still reading your saves — try again shortly"
         case .failed(let why):
             return why
         }
@@ -100,7 +109,8 @@ enum DiscoveryPhase: Equatable {
 
     var isTerminal: Bool {
         switch self {
-        case .complete, .noNewGroups, .notEnoughContent, .failed: return true
+        case .complete, .noNewGroups, .notEnoughContent, .awaitingUnderstanding,
+             .failed: return true
         default: return false
         }
     }

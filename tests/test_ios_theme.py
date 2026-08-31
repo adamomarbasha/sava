@@ -176,33 +176,45 @@ class TestApplication:
 
 # ─── The logo ────────────────────────────────────────────────────────────────
 
-class TestTheMarkInverts:
+class TestTheMarkIsAConstant:
+    """This class used to be `TestTheMarkInverts`, and it asserted the bug.
 
-    def test_the_glyph_is_a_template(self):
-        """A fixed-colour PNG has no appearance to switch to. The artwork is a
-        single near-black silhouette, correct on citron and invisible on ink."""
-        assert '"template-rendering-intent" : "template"' in read(*MARK_ASSET)
+    Its premise was that the artwork is "a single near-black silhouette", so
+    template rendering could tint it per appearance for free. That premise was
+    measured wrong. Sampling the opaque pixels of `SavaMark@3x.png` shows two
+    tones — a near-black body and a white detail inside it, the latter about a
+    tenth of the mark. `.renderingMode(.template)` discards colour and keeps
+    only alpha, so it painted both tones the same tint and collapsed the mark
+    into a featureless blob. That is what "the logo looks wrong" was.
 
-    def test_it_is_rendered_as_one(self):
+    A logo is not a themed component. It is drawn as authored, in both
+    appearances, exactly as `AppIcon.png` has it.
+    """
+
+    def test_the_artwork_is_drawn_not_tinted(self):
         code = code_of(*MARK)
-        assert ".renderingMode(.template)" in code
+        assert ".renderingMode(.original)" in code
+        assert ".renderingMode(.template)" not in code
 
-    def test_it_is_tinted_with_the_token_that_inverts_with_the_tile(self):
-        """`onAccent` is defined as "what sits on the accent fill" and already
-        trades places with it."""
+    def test_the_glyph_is_not_recoloured(self):
         code = code_of(*MARK)
-        assert ".foregroundStyle(SavaColor.onAccent)" in code
+        glyph = code.split('Image("SavaMark")')[1][:400]
+        assert ".foregroundStyle" not in glyph
+        assert "SavaColor.onAccent" not in code
 
-    def test_the_tile_and_the_glyph_use_paired_tokens(self):
+    def test_the_tile_is_the_canonical_citron(self):
+        """Fixed, not `SavaColor.accent` — a token could be retuned for
+        contrast on some future screen and would take the logo with it."""
         code = code_of(*MARK)
-        assert ".fill(SavaColor.accent)" in code
-        assert ".foregroundStyle(SavaColor.onAccent)" in code
+        assert "0xD6FF00" in code
+        assert ".fill(SavaColor.accent)" not in code
+
+    def test_the_asset_declares_no_template_intent(self):
+        assert "template" not in read(*MARK_ASSET)
 
     def test_the_asset_ships_no_appearance_variants(self):
-        """One template beats two PNGs: the variants would have to be kept in
-        step with a palette they cannot see."""
-        content = read(*MARK_ASSET)
-        assert "appearances" not in content
+        """The mark does not vary by appearance, so there is nothing to vary."""
+        assert "appearances" not in read(*MARK_ASSET)
 
 
 # ─── Tokens are dynamic, not captured ────────────────────────────────────────

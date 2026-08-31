@@ -274,7 +274,12 @@ class TestTheButtonRespondsVisibly:
         code = code_of(*VIEW)
         block = code[code.index("private func scheduleDiscoveryDismiss"):]
         block = block[:block.index("private func retry")]
-        assert "case .complete, .noNewGroups: break" in block
+        # Assert the arm each state lands in, not its spelling — the list
+        # grows (`.awaitingUnderstanding` joined it) and a literal match would
+        # fail on a change that is exactly what the test wants.
+        break_arm = block[block.index("case ."):block.index("break")]
+        for state in (".complete", ".noNewGroups", ".awaitingUnderstanding"):
+            assert state in break_arm, f"{state} should not auto-dismiss"
 
     def test_nothing_claims_a_group_before_the_server_says_so(self):
         """The running phases are cosmetic pacing; only the response decides

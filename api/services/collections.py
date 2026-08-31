@@ -507,6 +507,23 @@ def rebuild_auto_collections(db, user_id: int, *,
                 "saves_considered": 0, "created": 0, "updated": 0, "removed": 0,
                 "timings_ms": {**timings, "total": int((time.monotonic() - started) * 1000)}}
 
+    # How much of the library carries anything to group *on*.
+    #
+    # Every tier reads a signal: the creator, a hashtag in the title, an entity
+    # or topic from the understanding pass. A save whose metadata never landed
+    # has none of them, and no threshold change can group it — it is invisible
+    # to the algorithm by construction.
+    #
+    # This is the reported production failure. Thirteen real saves returned
+    # `items_covered: 0`, and reproducing that shape locally gave 0 candidates
+    # in all five tiers because every save had creator=None, no title and no
+    # understanding row. The same thirteen with metadata produce three groups
+    # covering nine of them. The grouping was never the problem; the saves had
+    # not been read.
+    with_signal = sum(1 for i in library
+                      if i.creator or i.topics or i.entities or i.hashtags)
+    timings["signals"] = with_signal
+
     # Below the minimum cluster size no grouping can exist, and saying "no new
     # groups" to somebody with two saves is a non-answer — it sounds like Sava
     # looked and found nothing, when in fact there was nothing to look at.
@@ -607,13 +624,29 @@ def rebuild_auto_collections(db, user_id: int, *,
 
     _queue_cover_selection(db, [r["id"] for r in report])
 
+    # Nothing to group *yet*, as distinct from nothing to group.
+    #
+    # "No new groups" implies Sava looked at the content and found no pattern.
+    # When almost nothing has been read, the honest answer is that it has not
+    # looked yet — and the fix is processing, not a lower threshold.
+    if not report and with_signal * 2 < len(library):
+        timings["total"] = int((time.monotonic() - started) * 1000)
+        logger.info("regroup user=%s saves=%s with_signal=%s -> awaiting understanding",
+                    user_id, len(library), with_signal)
+        return {"status": "awaiting_understanding", "collections": [],
+                "saves_considered": len(library), "with_signal": with_signal,
+                "proposed": 0, "created": 0, "updated": 0, "removed": 0,
+                "timings_ms": timings}
+
     timings["total"] = int((time.monotonic() - started) * 1000)
     # Counts, not content: how much was looked at and what changed. No titles,
     # no captions, no transcripts.
-    logger.info("regrouped user=%s saves=%s proposed=%s created=%s updated=%s "
-                "removed=%s timings=%s",
-                user_id, len(library), len(candidates), created_count,
-                updated_count, removed_count, timings)
+    # Counts and reasons, never content: how much was looked at, how much of it
+    # carried a usable signal, and what changed.
+    logger.info("regrouped user=%s saves=%s with_signal=%s proposed=%s created=%s "
+                "updated=%s removed=%s timings=%s",
+                user_id, len(library), with_signal, len(candidates),
+                created_count, updated_count, removed_count, timings)
 
     return {"status": "ok", "collections": report,
             "saves_considered": len(library),

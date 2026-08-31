@@ -79,10 +79,13 @@ extension IntelligenceService {
             let thread_id: Int?
             let collection_id: Int?
         }
-        return events(Endpoint.json(
-            "api/ask/stream", method: .post,
-            body: Body(question: question, mode: mode.rawValue,
-                       thread_id: threadID, collection_id: collectionID)))
+        let body = Body(question: question, mode: mode.rawValue,
+                        thread_id: threadID, collection_id: collectionID)
+        return withFallback(
+            Endpoint.json("api/ask/stream", method: .post, body: body),
+            legacy: { try await askSava(question: question, mode: mode,
+                                        threadID: threadID,
+                                        collectionID: collectionID) })
     }
 
     /// `POST /api/bookmarks/{id}/ask/stream` — one item, streamed.
@@ -93,9 +96,77 @@ extension IntelligenceService {
             let mode: String
             let thread_id: Int?
         }
-        return events(Endpoint.json(
-            "api/bookmarks/\(bookmarkID)/ask/stream", method: .post,
-            body: Body(question: question, mode: mode.rawValue, thread_id: threadID)))
+        let body = Body(question: question, mode: mode.rawValue, thread_id: threadID)
+        return withFallback(
+            Endpoint.json("api/bookmarks/\(bookmarkID)/ask/stream",
+                          method: .post, body: body),
+            legacy: { try await askThis(bookmarkID: bookmarkID, question: question,
+                                        mode: mode, threadID: threadID) })
+    }
+
+    /// Fall back to the non-streaming endpoint when streaming is not there.
+    ///
+    /// ── Why a client must not assume the server matches it ──────────────
+    ///
+    /// Observed against production: `POST /api/ask/stream` returned **404**
+    /// while `POST /api/ask` returned 403 (auth required, i.e. the route
+    /// exists). The backend had not been deployed since streaming landed, so
+    /// every Ask on the shipped app hit a 404, which `APIClient` correctly
+    /// mapped to `.notFound` — and the user saw "We couldn't find that."
+    ///
+    /// A client and a server do not deploy in lockstep, and an app already on
+    /// a phone cannot wait for one. So a missing stream degrades to the older
+    /// contract instead of failing: the answer arrives whole rather than
+    /// progressively, which is the honest consequence of talking to a server
+    /// that cannot stream.
+    ///
+    /// Only `.notFound` triggers it. A 401, a 402 or a 500 mean something the
+    /// user needs to hear, and retrying those against a second endpoint would
+    /// double the work and bury the real error.
+    private func withFallback(
+        _ endpoint: Endpoint,
+        legacy: @escaping () async throws -> AskAnswer
+    ) -> AsyncThrowingStream<AskEvent, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                var sawAnything = false
+                do {
+                    for try await event in events(endpoint) {
+                        sawAnything = true
+                        continuation.yield(event)
+                    }
+                    continuation.finish()
+                } catch {
+                    // Mid-stream failures are real; only a refusal to start
+                    // can be a missing route.
+                    guard !sawAnything,
+                          case APIError.notFound = error else {
+                        continuation.finish(throwing: error)
+                        return
+                    }
+                    do {
+                        let answer = try await legacy()
+                        if let id = answer.threadID {
+                            continuation.yield(.meta(threadID: id))
+                        }
+                        continuation.yield(.sources(sources: answer.sources,
+                                                    groundedIn: answer.groundedIn))
+                        if let text = answer.answer, !text.isEmpty {
+                            continuation.yield(.token(text: text))
+                            continuation.yield(.done(answer))
+                        } else {
+                            continuation.yield(.failed(
+                                message: answer.message ?? "Sava couldn't answer that.",
+                                reason: "no_answer"))
+                        }
+                        continuation.finish()
+                    } catch {
+                        continuation.finish(throwing: error)
+                    }
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
     }
 
     /// Decode each SSE payload into an `AskEvent`.

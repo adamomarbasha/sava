@@ -296,6 +296,8 @@ struct CollectionsView: View {
     /// The result, as something to say.
     private func phase(for result: CollectionDiscovery) -> DiscoveryPhase {
         switch result.status {
+        case "awaiting_understanding":
+            return .awaitingUnderstanding
         case "not_enough_content":
             return .notEnoughContent(minimum: result.minimum ?? 3)
         case "empty_library":
@@ -314,7 +316,7 @@ struct CollectionsView: View {
     /// button on it; both stay until the next attempt.
     private func scheduleDiscoveryDismiss() {
         switch discovery {
-        case .complete, .noNewGroups: break
+        case .complete, .noNewGroups, .awaitingUnderstanding: break
         default: return
         }
         discoveryDismiss = Task { @MainActor in
@@ -373,7 +375,7 @@ extension DiscoveryPhase {
             return .working(message ?? "")
         case .complete:
             return .success(message ?? "")
-        case .noNewGroups, .notEnoughContent:
+        case .noNewGroups, .notEnoughContent, .awaitingUnderstanding:
             return .info(message ?? "")
         case .failed:
             return .failure(message ?? "")

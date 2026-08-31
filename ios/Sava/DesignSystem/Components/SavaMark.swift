@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 /// Sava's mark, as it appears inside the app.
 ///
@@ -23,29 +24,36 @@ struct SavaMark: View {
     /// subtly wrong beside the real thing.
     private var corner: CGFloat { size * 0.2237 }
 
+    /// Taken from `AppIcon.png`, which is the canonical artwork.
+    private static let tile = Color(uiColor: UIColor(hex: 0xD6FF00))
+
     var body: some View {
         RoundedRectangle(cornerRadius: corner, style: .continuous)
-            .fill(SavaColor.accent)
+            .fill(Self.tile)
             .frame(width: size, height: size)
             .overlay {
-                // A template, tinted with `onAccent` — not a fixed-colour PNG.
+                // The artwork as drawn, not as a template.
                 //
-                // The artwork is a single near-black silhouette (#0B0C0D), which
-                // is correct on the citron tile of dark mode and invisible in
-                // light mode, where `accent` inverts to ink and the mark became
-                // a black glyph on a black tile. It looked like the logo "did
-                // not switch"; in fact the tile switched and the glyph could
-                // not, because a PNG has no appearance to switch to.
+                // `AppIcon.png` is the canonical lockup: citron #D6FF00 with
+                // the mark on it. The mark itself is **two-tone** — a near-black
+                // body with a white detail inside it — and
+                // `.renderingMode(.template)` flattens colour to a single tint,
+                // which erases that detail and leaves a plain silhouette. That
+                // is what made the logo read as a generic symbol rather than as
+                // Sava.
                 //
-                // `onAccent` is defined as "what sits on the accent fill" and
-                // already inverts with it, so tinting the silhouette makes the
-                // mark correct in both appearances from one asset, and it
-                // re-resolves with the trait collection like every other token.
+                // (The earlier check for interior *alpha* knockouts found none
+                // and wrongly concluded the glyph was solid; the detail is
+                // carried in colour, not transparency. Measured luminance
+                // across opaque pixels spans 3 to 255.)
+                //
+                // So: original rendering, on a fixed citron tile. A logo is a
+                // constant — it does not invert with the theme, and both of its
+                // colours are baked into the asset exactly as the icon has them.
                 Image("SavaMark")
-                    .renderingMode(.template)
+                    .renderingMode(.original)
                     .resizable()
                     .scaledToFit()
-                    .foregroundStyle(SavaColor.onAccent)
                     // Matches the optical inset used when generating the app
                     // icon, so the two are the same composition.
                     .frame(width: size * 0.56)

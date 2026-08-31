@@ -129,7 +129,13 @@ struct RootView: View {
         // appearance to cross-fade from, and dissolving into the first frame
         // would read as a flash.
         .onAppear { AppTheme.apply(theme, animated: false) }
-        .onChange(of: theme) { _, new in AppTheme.apply(new) }
+        .onChange(of: theme) { _, new in
+            AppTheme.apply(new)
+            // Mirror into the app group so the share extension, a separate
+            // process, honours the same choice. `@AppStorage` only writes the
+            // local store.
+            AppearancePreference.publish(new.preference)
+        }
         // Re-apply when a scene activates.
         //
         // `apply` walks the windows that exist *at the moment it is called*, so
