@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from collections import Counter
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -484,15 +485,36 @@ def rebuild_auto_collections(db, user_id: int, *,
     they never invent a name. Left in place, behind the flag, for the day
     embedding coverage is high enough to be worth revisiting.
     """
-    from .grouping import MAX_COLLECTIONS, discover
+    from .grouping import MAX_COLLECTIONS, MIN_MEMBERS, discover
+
+    started = time.monotonic()
+    timings: Dict[str, int] = {}
+
+    def _mark(name: str, since: float) -> float:
+        timings[name] = int((time.monotonic() - since) * 1000)
+        return time.monotonic()
 
     max_collections = max_collections or MAX_COLLECTIONS
+    phase = started
     rejected, removed = _feedback(db, user_id)
+    phase = _mark("feedback", phase)
     candidates, library = discover(db, user_id, limit=max_collections,
                                    rejected=rejected, removed=removed)
+    phase = _mark("discover", phase)
 
     if not library:
-        return {"status": "empty_library", "collections": []}
+        return {"status": "empty_library", "collections": [],
+                "saves_considered": 0, "created": 0, "updated": 0, "removed": 0,
+                "timings_ms": {**timings, "total": int((time.monotonic() - started) * 1000)}}
+
+    # Below the minimum cluster size no grouping can exist, and saying "no new
+    # groups" to somebody with two saves is a non-answer — it sounds like Sava
+    # looked and found nothing, when in fact there was nothing to look at.
+    if len(library) < MIN_MEMBERS:
+        return {"status": "not_enough_content", "collections": [],
+                "saves_considered": len(library), "minimum": MIN_MEMBERS,
+                "created": 0, "updated": 0, "removed": 0,
+                "timings_ms": {**timings, "total": int((time.monotonic() - started) * 1000)}}
 
     if use_clusters and len(candidates) < max_collections:
         covered = {m for c in candidates for m in c.members}
@@ -527,9 +549,12 @@ def rebuild_auto_collections(db, user_id: int, *,
     existing = {c.signature: c for c in db.query(Collection).filter(
         Collection.user_id == user_id, Collection.kind == "auto",
         Collection.signature.isnot(None)).all()}
+    existing_ids = {c.id for c in existing.values()}
 
     kept_signatures = set()
     report: List[Dict[str, Any]] = []
+    created_count = 0
+    updated_count = 0
 
     for cand in candidates:
         if cand.label.strip().lower() in manual_names:
@@ -546,6 +571,7 @@ def rebuild_auto_collections(db, user_id: int, *,
             db.add(coll)
             db.commit()
             db.refresh(coll)
+            created_count += 1
         elif coll.name != cand.label and _name_free(db, user_id, cand.label, coll.id):
             # The grouping is the same; the best available name for it improved
             # (an acronym expanded, say). Follow it rather than freezing the
@@ -553,26 +579,49 @@ def rebuild_auto_collections(db, user_id: int, *,
             coll.name = cand.label
             db.commit()
 
-        _sync_members(db, coll, cand.members)
+        # `updated` means an *existing* group's membership moved. A group
+        # created moments ago always "changes" when its members are written, and
+        # counting that as an update produced "2 new groups, 2 updated" for two
+        # brand-new groups.
+        was_existing = coll.id in existing_ids
+        changed = _sync_members(db, coll, cand.members)
+        if changed and was_existing:
+            updated_count += 1
         _set_cover(db, coll)
         report.append({"id": coll.id, "name": coll.name, "size": len(cand.members),
-                       "source": cand.source, "signature": cand.signature})
+                       "source": cand.source, "signature": cand.signature,
+                       "created": not was_existing})
 
     # A signature that no longer describes anything is retired. Its feedback
     # rows stay, so a rejection still holds if the grouping ever returns.
+    removed_count = 0
     for signature, coll in existing.items():
         if signature in kept_signatures:
             continue
         db.query(CollectionItem).filter(
             CollectionItem.collection_id == coll.id).delete()
         db.delete(coll)
+        removed_count += 1
     db.commit()
+    phase = _mark("reconcile", phase)
 
     _queue_cover_selection(db, [r["id"] for r in report])
 
+    timings["total"] = int((time.monotonic() - started) * 1000)
+    # Counts, not content: how much was looked at and what changed. No titles,
+    # no captions, no transcripts.
+    logger.info("regrouped user=%s saves=%s proposed=%s created=%s updated=%s "
+                "removed=%s timings=%s",
+                user_id, len(library), len(candidates), created_count,
+                updated_count, removed_count, timings)
+
     return {"status": "ok", "collections": report,
             "saves_considered": len(library),
-            "items_covered": len({m for c in candidates for m in c.members})}
+            "items_covered": len({m for c in candidates for m in c.members}),
+            "proposed": len(candidates),
+            "created": created_count, "updated": updated_count,
+            "removed": removed_count,
+            "timings_ms": timings}
 
 
 def _queue_cover_selection(db, collection_ids: List[int]) -> None:
@@ -616,26 +665,33 @@ def _unique_name(db, user_id: int, base: str) -> str:
     return name
 
 
-def _sync_members(db, coll: Collection, wanted: set) -> None:
+def _sync_members(db, coll: Collection, wanted: set) -> bool:
     """Make membership match, without disturbing anything the user added.
 
     An item the user put in by hand stays even if the signal no longer picks
     it, and only rows this process added are ever taken away.
+
+    Returns whether anything actually moved, so the caller can tell the user
+    "no new groups" instead of implying work happened when nothing changed.
     """
     rows = db.query(CollectionItem).filter(
         CollectionItem.collection_id == coll.id).all()
     current_auto = {r.bookmark_id for r in rows if r.added_by == "auto"}
     manual = {r.bookmark_id for r in rows if r.added_by != "auto"}
 
-    for bid in wanted - current_auto - manual:
+    added = wanted - current_auto - manual
+    dropped = current_auto - wanted
+
+    for bid in added:
         db.add(CollectionItem(collection_id=coll.id, bookmark_id=bid,
                               added_by="auto", score=1.0))
-    for bid in current_auto - wanted:
+    for bid in dropped:
         db.query(CollectionItem).filter(
             CollectionItem.collection_id == coll.id,
             CollectionItem.bookmark_id == bid,
             CollectionItem.added_by == "auto").delete()
     db.commit()
+    return bool(added or dropped)
 
 
 def list_collections(db, user_id: int) -> List[Dict[str, Any]]:

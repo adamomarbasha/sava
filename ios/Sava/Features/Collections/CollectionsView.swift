@@ -23,7 +23,10 @@ struct CollectionsView: View {
     @State private var renaming: SavaCollection?
     @State private var renameText = ""
     @State private var pendingDelete: SavaCollection?
-    @State private var rebuilding = false
+    /// Where discovery is, and what the user is being told about it.
+    @State private var discovery: DiscoveryPhase = .idle
+    /// Cleared after a moment so a result does not become permanent chrome.
+    @State private var discoveryDismiss: Task<Void, Never>?
 
     private var intelligence: IntelligenceService { IntelligenceService(client: session.api) }
 
@@ -35,6 +38,7 @@ struct CollectionsView: View {
     var body: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: Space.xxl) {
+                if discovery != .idle { DiscoveryBanner(phase: discovery) { retry() } }
                 content
             }
             .padding(.top, Space.s)
@@ -52,7 +56,7 @@ struct CollectionsView: View {
                     Button { Task { await rebuild() } } label: {
                         Label("Look for new groupings", systemImage: "arrow.clockwise")
                     }
-                    .disabled(rebuilding)
+                    .disabled(discovery.isRunning)
                 } label: {
                     Image(systemName: "ellipsis")
                         .font(.system(size: 15, weight: .semibold))
@@ -61,7 +65,10 @@ struct CollectionsView: View {
             }
         }
         .tint(SavaColor.primary)
-        .task { await load() }
+        .task {
+            await load()
+            if DevFlags.autoRegroup { await rebuild() }
+        }
         .refreshable { await load() }
         .alert("New collection", isPresented: $showCreate) {
             TextField("Name", text: $newName)
@@ -201,13 +208,84 @@ struct CollectionsView: View {
         }
     }
 
+    /// Look for groupings, and say what is happening the whole way through.
+    ///
+    /// The old version set a `rebuilding` flag that was never rendered, threw
+    /// the result away with `_ = try?`, and reloaded the list *before* the
+    /// background job it had just queued could have run. Tapping the button
+    /// therefore produced no indicator, no result, and no error — it genuinely
+    /// did nothing observable.
     private func rebuild() async {
-        guard !rebuilding else { return }
-        rebuilding = true
+        guard !discovery.isRunning else { return }
+        discoveryDismiss?.cancel()
         Haptics.tap()
-        _ = try? await intelligence.rebuildCollections()
-        await load()
-        rebuilding = false
+
+        // The phases are advanced on a timer rather than reported by the
+        // server. Being honest about that: the call is a single synchronous
+        // request that takes tens of milliseconds, so there is no progress to
+        // stream — these exist so a fast operation still *reads* as work rather
+        // than as a flicker, and they are cosmetic pacing, not fake progress.
+        // Nothing here claims a group was found; only the result does that.
+        withAnimation(Motion.gentle) { discovery = .starting }
+        let pacing = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(220))
+            if discovery.isRunning { withAnimation(Motion.gentle) { discovery = .analyzing } }
+            try? await Task.sleep(for: .milliseconds(420))
+            if discovery.isRunning { withAnimation(Motion.gentle) { discovery = .grouping } }
+            try? await Task.sleep(for: .milliseconds(420))
+            if discovery.isRunning { withAnimation(Motion.gentle) { discovery = .saving } }
+        }
+
+        do {
+            let result = try await intelligence.rebuildCollections()
+            pacing.cancel()
+            await load()
+            withAnimation(Motion.standard) { discovery = phase(for: result) }
+            if case .complete = discovery { Haptics.success() } else { Haptics.tap() }
+        } catch {
+            pacing.cancel()
+            withAnimation(Motion.standard) {
+                discovery = .failed((error as? APIError)?.userMessage
+                                    ?? "Couldn't look for groupings.")
+            }
+            Haptics.error()
+        }
+        scheduleDiscoveryDismiss()
+    }
+
+    /// The result, as something to say.
+    private func phase(for result: CollectionDiscovery) -> DiscoveryPhase {
+        switch result.status {
+        case "not_enough_content":
+            return .notEnoughContent(minimum: result.minimum ?? 3)
+        case "empty_library":
+            return .notEnoughContent(minimum: result.minimum ?? 3)
+        default:
+            if result.foundNothingNew { return .noNewGroups }
+            return .complete(created: result.created, updated: result.updated)
+        }
+    }
+
+    /// A result is news; guidance is not.
+    ///
+    /// "2 new groups" and "No new groups yet" are answers to something the user
+    /// just did, and become clutter once read — they fade. "Save a few more
+    /// things" is an instruction they have to act on, and a failure has a
+    /// button on it; both stay until the next attempt.
+    private func scheduleDiscoveryDismiss() {
+        switch discovery {
+        case .complete, .noNewGroups: break
+        default: return
+        }
+        discoveryDismiss = Task { @MainActor in
+            try? await Task.sleep(for: .seconds(4))
+            guard !Task.isCancelled else { return }
+            withAnimation(Motion.gentle) { discovery = .idle }
+        }
+    }
+
+    private func retry() {
+        Task { await rebuild() }
     }
 }
 
@@ -237,5 +315,87 @@ struct CollectionCard: View {
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(collection.name), \(collection.countLabel)")
         .accessibilityHint("Opens this collection")
+    }
+}
+
+/// What Sava is doing, said in place.
+///
+/// Inline at the top of the grid rather than a modal or a lone spinner: the
+/// answer is about *this list*, and the new groups appear directly underneath
+/// it. A HUD would cover the very thing the user is waiting to see.
+///
+/// The three running phases share one layout so advancing between them changes
+/// only the words — no reflow, no spinner appearing and disappearing.
+private struct DiscoveryBanner: View {
+    let phase: DiscoveryPhase
+    let onRetry: () -> Void
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        HStack(spacing: Space.m) {
+            mark
+            Text(phase.message ?? "")
+                .font(SavaType.callout)
+                .foregroundStyle(textColor)
+                .fixedSize(horizontal: false, vertical: true)
+                .contentTransition(.opacity)
+            Spacer(minLength: Space.s)
+            if phase.isFailure {
+                Button("Try again", action: onRetry)
+                    .font(SavaType.caption)
+                    .foregroundStyle(SavaColor.onAccentTint)
+                    .padding(.horizontal, Space.m)
+                    .frame(minHeight: 34)
+                    .background(SavaColor.accentTint, in: Capsule())
+                    .buttonStyle(.plain)
+            }
+        }
+        .padding(Space.m)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(SavaColor.surface,
+                    in: RoundedRectangle(cornerRadius: Radius.control, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
+            .strokeBorder(borderColor, lineWidth: 0.5))
+        .screenPadding()
+        .transition(.opacity.combined(with: .move(edge: .top)))
+        .animation(Motion.respecting(Motion.standard, reduceMotion), value: phase)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(phase.message ?? "")
+        .accessibilityAddTraits(phase.isRunning ? .updatesFrequently : [])
+    }
+
+    @ViewBuilder private var mark: some View {
+        switch phase {
+        case .complete:
+            Image(systemName: "checkmark.circle.fill")
+                .font(.system(size: 16))
+                .foregroundStyle(SavaColor.accentTint)
+        case .failed:
+            Image(systemName: "exclamationmark.triangle")
+                .font(.system(size: 15))
+                .foregroundStyle(SavaColor.danger)
+        case .noNewGroups, .notEnoughContent:
+            Image(systemName: "sparkle.magnifyingglass")
+                .font(.system(size: 15))
+                .foregroundStyle(SavaColor.tertiary)
+        default:
+            ProgressView()
+                .controlSize(.small)
+                .tint(SavaColor.secondary)
+                .frame(width: 16, height: 16)
+        }
+    }
+
+    private var textColor: Color {
+        switch phase {
+        case .failed: return SavaColor.primary
+        case .noNewGroups, .notEnoughContent: return SavaColor.secondary
+        default: return SavaColor.primary
+        }
+    }
+
+    private var borderColor: Color {
+        phase.isFailure ? SavaColor.danger.opacity(0.4) : SavaColor.hairline
     }
 }

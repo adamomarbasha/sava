@@ -53,11 +53,13 @@ struct RootView: View {
     /// Show the tour only to an account that has never finished it.
     private func showOnboarding(for user: User) -> Bool {
         #if DEBUG
-        // A dev build asked for a specific screen, and the tour would sit in
-        // front of it: a fresh QA account has never finished onboarding, so
-        // every `SAVA_DEV_SCREEN` hook would open the tour instead of the
-        // screen under test. `onboarding` itself is of course exempt.
+        // A dev build asked for a specific screen or tab, and the tour would
+        // sit in front of it: a fresh QA account has never finished
+        // onboarding, so every `SAVA_DEV_*` entry point would open the tour
+        // instead of the thing under test. `onboarding` itself is of course
+        // exempt.
         if let screen = DevFlags.screen, !screen.isOnboarding { return false }
+        if DevFlags.initialTab != nil { return false }
         #endif
         return !onboardingDone && !OnboardingState.isComplete(for: user.id)
     }

@@ -47,6 +47,13 @@ enum DevFlags {
         Int(env["SAVA_DEV_ONBOARDING_STAGE"] ?? "")
     }
 
+    /// SAVA_DEV_REGROUP = 1 — run "Look for new groupings" on appear.
+    ///
+    /// The control lives inside a toolbar `Menu`, which cannot be opened from
+    /// the command line, so this is how the discovery states get exercised and
+    /// screenshotted. It drives the same method the menu item does.
+    static var autoRegroup: Bool { env["SAVA_DEV_REGROUP"] == "1" }
+
     /// SAVA_DEV_ASK = a question to send automatically on the Ask tab.
     static var askQuestion: String? { env["SAVA_DEV_ASK"] }
 
@@ -72,6 +79,7 @@ enum DevFlags {
     /// lower half of a design can be captured without driving the UI.
     static var scrollToBottom: Bool { env["SAVA_DEV_SCROLL"] == "bottom" }
     #else
+    static var autoRegroup: Bool { false }
     static var onboardingStage: Int? { nil }
     static var refreshRuns: Int { 0 }
     static var shortFormAdvance: Int { 0 }
