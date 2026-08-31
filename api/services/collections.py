@@ -631,11 +631,28 @@ def rebuild_auto_collections(db, user_id: int, *,
     # looked yet — and the fix is processing, not a lower threshold.
     if not report and with_signal * 2 < len(library):
         timings["total"] = int((time.monotonic() - started) * 1000)
-        logger.info("regroup user=%s saves=%s with_signal=%s -> awaiting understanding",
-                    user_id, len(library), with_signal)
+        logger.info("regroup user=%s saves=%s with_signal=%s removed=%s "
+                    "-> awaiting understanding",
+                    user_id, len(library), with_signal, removed_count)
+        # The real counters, not zeros.
+        #
+        # Retirement happens above and is already committed by the time this
+        # returns, so a run that retires a stale grouping and *then* finds the
+        # library unread had genuinely deleted rows — reporting `removed: 0`
+        # would have denied it. `proposed` is likewise real: a candidate that
+        # collides with a manual name or an already-claimed signature is
+        # skipped before it reaches `report`, so `candidates` can be non-empty
+        # here. `created` and `updated` are necessarily 0 when `report` is
+        # empty, but they are read from the counters rather than asserted, so
+        # this stays correct if the loop changes.
+        #
+        # `items_covered` is included because every other success path returns
+        # it, and a client should not have to know which branch it got.
         return {"status": "awaiting_understanding", "collections": [],
                 "saves_considered": len(library), "with_signal": with_signal,
-                "proposed": 0, "created": 0, "updated": 0, "removed": 0,
+                "items_covered": len({m for c in candidates for m in c.members}),
+                "proposed": len(candidates), "created": created_count,
+                "updated": updated_count, "removed": removed_count,
                 "timings_ms": timings}
 
     timings["total"] = int((time.monotonic() - started) * 1000)

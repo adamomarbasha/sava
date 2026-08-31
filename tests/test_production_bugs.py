@@ -19,8 +19,8 @@ import pathlib
 
 import pytest
 
-from api.models import (Bookmark, CanonicalContent, ContentUnderstanding,
-                        ProcessingState)
+from api.models import (Bookmark, CanonicalContent, Collection,
+                        ContentUnderstanding, ProcessingState)
 from api.services.collections import rebuild_auto_collections
 from api.services import grouping
 
@@ -127,6 +127,76 @@ class TestGroupingOnUnreadSaves:
         assert result["saves_considered"] == 13
         assert result["with_signal"] == 0
         assert result["collections"] == []
+
+    def test_a_retirement_is_reported_even_when_the_library_is_unread(
+            self, clean_db, user):
+        """The counters in this branch are real, not zeros.
+
+        Retirement runs and commits *before* the awaiting-understanding return.
+        A library that grouped once and has since lost its metadata retires the
+        stale grouping and then reports that nothing has been read — and the
+        first version of this branch answered `removed: 0` while the rows had
+        in fact been deleted, which is the one number that would have told
+        somebody their collection was gone.
+        """
+        for _ in range(3):
+            _save(clean_db, user, title="Pasta", creator="cookwithme")
+        first = rebuild_auto_collections(clean_db, user.id)
+        assert first["created"] == 1, "expected one grouping to exist first"
+        signature = first["collections"][0]["signature"]
+
+        # The metadata goes away — a re-process that cleared it, say. Nothing
+        # in the library carries a signal any more.
+        clean_db.query(ContentUnderstanding).delete()
+        for cc in clean_db.query(CanonicalContent).all():
+            cc.creator_name = None
+            cc.title = None
+            cc.processing_state = ProcessingState.PARTIAL
+            cc.processing_level = 1
+        clean_db.commit()
+
+        result = rebuild_auto_collections(clean_db, user.id)
+
+        assert result["status"] == "awaiting_understanding"
+        assert result["removed"] == 1, "the retirement must be reported"
+        # And it really happened, rather than merely being counted.
+        assert clean_db.query(Collection).filter(
+            Collection.user_id == user.id,
+            Collection.signature == signature).count() == 0
+
+    def test_the_branch_returns_what_every_other_success_returns(
+            self, clean_db, user):
+        """A client should not have to know which branch answered it.
+
+        `items_covered` was missing here while every other success path carried
+        it, so the response changed shape depending on the library's state.
+        """
+        for _ in range(3):
+            _save(clean_db, user, title="Pasta", creator="cookwithme")
+        ok = rebuild_auto_collections(clean_db, user.id)
+        assert ok["status"] == "ok"
+
+        for _ in range(13):
+            _save(clean_db, user, title=None, creator=None, understood=False)
+        clean_db.query(ContentUnderstanding).delete()
+        for cc in clean_db.query(CanonicalContent).all():
+            cc.creator_name = None
+            cc.title = None
+        clean_db.commit()
+
+        awaiting = rebuild_auto_collections(clean_db, user.id)
+        assert awaiting["status"] == "awaiting_understanding"
+        assert set(ok) <= set(awaiting), \
+            f"missing from the awaiting branch: {set(ok) - set(awaiting)}"
+
+    def test_the_reported_counts_are_not_hardcoded(self, clean_db, user):
+        """Read from the counters, so the branch cannot drift from the loop."""
+        src = pathlib.Path("api/services/collections.py").read_text()
+        branch = src[src.index('"status": "awaiting_understanding"'):]
+        branch = branch[:branch.index("timings_ms")]
+        for field in ('"removed": removed_count', '"proposed": len(candidates)',
+                      '"created": created_count', '"updated": updated_count'):
+            assert field in branch, field
 
     def test_the_same_library_groups_once_it_has_been_read(self, clean_db, user):
         """The algorithm was never the problem."""
