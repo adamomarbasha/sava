@@ -21,11 +21,12 @@ import SwiftUI
 ///     is not a funnel.
 ///   * **No permission prompts.** Nothing asks for notifications, photos or
 ///     tracking. Sava asks in context, when it needs something.
-///   * **Never a trap.** Every stage can be left, and Stage 4's setup is
-///     optional in full.
-///   * **Nothing is faked.** The Shortcut CTA opens Apple's own installation
-///     sheet; Settings opens through the supported system API. No screen
-///     claims Sava can capture anything it was not given a link to.
+///   * **Never a trap.** Every stage can be left, and nothing is required to
+///     finish.
+///   * **Nothing is faked, and nothing is oversold.** No screen claims Sava
+///     can capture anything it was not given a link to, and first run never
+///     asks for the optional iCloud Shortcut — neither save method needs it,
+///     so that CTA lives in Learn Sava where somebody can evaluate it.
 ///   * **Reduce Motion is a real path**, not a degraded one: every demo has a
 ///     finished still composition that says the whole thing in one frame.
 struct OnboardingView: View {
@@ -37,8 +38,6 @@ struct OnboardingView: View {
     @State private var savedInDemo: Set<String> = []
     @State private var demoPlatform: DemoPlatform = .tiktok
     @State private var demoMethod: SaveMethod = .shareSheet
-    @State private var shortcutOpened = false
-    @State private var settingsOpened = false
 
     @Environment(\.openURL) private var openURL
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -131,39 +130,41 @@ struct OnboardingView: View {
                 lede: "You never have to open Sava to save something.")
             SaveFlowDemo(platform: $demoPlatform, method: $demoMethod)
 
-            if demoMethod == .shareSheet {
-                // The Action Button path fills this space with `ShortcutChain`.
-                // Rather than leave the share path visibly emptier — which
-                // reads as the lesser option when it is in fact the one that
-                // needs no setup — say where it works. It is the question
-                // people actually have next.
-                VStack(alignment: .leading, spacing: Space.m) {
-                    SectionHeader(text: "Works anywhere there's a share button")
-                    ShareTargets()
-                }
-                .transition(.opacity)
-            }
-
             if demoMethod == .actionButton {
-                VStack(alignment: .leading, spacing: Space.m) {
-                    SectionHeader(text: "The Shortcut is what makes that work")
-                    ShortcutChain()
-                    Button(action: addShortcut) {
-                        Text(shortcutOpened ? "Open the Shortcut again"
-                                            : "Add Sava Shortcut")
+                // One line, not a second diagram.
+                //
+                // This was `ActionButtonChain` — assign → copy → press → saved
+                // — directly under a flow that had *just* shown copy → press →
+                // saved. Two chains ending in "Saved" on one screen is the
+                // docs-style duplication the tour is meant to avoid. The only
+                // thing the diagram above does not cover is the one-time
+                // assignment, so that is all this says.
+                HStack(alignment: .top, spacing: Space.m) {
+                    Image(systemName: "gear")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(SavaColor.accentTint)
+                        .frame(width: 20)
+                    // Two `Text`s, not markdown.
+                    //
+                    // `Text` parses markdown only from a single string
+                    // *literal*; a `+` concatenation is an expression, so
+                    // `**bold**` rendered as literal asterisks on screen.
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Settings → Action Button → Shortcut")
                             .font(SavaType.caption)
-                            .foregroundStyle(SavaColor.onAccentTint)
-                            .frame(maxWidth: .infinity)
-                            .frame(minHeight: 44)
-                            .background(SavaColor.accentTint, in: Capsule())
+                            .foregroundStyle(SavaColor.secondary)
+                        Text("Assign it once. “Save to Sava” is already there "
+                             + "— nothing to install.")
+                            .font(SavaType.meta)
+                            .foregroundStyle(SavaColor.tertiary)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
-                    .buttonStyle(.plain)
-                    Text("Opens Apple's Shortcuts app, which asks you to confirm. "
-                         + "You can also do this later from Profile.")
-                        .font(SavaType.meta)
-                        .foregroundStyle(SavaColor.tertiary)
-                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 0)
                 }
+                .padding(Space.m)
+                .background(SavaColor.fill,
+                            in: RoundedRectangle(cornerRadius: Radius.control,
+                                                 style: .continuous))
                 .transition(.opacity)
             }
         }
@@ -184,25 +185,39 @@ struct OnboardingView: View {
         }
     }
 
-    /// 04 — you're ready. Activation, and nothing is required.
+    /// 04 — the payoff.
+    ///
+    /// This was a setup form: three status rows, a Settings breadcrumb, and an
+    /// "Open Settings" button in the same citron as the real CTA, so the screen
+    /// had two things competing to be pressed and ended on a chore. Setup
+    /// detail belongs in Learn Sava, which is where somebody goes when they
+    /// have decided to do it.
+    ///
+    /// What belongs here is what they now have. The counter is the library they
+    /// just built in Stage 1 — their own actions, played back — so the last
+    /// screen is evidence rather than a promise.
     private var stageReady: some View {
-        VStack(alignment: .leading, spacing: Space.l) {
+        VStack(alignment: .leading, spacing: Space.xl) {
             StageHeadline(
-                title: "You're ready.",
-                lede: "Sharing works now. The rest is optional.")
-            SetupChecklist(
-                shortcutOpened: shortcutOpened,
-                settingsOpened: settingsOpened,
-                onAddShortcut: addShortcut,
-                onOpenSettings: openSettings)
+                title: savedInDemo.isEmpty ? "Ready when you are."
+                                           : "That's the whole idea.",
+                lede: "Save from anywhere. Sava reads it. You find it later by "
+                    + "whatever you happen to remember.")
 
-            Text("All of this lives in Profile → Learn Sava, so you can come "
-                 + "back to it whenever you like.")
-                .font(SavaType.meta)
-                .foregroundStyle(SavaColor.tertiary)
-                .fixedSize(horizontal: false, vertical: true)
+            ReadyRecap(savedCount: savedInDemo.count)
+
+            VStack(alignment: .leading, spacing: Space.s) {
+                Text("Want one-press saving?")
+                    .font(SavaType.body)
+                    .foregroundStyle(SavaColor.primary)
+                Text("Assign “Save to Sava” to the Action Button in Settings — "
+                     + "it's already there. Profile → Learn Sava walks you "
+                     + "through it whenever you like.")
+                    .font(SavaType.meta)
+                    .foregroundStyle(SavaColor.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
-        .animation(Motion.respecting(Motion.standard, reduceMotion), value: settingsOpened)
     }
 
     // MARK: Footer
@@ -244,22 +259,5 @@ struct OnboardingView: View {
         onFinish()
     }
 
-    /// Opens the official iCloud Shortcut. Apple shows its own Add Shortcut
-    /// sheet; Sava never writes to the Shortcuts library and does not pretend to.
-    private func addShortcut() {
-        Haptics.tap()
-        shortcutOpened = true
-        openURL(AppConfig.saveShortcutURL)
-    }
 
-    /// Opens Settings through the only URL Apple supports, which lands on
-    /// Sava's own Settings page rather than on Action Button. The trail shown
-    /// alongside is the rest of the walk. See `ActionButtonSupport`.
-    private func openSettings() {
-        Haptics.tap()
-        withAnimation(Motion.respecting(Motion.standard, reduceMotion)) {
-            settingsOpened = true
-        }
-        if let url = ActionButtonSupport.appSettingsURL { openURL(url) }
-    }
 }

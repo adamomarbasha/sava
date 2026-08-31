@@ -26,9 +26,10 @@ struct SetupChecklist: View {
                 title: "Sava Shortcut",
                 detail: shortcutOpened
                     ? "Finish adding it in Shortcuts, then come back."
-                    : "Needed for the Action Button. Apple will ask you to confirm.",
+                    : "Optional. Lets the Action Button grab a link without "
+                      + "copying it first.",
                 status: shortcutOpened ? .inProgress : .todo,
-                actionTitle: shortcutOpened ? "Open again" : "Add Shortcut",
+                actionTitle: shortcutOpened ? "Open again" : "Add",
                 action: onAddShortcut)
 
             if ActionButtonSupport.isAvailable {
@@ -42,7 +43,7 @@ struct SetupChecklist: View {
                 VStack(alignment: .leading, spacing: Space.m) {
                     SetupRow(
                         title: "Action Button",
-                        detail: "One press saves whatever link you copied.",
+                        detail: "Copy a link, press the button. No Shortcut needed.",
                         status: settingsOpened ? .inProgress : .todo,
                         action: nil)
                         .padding(.bottom, -Space.s)
@@ -160,18 +161,22 @@ private struct SetupRow: View {
 
 // MARK: - Why the Shortcut exists
 
-/// The chain, drawn.
+/// The Action Button chain, drawn.
 ///
-/// "Install this Shortcut" is a strange thing to ask of somebody who has just
-/// opened your app, and the previous screen asked it without ever saying what
-/// it bought them. This is the answer: four links ending in a save, so the
-/// Shortcut is visibly a *means* rather than a step.
-struct ShortcutChain: View {
+/// This used to teach "Add the Shortcut → assign it → copy a link → press",
+/// which overstated the setup. `SavaShortcuts` is an `AppShortcutsProvider`, so
+/// **"Save to Sava" is already in Settings → Action Button → Shortcut** — there
+/// is nothing to install. The real chain is one assignment and then a copy.
+///
+/// The published iCloud Shortcut still exists and does more (it can read a URL
+/// off the screen without copying), but it is an upgrade, not a prerequisite,
+/// and onboarding is the wrong place to sell it.
+struct ActionButtonChain: View {
     private let links: [(String, String)] = [
-        ("plus.app", "Add the\nShortcut"),
-        ("button.horizontal.top.press", "Assign it to\nthe button"),
+        ("gear", "Assign it\nin Settings"),
         ("link", "Copy any\nlink"),
-        ("bookmark.fill", "Press —\nsaved"),
+        ("button.horizontal.top.press", "Press the\nbutton"),
+        ("bookmark.fill", "Saved"),
     ]
 
     var body: some View {
@@ -181,7 +186,7 @@ struct ShortcutChain: View {
                     Image(systemName: link.0)
                         .font(.system(size: 15, weight: .medium))
                         .foregroundStyle(index == links.count - 1
-                                         ? SavaColor.accent : SavaColor.secondary)
+                                         ? SavaColor.accentTint : SavaColor.secondary)
                         .frame(width: 38, height: 38)
                         .background(SavaColor.fill, in: Circle())
                     Text(link.1)
@@ -200,8 +205,8 @@ struct ShortcutChain: View {
             }
         }
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Add the Shortcut, assign it to the Action Button, "
-                            + "copy any link, then press to save.")
+        .accessibilityLabel("Assign Save to Sava in Settings, copy any link, "
+                            + "press the button, and it is saved.")
     }
 }
 
@@ -343,5 +348,59 @@ struct FlowLayout: Layout {
         }
         if !current.indices.isEmpty { rows.append(current) }
         return rows
+    }
+}
+
+/// The last screen's evidence.
+///
+/// Three facts about what the user now has, each tied to something they saw
+/// happen in the tour rather than to a feature list. The first counts the cards
+/// they actually dragged in during Stage 1 — the tour ends by handing their own
+/// actions back to them.
+struct ReadyRecap: View {
+    let savedCount: Int
+
+    private var rows: [(String, String, String)] {
+        [("tray.full", savedCount > 0 ? "\(savedCount) saved already"
+                                      : "Save from any app",
+          "Share sheet, or one press"),
+         ("text.magnifyingglass", "Findable by anything",
+          "A word, a phrase, or the gist"),
+         ("bubble.left.and.text.bubble.right", "Ask about any of it",
+          "Sava has read what you saved")]
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ForEach(Array(rows.enumerated()), id: \.offset) { index, row in
+                if index > 0 {
+                    Rectangle().fill(SavaColor.hairline).frame(height: 0.5)
+                }
+                HStack(spacing: Space.m) {
+                    Image(systemName: row.0)
+                        .font(.system(size: 15, weight: .medium))
+                        // `accentTint`, not `accent`: at glyph size the fill
+                        // token inverts to ink on paper.
+                        .foregroundStyle(SavaColor.accentTint)
+                        .frame(width: 24)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(row.1)
+                            .font(SavaType.title)
+                            .foregroundStyle(SavaColor.primary)
+                        Text(row.2)
+                            .font(SavaType.meta)
+                            .foregroundStyle(SavaColor.tertiary)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .padding(.vertical, Space.m)
+                .padding(.horizontal, Space.l)
+                .accessibilityElement(children: .combine)
+            }
+        }
+        .background(SavaColor.surface,
+                    in: RoundedRectangle(cornerRadius: Radius.card, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: Radius.card, style: .continuous)
+            .strokeBorder(SavaColor.hairline, lineWidth: 0.5))
     }
 }

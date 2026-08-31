@@ -103,15 +103,20 @@ struct SaveAnywhereView: View {
 
     private var shortcutSection: some View {
         VStack(alignment: .leading, spacing: Space.m) {
-            SectionHeader(text: "The Sava Shortcut")
+            SectionHeader(text: "The Sava Shortcut (optional)")
 
-            Text("Only needed for the Action Button. Sharing works without it.")
+            // Corrected framing.
+            //
+            // This said "Only needed for the Action Button", which is not true:
+            // `SavaShortcuts` is an `AppShortcutsProvider`, so "Save to Sava"
+            // already appears in Settings → Action Button → Shortcut with
+            // nothing installed. The Shortcut is an *upgrade* — it can read a
+            // URL off the screen, so it saves without copying first.
+            Text("Neither way of saving needs it. Add it if you want the Action "
+                 + "Button to grab the link off the screen without copying.")
                 .font(SavaType.body)
                 .foregroundStyle(SavaColor.primary)
                 .fixedSize(horizontal: false, vertical: true)
-
-            ShortcutChain()
-                .padding(.vertical, Space.s)
 
             SavaButton(title: "Add Sava Shortcut") { addShortcut() }
 
@@ -155,6 +160,9 @@ struct SaveAnywhereView: View {
                 .font(SavaType.body)
                 .foregroundStyle(SavaColor.primary)
                 .fixedSize(horizontal: false, vertical: true)
+
+            ActionButtonChain()
+                .padding(.vertical, Space.s)
 
             SettingsPathTrail()
 

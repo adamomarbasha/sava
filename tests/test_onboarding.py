@@ -213,9 +213,18 @@ class TestSaveWorkflowsAreTaught:
         code = code_of(*FLOW)
         assert '"Nothing to set up"' in code
 
-    def test_the_action_button_is_stated_to_need_the_shortcut(self):
+    def test_the_action_button_does_not_claim_to_need_the_shortcut(self):
+        """It does not.
+
+        `SavaShortcuts` is an `AppShortcutsProvider`, so "Save to Sava" appears
+        in Settings → Action Button → Shortcut on its own — nothing is
+        installed first. The tour used to say "Needs the Shortcut", which sent
+        people to install something they did not need before they could use the
+        feature.
+        """
         code = code_of(*FLOW)
-        assert '"Needs the Shortcut"' in code
+        assert '"Needs the Shortcut"' not in code
+        assert '"One-time setup"' in code
 
     def test_instagram_is_taught_copy_link_because_it_has_no_on_screen_url(self):
         """This is the one platform where the distinction is load-bearing:
@@ -238,13 +247,20 @@ class TestSaveWorkflowsAreTaught:
 
 class TestShortcutCTA:
 
-    def test_onboarding_opens_the_centralised_url(self):
-        """Not a literal — one source of truth, already asserted by
-        `test_ios_shortcut.py` to be the official link."""
+    def test_first_run_does_not_push_the_optional_shortcut(self):
+        """The Shortcut is an upgrade, not a prerequisite — neither save method
+        needs it. Asking somebody to install it before they have saved anything
+        is setup for a benefit they cannot evaluate yet, so the CTA lives in
+        Learn Sava instead."""
         code = code_of(*VIEW)
+        assert "AppConfig.saveShortcutURL" not in code
+        assert OFFICIAL_SHORTCUT not in code
+
+    def test_learn_sava_still_offers_it(self):
+        code = code_of(*LEARN)
         assert "AppConfig.saveShortcutURL" in code
         assert OFFICIAL_SHORTCUT not in code, \
-            "the URL must not be duplicated into onboarding"
+            "the URL must not be duplicated out of AppConfig"
 
     def test_the_official_url_is_still_exactly_right(self):
         assert OFFICIAL_SHORTCUT in read("SavaShared", "AppConfig.swift")
@@ -254,15 +270,22 @@ class TestShortcutCTA:
                 if OFFICIAL_SHORTCUT in p.read_text(encoding="utf-8", errors="replace")]
         assert len(hits) == 1, [str(p.name) for p in hits]
 
-    def test_the_shortcut_is_explained_once_not_twice(self):
-        """The previous tour put a full Shortcut card on stage 2 *and* stage 4.
+    def test_setup_is_explained_once_not_twice(self):
+        """The tour used to explain the Shortcut on stage 2 *and* stage 4.
 
-        It now appears inside the Action Button path and again only as a status
-        row on the final screen, so the explanation is not repeated.
+        Setup now appears once, in the Action Button path, and the final screen
+        is a payoff rather than a second setup form.
         """
         code = code_of(*VIEW)
-        assert code.count("ShortcutChain()") == 1, \
-            "the Shortcut explainer belongs on exactly one stage"
+        # No chain in the tour at all: the flow diagram directly above already
+        # shows copy -> press -> saved, so a second chain ending in "Saved" was
+        # pure duplication. Only the one thing the diagram cannot show — the
+        # one-time assignment — is stated, as a single line.
+        assert "ActionButtonChain()" not in code
+        assert "SetupChecklist(" not in code
+        assert "Settings → Action Button → Shortcut" in read(*VIEW)
+        # The full chain still exists where reference detail belongs.
+        assert "ActionButtonChain()" in code_of(*LEARN)
 
     def test_the_shortcut_is_presented_as_the_action_buttons_prerequisite(self):
         """Not as a third way to save — it is not one."""
@@ -271,13 +294,17 @@ class TestShortcutCTA:
             "the Shortcut explainer must be tied to the Action Button path"
 
     def test_nothing_claims_to_install_the_shortcut_itself(self):
-        assert "openURL(AppConfig.saveShortcutURL)" in code_of(*VIEW)
+        """Asserted where the CTA now lives. Sava never writes to the Shortcuts
+        library — it opens Apple's own installation sheet and stops."""
+        assert "openURL(shortcut)" in code_of(*LEARN)
 
-    def test_the_chain_explains_why_the_shortcut_exists(self):
+    def test_the_chain_explains_the_real_action_button_flow(self):
+        """Assign, copy, press — no installation step, because there is none."""
         code = code_of(*SETUP)
-        assert "struct ShortcutChain" in code
-        for step in ("Add the", "Assign it", "Copy any", "Press"):
+        assert "struct ActionButtonChain" in code
+        for step in ("Assign it", "Copy any", "Press the", "Saved"):
             assert step in code, step
+        assert "Add the" not in code, "there is nothing to add"
 
 
 # ─── The Action Button and Settings ─────────────────────────────────────────

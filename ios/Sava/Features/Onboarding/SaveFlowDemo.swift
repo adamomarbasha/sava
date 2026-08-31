@@ -61,8 +61,9 @@ struct SaveFlowDemo: View {
                         platform = option
                     }
                 } label: {
-                    HStack(spacing: 6) {
-                        PlatformDot(platform: option.platform, size: 7)
+                    HStack(spacing: 7) {
+                        PlatformMark(platform: option.mark, size: 15,
+                                     monochrome: selected ? SavaColor.onAccent : nil)
                         Text(option.title)
                             .font(SavaType.caption)
                     }
@@ -339,6 +340,18 @@ enum DemoPlatform: String, CaseIterable, Identifiable {
         }
     }
 
+    /// The drawn brand mark.
+    var mark: SavaPlatform {
+        switch self {
+        case .tiktok: return .tiktok
+        case .instagram: return .instagram
+        case .youtube: return .youtube
+        }
+    }
+
+    /// What the share control is called in that app.
+    var shareVerb: String { mark.shareVerb }
+
     var title: String {
         switch self {
         case .tiktok: return "TikTok"
@@ -355,13 +368,7 @@ enum DemoPlatform: String, CaseIterable, Identifiable {
     /// What the share control is actually called in that app. Getting this
     /// wrong is how instructions stop matching the screen the user is looking
     /// at, which is the fastest way to lose them.
-    var shareLabel: String {
-        switch self {
-        case .tiktok:    return "Share"
-        case .instagram: return "Share to…"
-        case .youtube:   return "Share"
-        }
-    }
+
 }
 
 enum SaveMethod: String, CaseIterable, Identifiable {
@@ -378,10 +385,17 @@ enum SaveMethod: String, CaseIterable, Identifiable {
 
     /// Shown under the title in the picker. This is the distinction the old
     /// screen never made, and the single most useful sentence on it.
+    /// Shown under the title in the picker.
+    ///
+    /// The Action Button line used to read "Needs the Shortcut", which is
+    /// wrong. `SavaShortcuts` is an `AppShortcutsProvider`, so "Save to Sava"
+    /// appears in Settings → Action Button → Shortcut on its own — nothing has
+    /// to be installed first. What it does need is the one-time assignment,
+    /// and a link on the clipboard when pressed.
     var requirement: String {
         switch self {
         case .shareSheet:   return "Nothing to set up"
-        case .actionButton: return "Needs the Shortcut"
+        case .actionButton: return "One-time setup"
         }
     }
 
@@ -392,7 +406,7 @@ enum SaveMethod: String, CaseIterable, Identifiable {
                 FlowStep(id: "content", symbol: "", label: platform.title,
                          spoken: "the post in \(platform.title)", isContent: true),
                 FlowStep(id: "share", symbol: "square.and.arrow.up",
-                         label: platform.shareLabel, spoken: "tap Share"),
+                         label: platform.shareVerb, spoken: "tap Share"),
                 FlowStep(id: "sava", symbol: "", label: "Sava",
                          spoken: "choose Sava", isSava: true),
             ]
@@ -413,8 +427,8 @@ enum SaveMethod: String, CaseIterable, Identifiable {
     func explanation(for platform: DemoPlatform) -> String {
         switch self {
         case .shareSheet:
-            return "Open the post in \(platform.title), tap \(platform.shareLabel), "
-                + "then pick Sava. Works straight away."
+            return "In \(platform.title): \(platform.shareVerb), then Sava. "
+                + "Works the moment you install the app."
         case .actionButton:
             return platform == .instagram
                 ? "Instagram never puts the link on screen, so Copy Link is the "
